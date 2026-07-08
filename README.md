@@ -7,6 +7,14 @@ ready-to-paste **weekly update**.
 
 One Python file, standard library only, no pip installs, works offline.
 
+![Dashboard overview](docs/screenshots/overview.png)
+
+**How is this different from [ccusage](https://github.com/ryoppippi/ccusage)?**
+ccusage is a great token/cost counter. This focuses on *developer insights* —
+leverage ratio, exploration-vs-building, friction, per-project deep-dives —
+plus a **Weekly Report tab that writes your standup update for you**. And it
+needs no Node/npm: just Python, which you already have.
+
 ## Quick start
 
 ```
@@ -46,6 +54,13 @@ exploration-vs-building gauge. Then:
 - **✨ AI summary** (optional) — pipes the week through `claude -p` for a
   polished first-person paragraph. The only feature that costs tokens, and
   only when you press it.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![You vs Claude](docs/screenshots/you-vs-claude.png) | ![Charts](docs/screenshots/charts.png) |
+| ![Tables](docs/screenshots/tables.png) | ![Weekly Report](docs/screenshots/weekly-report.png) |
 
 ## Privacy
 

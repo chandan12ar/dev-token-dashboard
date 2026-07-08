@@ -108,6 +108,7 @@ class Stats:
         self.seen_tool_ids = set()
         self.errors = 0
         self.tool_errors = 0
+        self.parse_errors = 0   # log entries we failed to parse (format drift)
 
     # -- merge helpers ------------------------------------------------------
     def touch_session(self, sid, ts, project):
@@ -350,7 +351,10 @@ class Scanner:
                     try:
                         parse_entry(e, project, st)
                     except Exception:
-                        pass
+                        st.parse_errors += 1
+            if st.parse_errors:
+                print(f"[warn] {st.parse_errors} log entries could not be parsed "
+                      "(log format may have changed - stats may be incomplete)")
             return st
 
 
@@ -503,6 +507,7 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
             "reads": tot("reads"), "writes": tot("writes"),
             "human_tokens": tot("human_tokens"),
             "leverage": round(tot("output") / tot("human_tokens"), 1) if tot("human_tokens") else 0,
+            "parse_errors": st.parse_errors,
         },
         "days": [{"day": d, **st.days[d], "cost": round(st.days[d]["cost"], 3)} for d in all_days],
         "models": models,
@@ -713,6 +718,8 @@ async function load(){
 const r=await fetch('/api/stats?days='+days);D=await r.json();
 document.getElementById('upd').textContent=D.generated;
 document.getElementById('root').textContent=D.root||'~/.claude/projects';
+var pw=document.getElementById('parsewarn');
+if(D.totals.parse_errors>0){if(!pw){pw=document.createElement('div');pw.id='parsewarn';pw.style.cssText='color:#f0883e;font-size:12px;margin-top:4px';document.querySelector('.sub').after(pw);}pw.textContent='\u26a0 '+D.totals.parse_errors.toLocaleString()+' log entries could not be parsed - the log format may have changed; stats may be incomplete.';}else if(pw){pw.remove();}
 if(wIdx===null&&D.weeks.length)wIdx=D.weeks.length-1;
 if(wIdx!==null&&wIdx>=D.weeks.length)wIdx=D.weeks.length-1;
 render();}
