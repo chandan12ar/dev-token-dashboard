@@ -63,7 +63,19 @@ requests at all** and works fully offline.
 - Per-project table (tokens, LoC, prompts, sessions, est. cost)
 - Longest prompts and most-edited files
 
-**Time ranges**: 7 / 30 / 90 days / all time.
+**Time ranges**: 7 / 30 / 90 days / all time, plus a custom from–to date
+picker. The selected range applies to *everything* on the Dashboard tab —
+charts, tables, and the project deep-dive — and KPI cards show a Δ vs the
+previous equal-length window.
+
+**Momentum bar**: current & best day streak, all-time active days, and
+optional goal progress bars (configure the `GOALS` dict in the script).
+
+**Exports**: copy a text summary to the clipboard, download the daily table
+as CSV, or the full `/api/stats` payload as JSON.
+
+The exact formula behind every one of these numbers is documented in
+[METRICS.md](METRICS.md).
 
 ## Weekly Report tab
 
@@ -108,6 +120,10 @@ python dev_token_dashboard.py --port 9000   # different port
 python dev_token_dashboard.py --dir <path>  # custom logs location
 python dev_token_dashboard.py --dump        # print raw stats JSON and exit
 ```
+
+On Windows, after editing the script, `Restart-Dashboard.bat` stops every
+running copy (matched by command line *and* by whoever owns port 8787) and
+relaunches one fresh windowless instance, then opens the browser.
 
 ## Auto-start at logon
 

@@ -28,20 +28,49 @@ Claude Code has been used (it reads `~/.claude/projects/`).
 
 Full instructions, auto-start at logon, and troubleshooting: **[SETUP.md](SETUP.md)**
 
+## What's new (v1.1)
+
+- **Complete UI redesign** — sticky glass header, icon KPI cards with accent
+  colors, gradient charts, dark theme polish, responsive layout, and a live
+  "0 tokens" status pill
+- **Custom date ranges** — a from–to date picker next to the 7/30/90/all
+  buttons; the whole page (every chart, table, and the project modal)
+  now respects the selected range, not just the headline KPIs
+- **Period-over-period deltas** — KPI cards show ▲/▼ % vs the previous
+  equal-length window
+- **Momentum bar** — current & best day **streak**, all-time active days,
+  and optional **personal goals** with progress bars (daily LoC, daily /
+  weekly token budgets — set them in the `GOALS` dict)
+- **Exports** — copy a text summary, download the daily table as **CSV**,
+  or the full stats payload as **JSON**
+- **Sturdier AI summary** — resolves the `claude` executable directly,
+  5-minute timeout, and real error messages when it fails
+- **Restart scripts** — `Restart-Dashboard.bat` kills every running copy
+  and relaunches a fresh windowless instance (handy after editing the script)
+- **Accuracy fixes** — session count/average now follow the selected range,
+  timestamps are bucketed in your local timezone, and avg prompt words is
+  range-scoped
+
+Full formula reference for every metric: **[docs/METRICS.md](docs/METRICS.md)**
+
 ## What you get
 
 ### Dashboard tab
 - **KPI cards** — input/output tokens, cache read + hit %, estimated API
-  cost, lines of code Claude wrote, prompts, sessions, interruptions +
-  tool errors, your typed tokens, and your **leverage ratio** (Claude
-  output tokens per token you type)
+  cost, lines of code Claude wrote, prompts, sessions, friction (interruptions
+  + tool errors), your typed tokens, and your **leverage ratio** (Claude
+  output tokens per token you type) — each with a Δ vs the previous period
+- **Momentum bar** — day streak, best streak, active days, and goal
+  progress bars
 - **Charts** — daily tokens, "You vs Claude" balance (log scale), model
   doughnut + breakdown, LoC per day, **exploration vs building** per day,
   **friction** per day, tool & slash-command usage, weekday×hour heatmap
 - **Tables** — projects (click a row for a per-project deep-dive with its
   own timeline, sessions, and files), model breakdown, git branches,
   longest prompts, most-edited files
-- **Time ranges** — 7 / 30 / 90 days / all time
+- **Time ranges** — 7 / 30 / 90 days / all time / custom from–to dates;
+  everything on the page follows the selection
+- **Exports** — copy summary, CSV of daily stats, full JSON payload
 
 ### Weekly Report tab
 Built for standups. For any week it shows **what you worked on** (session
@@ -82,6 +111,7 @@ Your prompts and logs never leave your disk.
 
 - [SETUP.md](SETUP.md) — install, run, auto-start on Windows/macOS/Linux
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — architecture and every panel explained
+- [docs/METRICS.md](docs/METRICS.md) — **the math**: exact formula behind every metric, what each dashboard section means, and the known approximations
 - [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md) — why our token counting is the correct one
 
 ## License

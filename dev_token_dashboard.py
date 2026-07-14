@@ -39,6 +39,17 @@ PRICING = [
 ]
 DEFAULT_PRICE = {"in": 3.0, "out": 15.0}
 
+# ---------------------------------------------------------------------------
+# Optional personal goals / budgets. Set a value to show a progress bar on the
+# dashboard; leave 0 to hide that bar. These are targets for YOU — they have
+# nothing to do with Anthropic's opaque plan limits.
+# ---------------------------------------------------------------------------
+GOALS = {
+    "daily_loc": 500,        # target lines of code / day
+    "daily_tokens": 0,       # output-token budget / day (e.g. 1_000_000)
+    "weekly_tokens": 0,      # output-token budget / week (e.g. 5_000_000)
+}
+
 CODE_TOOLS_WRITE = {"Write", "Create"}          # tools whose 'content' is new code
 CODE_TOOLS_EDIT = {"Edit", "StrEditReplace"}    # tools whose 'new_string' is new code
 
@@ -72,7 +83,7 @@ def _day_stat():
     return {
         "input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
         "cost": 0.0, "loc": 0, "prompts": 0, "prompt_lines": 0,
-        "messages": 0, "human_tokens": 0,
+        "prompt_words": 0, "messages": 0, "human_tokens": 0,
         "reads": 0, "writes": 0, "interruptions": 0, "tool_errors": 0,
     }
 
@@ -127,7 +138,7 @@ class Stats:
         return s
 
 
-def parse_entry(entry: dict, project: str, st: Stats):
+def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None):
     etype = entry.get("type")
 
     # AI-generated session title lines (written by Claude Code itself)
@@ -150,6 +161,13 @@ def parse_entry(entry: dict, project: str, st: Stats):
         hour, weekday = ts.hour, ts.weekday()
     except Exception:
         pass
+
+    # date-window filter (used to build a range-scoped Stats). When no window is
+    # set (all-time) undated entries are kept exactly as before.
+    if min_day is not None and (not day or day < min_day):
+        return
+    if max_day is not None and (not day or day > max_day):
+        return
 
     sid = entry.get("sessionId")
     branch = entry.get("gitBranch") or "(none)"
@@ -198,6 +216,7 @@ def parse_entry(entry: dict, project: str, st: Stats):
         if day:
             st.days[day]["prompts"] += 1
             st.days[day]["prompt_lines"] += lines
+            st.days[day]["prompt_words"] += words
             # ~4 chars per token: estimate of tokens the human typed
             st.days[day]["human_tokens"] += max(1, len(text) // 4)
         st.prompt_words += words
@@ -208,7 +227,7 @@ def parse_entry(entry: dict, project: str, st: Stats):
         preview = text.strip().replace("\n", " ")[:120]
         st.longest_prompts.append((lines, words, preview, day))
         st.longest_prompts.sort(key=lambda x: -x[0])
-        del st.longest_prompts[8:]
+        del st.longest_prompts[40:]   # keep a pool so range-filtering still yields 8
         return
 
     # -------------------------------------------------------------- assistant
@@ -339,7 +358,7 @@ class Scanner:
                 self._entries.pop(path, None)
                 self._cache.pop(path, None)
 
-    def build_stats(self) -> Stats:
+    def build_stats(self, min_day=None, max_day=None) -> Stats:
         with self._lock:
             self.scan()
             st = Stats()
@@ -349,7 +368,7 @@ class Scanner:
                 project = project.lstrip("-").replace("--", "/").replace("-", "/")
                 for e in entries:
                     try:
-                        parse_entry(e, project, st)
+                        parse_entry(e, project, st, min_day, max_day)
                     except Exception:
                         st.parse_errors += 1
             if st.parse_errors:
@@ -422,6 +441,34 @@ def build_weeks(st: Stats):
     return out
 
 
+def active_streak(days_sorted):
+    """Return (current_streak, longest_streak) of consecutive active calendar days.
+    current_streak is counted backwards from the most recent active day."""
+    from datetime import date, timedelta
+    if not days_sorted:
+        return 0, 0
+    dset = set(days_sorted)
+    try:
+        d = date.fromisoformat(days_sorted[-1])
+    except ValueError:
+        return 0, 0
+    cur = 0
+    while d.isoformat() in dset:
+        cur += 1
+        d -= timedelta(days=1)
+    best = run = 0
+    prev = None
+    for ds in days_sorted:
+        try:
+            cd = date.fromisoformat(ds)
+        except ValueError:
+            continue
+        run = run + 1 if (prev and (cd - prev).days == 1) else 1
+        best = max(best, run)
+        prev = cd
+    return cur, best
+
+
 def stats_to_json(st: Stats, days_filter=None) -> dict:
     all_days = sorted(st.days.keys())
     if days_filter:
@@ -432,16 +479,22 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
         return sum(st.days[d][key] for d in all_days)
 
     prompts_total = tot("prompts")
-    sessions = []
+    # session count/avg respect the selected range (by the session's start day),
+    # so they stay consistent with the ranged token KPIs beside them.
+    sess_durs = []
     for sid, s in st.sessions.items():
         try:
-            a = datetime.fromisoformat(s["start"].replace("Z", "+00:00"))
-            b = datetime.fromisoformat(s["end"].replace("Z", "+00:00"))
+            a = datetime.fromisoformat(s["start"].replace("Z", "+00:00")).astimezone()
+            b = datetime.fromisoformat(s["end"].replace("Z", "+00:00")).astimezone()
+            sday = a.strftime("%Y-%m-%d")
             dur = max(0, (b - a).total_seconds())
         except Exception:
-            dur = 0
-        sessions.append(dur)
-    avg_session_min = (sum(sessions) / len(sessions) / 60) if sessions else 0
+            sday, dur = "", 0
+        if days_filter and sday not in dayset:
+            continue
+        sess_durs.append(dur)
+    sessions_count = len(sess_durs)
+    avg_session_min = (sum(sess_durs) / sessions_count / 60) if sessions_count else 0
 
     cache_read = tot("cache_read")
     inp = tot("input")
@@ -497,11 +550,11 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
             "cache_read": cache_read, "cache_write": tot("cache_write"),
             "cost": round(tot("cost"), 2), "loc": tot("loc"),
             "prompts": prompts_total, "messages": tot("messages"),
-            "sessions": len(st.sessions),
+            "sessions": sessions_count,
             "avg_session_min": round(avg_session_min, 1),
             "cache_efficiency": round(cache_eff, 1),
             "avg_prompt_lines": round(tot("prompt_lines") / prompts_total, 1) if prompts_total else 0,
-            "avg_prompt_words": round(st.prompt_words / prompts_total, 1) if prompts_total else 0,
+            "avg_prompt_words": round(tot("prompt_words") / prompts_total, 1) if prompts_total else 0,
             "interruptions": tot("interruptions"),
             "tool_errors": tot("tool_errors"),
             "reads": tot("reads"), "writes": tot("writes"),
@@ -519,7 +572,7 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
         "longest_prompts": [
             {"lines": l, "words": w, "preview": p, "day": d}
             for (l, w, p, d) in st.longest_prompts if d in dayset or not days_filter
-        ],
+        ][:8],
         "top_files": st.files_touched.most_common(8),
         "sessions_list": sessions_list,
         # weekly report data is always computed over all history
@@ -535,12 +588,19 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
 def ai_week_summary(week: dict) -> dict:
     import shutil
     import subprocess
-    if not shutil.which("claude"):
+    # Resolve the absolute path once. Relying on the child process to re-resolve
+    # "claude" on its own PATH (via `cmd /c claude`) is unreliable — it can pick
+    # up a stale/broken shim and silently produce no output.
+    exe = shutil.which("claude")
+    if not exe:
         return {"ok": False, "error": "claude CLI not found on PATH."}
+    sess = week["sessions"]
     bullets = "\n".join(
         "- [%s] %s (%s, %s min, %s LoC)" % (s["project"], s["title"], s["day"], s["min"], s["loc"])
-        for s in week["sessions"]
+        for s in sess[:50]
     ) or "- (no sessions logged this week)"
+    if len(sess) > 50:
+        bullets += "\n- ...and %d more sessions" % (len(sess) - 50)
     hours = round(week["minutes"] / 60, 1)
     prompt = (
         "Write a short weekly work update for a developer's standup, covering "
@@ -552,16 +612,26 @@ def ai_week_summary(week: dict) -> dict:
         % (week["start"], week["end"], bullets, week["loc"], week["prompts"],
            week["output"], hours, week["writes"], week["reads"])
     )
-    cmd = ["cmd", "/c", "claude", "-p"] if os.name == "nt" else ["claude", "-p"]
+    # Call the resolved executable directly, passing the prompt as an argument
+    # (avoids stdin-piping quirks). Only .cmd/.bat shims need the cmd wrapper.
+    if exe.lower().endswith((".cmd", ".bat")):
+        base = ["cmd", "/c", exe]
+    else:
+        base = [exe]
     try:
-        r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                           timeout=240, encoding="utf-8", errors="replace")
+        r = subprocess.run(base + ["-p", prompt], capture_output=True, text=True,
+                           timeout=300, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "claude -p timed out after 5 minutes."}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
     text = (r.stdout or "").strip()
-    if r.returncode != 0 or not text:
-        return {"ok": False, "error": (r.stderr or "claude -p returned no output").strip()[:500]}
-    return {"ok": True, "text": text}
+    if text:
+        return {"ok": True, "text": text}
+    # No summary text — surface the real reason instead of a generic message.
+    err = (r.stderr or "").strip()
+    return {"ok": False, "error": "claude -p exited %d with no text (%s)"
+            % (r.returncode, (err or "no stdout or stderr")[:400])}
 
 
 # ---------------------------------------------------------------------------
@@ -574,111 +644,224 @@ HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="/chart.umd.min.js"></script>
 <style>
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--txt:#e6edf3;--dim:#8b949e;
---acc:#58a6ff;--green:#3fb950;--orange:#d29922;--purple:#bc8cff;--red:#f85149}
+:root{
+--bg:#0a0c11;--bg-2:#0e1117;--surface:#141821;--surface-2:#1a1f2b;--elevated:#1e2431;
+--border:rgba(255,255,255,.07);--border-strong:rgba(255,255,255,.13);
+--txt:#e7edf5;--txt-2:#aab4c4;--dim:#7c8798;
+--acc:#e8916b;--acc-2:#d97757;--acc-soft:rgba(232,145,107,.14);
+--sky:#56a3f5;--violet:#a78bfa;--emerald:#34d399;--amber:#fbbf24;--rose:#fb7185;--teal:#2dd4bf;
+--green:#34d399;--orange:#fbbf24;--purple:#a78bfa;--red:#fb7185;
+--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px -16px rgba(0,0,0,.7);--radius:16px}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--txt);font:14px/1.5 -apple-system,'Segoe UI',Roboto,sans-serif;padding:24px}
-h1{font-size:22px;margin-bottom:4px}
-.sub{color:var(--dim);margin-bottom:14px;font-size:13px}
-.tabs{margin-bottom:16px}
-.tabs button{background:var(--card);border:1px solid var(--border);color:var(--dim);
-padding:7px 18px;border-radius:6px;cursor:pointer;margin-right:8px;font-size:14px}
-.tabs button.on{color:var(--txt);border-color:var(--acc);background:#11253e}
-.range{margin-bottom:18px}
-.range button{background:var(--card);border:1px solid var(--border);color:var(--dim);
-padding:5px 14px;border-radius:6px;cursor:pointer;margin-right:6px;font-size:13px}
-.range button.on{color:var(--txt);border-color:var(--acc);background:#11253e}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-bottom:20px}
-.kpi{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px}
-.kpi .v{font-size:22px;font-weight:700;margin-top:2px}
-.kpi .l{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
-.kpi .s{color:var(--dim);font-size:11px;margin-top:2px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px}
-.card h3{font-size:14px;margin-bottom:12px;color:var(--acc)}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--txt);
+font:14px/1.55 'Segoe UI',-apple-system,BlinkMacSystemFont,Inter,Roboto,sans-serif;
+-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;min-height:100vh;padding:0 0 46px;
+background-image:radial-gradient(900px 520px at 10% -10%,rgba(232,145,107,.10),transparent 60%),radial-gradient(820px 520px at 100% -4%,rgba(86,163,245,.08),transparent 55%);
+background-attachment:fixed}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-thumb{background:#272e3b;border-radius:8px;border:3px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#333c4c}
+.wrap{max-width:1360px;margin:0 auto;padding:0 24px}
+code{font:12px 'Cascadia Code',Consolas,monospace;color:var(--txt-2)}
+header.top{position:sticky;top:0;z-index:50;background:rgba(10,12,17,.72);
+backdrop-filter:blur(14px) saturate(150%);-webkit-backdrop-filter:blur(14px) saturate(150%);
+border-bottom:1px solid var(--border)}
+.top .wrap{display:flex;align-items:center;gap:14px;height:64px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+background:linear-gradient(145deg,var(--acc),var(--acc-2));box-shadow:0 6px 18px -6px rgba(232,145,107,.6);color:#1a0f0a}
+.logo svg{width:21px;height:21px}
+.brand .t{font-size:16px;font-weight:600;letter-spacing:-.2px}
+.brand .st{font-size:11.5px;color:var(--dim);margin-top:1px}
+.grow{flex:1}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--txt-2);
+background:var(--surface);border:1px solid var(--border);padding:6px 12px;border-radius:999px;white-space:nowrap}
+.pill svg{width:13px;height:13px;color:var(--dim)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--emerald);animation:pulse 2.2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(52,211,153,.5)}70%{box-shadow:0 0 0 7px rgba(52,211,153,0)}100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}}
+.tabs{display:inline-flex;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:4px;gap:4px;margin:24px 0 18px}
+.tabs button{background:transparent;border:none;color:var(--dim);padding:8px 18px;border-radius:9px;
+cursor:pointer;font-size:13.5px;font-weight:500;display:inline-flex;align-items:center;gap:7px;transition:.18s}
+.tabs button svg{width:15px;height:15px}
+.tabs button:hover{color:var(--txt-2)}
+.tabs button.on{color:var(--txt);background:var(--elevated);box-shadow:var(--shadow)}
+#alerts:not(:empty){margin-bottom:16px}
+.parsewarn{color:var(--amber);font-size:12px;background:rgba(251,191,36,.08);
+border:1px solid rgba(251,191,36,.25);padding:9px 13px;border-radius:10px;display:inline-flex;gap:8px;align-items:center}
+.rangebar{display:flex;align-items:center;gap:12px;margin-bottom:22px;flex-wrap:wrap}
+.rangebar .lab{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.7px;font-weight:600}
+.rangebar .grow{flex:1}
+.rnote{font-size:11.5px;color:var(--dim);margin:-10px 0 20px}
+.custom{display:inline-flex;align-items:center;gap:6px}
+.custom input[type=date]{background:var(--surface);border:1px solid var(--border);color:var(--txt-2);
+border-radius:8px;padding:6px 9px;font:inherit;font-size:12px;color-scheme:dark}
+.custom input[type=date]:focus{outline:none;border-color:var(--acc)}
+.custom .dash{color:var(--dim)}
+.mom{display:flex;gap:8px 26px;flex-wrap:wrap;align-items:center}
+.mom .mblock{display:flex;align-items:center;gap:12px}
+.mom .mico{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;
+background:var(--acc-soft);color:var(--acc)}
+.mom .mico svg{width:22px;height:22px}
+.mom .mv{font-size:24px;font-weight:700;letter-spacing:-.5px;font-variant-numeric:tabular-nums;line-height:1}
+.mom .ml{font-size:11.5px;color:var(--dim);margin-top:3px}
+.mom .sep{width:1px;align-self:stretch;background:var(--border)}
+.mom .goals{display:flex;gap:20px;flex-wrap:wrap;flex:1;min-width:220px;justify-content:flex-end}
+.goalw{min-width:150px}
+.goalw .gt{display:flex;justify-content:space-between;font-size:11.5px;color:var(--dim);margin-bottom:6px}
+.goalw .gt b{color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums}
+.bar{height:8px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden}
+.bar>i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--acc),var(--acc-2));transition:width .5s ease}
+.bar.over>i{background:linear-gradient(90deg,var(--amber),var(--rose))}
+.kpi .kd{font-size:11px;margin-top:6px;font-variant-numeric:tabular-nums}
+.range{display:inline-flex;gap:4px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:4px}
+.range button{background:transparent;border:none;color:var(--dim);padding:6px 14px;border-radius:7px;
+cursor:pointer;font-size:12.5px;font-weight:500;transition:.16s}
+.range button:hover{color:var(--txt-2)}
+.range button.on{color:#1a0f0a;background:linear-gradient(145deg,var(--acc),var(--acc-2));font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(198px,1fr));gap:14px;margin-bottom:24px}
+.kpi{position:relative;background:linear-gradient(160deg,var(--surface),var(--bg-2));
+border:1px solid var(--border);border-radius:var(--radius);padding:16px 16px 15px;overflow:hidden;
+transition:transform .2s,border-color .2s;box-shadow:var(--shadow)}
+.kpi:hover{transform:translateY(-2px);border-color:var(--border-strong)}
+.kpi::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;
+background:linear-gradient(90deg,var(--kc,var(--acc)),transparent 72%)}
+.kpi .khead{display:flex;align-items:center;justify-content:space-between;margin-bottom:13px}
+.kpi .l{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px;font-weight:600}
+.kpi .ic{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:var(--kbg,var(--acc-soft));color:var(--kc,var(--acc))}
+.kpi .ic svg{width:16px;height:16px}
+.kpi .v{font-size:26px;font-weight:700;letter-spacing:-.5px;font-variant-numeric:tabular-nums;line-height:1}
+.kpi .s{color:var(--dim);font-size:11.5px;margin-top:6px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:16px}
+.card{background:linear-gradient(170deg,var(--surface),var(--bg-2));border:1px solid var(--border);
+border-radius:var(--radius);padding:18px 18px 16px;box-shadow:var(--shadow);transition:border-color .2s}
+.card:hover{border-color:var(--border-strong)}
 .card.wide{grid-column:1/-1}
-canvas{max-height:280px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border)}
-th{color:var(--dim);font-weight:600}
+.card h3{font-size:13px;font-weight:600;margin-bottom:16px;color:var(--txt);display:flex;align-items:center;gap:9px}
+.card h3 svg{width:16px;height:16px;color:var(--acc);flex:none}
+.card h3 .hint{color:var(--dim);font-weight:400;font-size:11.5px;margin-left:auto}
+canvas{max-height:288px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border)}
+thead th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+tbody tr{transition:background .13s}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover{background:rgba(255,255,255,.025)}
 td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+td b{color:var(--txt);font-weight:600}
 #tProj tbody tr{cursor:pointer}
-#tProj tbody tr:hover{background:#1c2430}
-.hm{display:grid;grid-template-columns:34px repeat(24,1fr);gap:2px;font-size:10px;color:var(--dim)}
-.hm .cell{aspect-ratio:1;border-radius:2px;background:#1c2430}
-.plist li{margin-bottom:8px;color:var(--dim);font-size:12.5px;list-style:none}
-.plist b{color:var(--txt)}
-footer{color:var(--dim);font-size:12px;margin-top:22px}
-.wknav{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-.wknav h2{font-size:17px}
+#tProj tbody tr:hover{background:var(--acc-soft)}
+.hm{display:grid;grid-template-columns:38px repeat(24,1fr);gap:3px;font-size:10px;color:var(--dim);align-items:center}
+.hm .cell{aspect-ratio:1;border-radius:4px;background:rgba(255,255,255,.03);transition:outline .12s}
+.hm .cell:hover{outline:1.5px solid var(--acc);outline-offset:1px}
+.hm .hh{text-align:center;font-size:9.5px}
+.hm .wd{font-size:10.5px;font-weight:500}
+.hleg{display:flex;align-items:center;gap:7px;margin-top:12px;font-size:11px;color:var(--dim);justify-content:flex-end}
+.hleg i{width:13px;height:13px;border-radius:3px;display:inline-block}
+.plist{list-style:none}
+.plist li{margin-bottom:10px;color:var(--txt-2);font-size:12.5px;padding:10px 12px;
+background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:10px;border-left:2px solid var(--acc)}
+.plist li:last-child{margin-bottom:0}
+.plist b{color:var(--txt);font-weight:600}
+.plist .mt{color:var(--dim);font-size:11px;margin-top:3px}
+footer{color:var(--dim);font-size:11.5px;margin-top:30px;padding-top:18px;border-top:1px solid var(--border);line-height:1.7}
+.wknav{display:flex;align-items:center;gap:12px;margin-bottom:18px;flex-wrap:wrap}
+.wknav h2{font-size:16px;font-weight:600;min-width:220px}
 .wknav .sp{flex:1}
-.wknav button{background:var(--card);border:1px solid var(--border);color:var(--txt);
-padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
-.wknav button.act{border-color:var(--acc);color:var(--acc)}
-.wknav button:disabled{opacity:.35;cursor:default}
-.worklist h4{color:var(--purple);font-size:13px;margin:12px 0 6px}
+.btn{background:var(--surface);border:1px solid var(--border);color:var(--txt-2);padding:8px 14px;border-radius:10px;
+cursor:pointer;font-size:12.5px;font-weight:500;display:inline-flex;align-items:center;gap:7px;transition:.16s}
+.btn svg{width:14px;height:14px}
+.btn:hover{border-color:var(--border-strong);color:var(--txt)}
+.btn.act{background:var(--acc-soft);border-color:rgba(232,145,107,.4);color:var(--acc)}
+.btn:disabled{opacity:.35;cursor:default}
+.worklist h4{color:var(--acc);font-size:12px;font-weight:600;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.5px}
+.worklist h4:first-child{margin-top:0}
 .worklist ul{list-style:none}
-.worklist li{padding:5px 0;border-bottom:1px solid var(--border);font-size:13px}
-.worklist li .meta{color:var(--dim);font-size:12px}
-.aiout{white-space:pre-wrap;font-size:13.5px;line-height:1.6}
-.note{color:var(--dim);font-size:11.5px;margin-top:8px}
-#modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;z-index:10;
-align-items:flex-start;justify-content:center;padding:40px 16px;overflow:auto}
-#modal .mbox{background:var(--card);border:1px solid var(--border);border-radius:12px;
-padding:22px;max-width:820px;width:100%;position:relative}
-#modal h2{font-size:17px;margin-bottom:14px;color:var(--acc)}
-#modal h3{font-size:13px;margin:16px 0 8px;color:var(--dim)}
-#mClose{position:absolute;top:12px;right:14px;background:none;border:none;color:var(--dim);
-font-size:22px;cursor:pointer}
+.worklist li{padding:9px 0;border-bottom:1px solid var(--border);font-size:13px}
+.worklist li:last-child{border-bottom:none}
+.worklist li .meta{color:var(--dim);font-size:11.5px;margin-top:2px}
+.aiout{white-space:pre-wrap;font-size:13.5px;line-height:1.7;color:var(--txt-2)}
+.note{color:var(--dim);font-size:11px;margin-top:12px;line-height:1.6}
+#modal{position:fixed;inset:0;background:rgba(5,7,10,.7);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+display:none;z-index:100;align-items:flex-start;justify-content:center;padding:48px 16px;overflow:auto}
+#modal .mbox{background:linear-gradient(170deg,var(--surface-2),var(--bg-2));border:1px solid var(--border-strong);
+border-radius:18px;padding:26px;max-width:860px;width:100%;position:relative;box-shadow:0 24px 60px -20px rgba(0,0,0,.8)}
+#modal h2{font-size:16px;font-weight:600;margin-bottom:5px;color:var(--txt)}
+#modal .msub{color:var(--dim);font-size:12px;margin-bottom:18px}
+#modal h3{font-size:11px;font-weight:600;margin:20px 0 10px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+#mClose{position:absolute;top:16px;right:18px;width:32px;height:32px;border-radius:9px;background:var(--surface);
+border:1px solid var(--border);color:var(--dim);font-size:18px;cursor:pointer;transition:.16s;display:grid;place-items:center}
+#mClose:hover{color:var(--txt);border-color:var(--border-strong)}
+@media (max-width:640px){.wrap{padding:0 14px}.cards{grid-template-columns:1fr}.card{padding:15px}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 </style></head><body>
-<h1>&#9889; Dev Token Dashboard</h1>
-<div class="sub">100% local &middot; reads Claude Code logs from <code id="root"></code> &middot; zero tokens consumed &middot; last updated <span id="upd">…</span> (auto-refreshes)</div>
-<div class="tabs"><button id="tabDash" class="on">Dashboard</button><button id="tabWeek">Weekly Report</button></div>
+<header class="top"><div class="wrap">
+<div class="brand">
+<div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div>
+<div><div class="t">Dev Token Dashboard</div><div class="st">Local Claude Code usage analytics</div></div>
+</div>
+<div class="grow"></div>
+<span class="pill" title="Reads the logs Claude Code already writes locally — makes no API calls"><span class="dot"></span>Live &middot; 0 tokens</span>
+<span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Updated <span id="upd">…</span></span>
+</div></header>
+
+<div class="wrap">
+<div class="tabs"><button id="tabDash" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>Dashboard</button><button id="tabWeek"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>Weekly Report</button></div>
+<div id="alerts"></div>
 
 <div id="viewDash">
+<div class="rangebar"><span class="lab">Range</span>
 <div class="range" id="range">
 <button data-d="7">7 days</button><button data-d="30" class="on">30 days</button>
 <button data-d="90">90 days</button><button data-d="0">All time</button></div>
+<div class="custom"><input type="date" id="cFrom" title="From date"><span class="dash">&ndash;</span><input type="date" id="cTo" title="To date"><button class="btn" id="cApply">Apply</button></div>
+<span class="grow"></span>
+<button class="btn" id="expCopy" title="Copy a text summary to the clipboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button>
+<button class="btn" id="expCsv" title="Download the daily table as CSV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"/></svg>CSV</button>
+<button class="btn" id="expJson" title="Download the full stats payload as JSON"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>JSON</button>
+</div>
+<div class="rnote" id="rnote">Applies to every card below. The <b style="color:var(--txt-2)">Weekly Report</b> tab is always full history.</div>
+<div class="card wide" id="momCard" style="margin-bottom:24px;display:none"><div class="mom" id="mom"></div></div>
 <div class="grid" id="kpis"></div>
 <div class="cards">
-<div class="card wide"><h3>Daily tokens</h3><canvas id="cTokens"></canvas></div>
-<div class="card wide"><h3>You vs Claude — tokens you typed vs tokens Claude produced (log scale)</h3><canvas id="cBalance"></canvas></div>
-<div class="card"><h3>Model usage (output tokens)</h3><canvas id="cModels"></canvas></div>
-<div class="card"><h3>Lines of code generated / day</h3><canvas id="cLoc"></canvas></div>
-<div class="card"><h3>Exploration vs building / day (tool calls)</h3><canvas id="cRW"></canvas></div>
-<div class="card"><h3>Friction / day (interruptions &amp; tool errors)</h3><canvas id="cFrict"></canvas></div>
-<div class="card"><h3>Tool usage</h3><canvas id="cTools"></canvas></div>
-<div class="card"><h3>Slash commands</h3><canvas id="cSlash"></canvas></div>
-<div class="card wide"><h3>Activity heatmap (messages by weekday &times; hour)</h3><div class="hm" id="heat"></div></div>
-<div class="card"><h3>Projects <span style="color:var(--dim);font-weight:400;font-size:12px">(click a row for details)</span></h3><table id="tProj"><thead><tr>
+<div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="12" y="6" width="3" height="12"/><rect x="17" y="13" width="3" height="5"/></svg>Daily tokens<span class="hint">input &middot; output &middot; cache read</span></h3><canvas id="cTokens"></canvas></div>
+<div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>You vs Claude<span class="hint">tokens you typed vs Claude produced &middot; log scale</span></h3><canvas id="cBalance"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg>Model usage<span class="hint">output tokens</span></h3><canvas id="cModels"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>Lines of code / day<span class="hint">written by Claude</span></h3><canvas id="cLoc"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 3 8 21M16 3l-3 18M4 9h16M3 15h16"/></svg>Exploration vs building<span class="hint">tool calls / day</span></h3><canvas id="cRW"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Friction / day<span class="hint">interruptions &amp; tool errors</span></h3><canvas id="cFrict"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h7v7M4 20 21 4M4 4l16 16"/></svg>Tool usage</h3><canvas id="cTools"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6 3 12l6 6M15 6l6 6-6 6"/></svg>Slash commands</h3><canvas id="cSlash"></canvas></div>
+<div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>Activity heatmap<span class="hint">messages by weekday &times; hour</span></h3><div class="hm" id="heat"></div><div class="hleg">Less<i style="background:rgba(232,145,107,.15)"></i><i style="background:rgba(232,145,107,.4)"></i><i style="background:rgba(232,145,107,.65)"></i><i style="background:rgba(232,145,107,.9)"></i>More</div></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7 12 3l9 4-9 4-9-4zM3 12l9 4 9-4M3 17l9 4 9-4"/></svg>Projects<span class="hint">click a row for details</span></h3><table id="tProj"><thead><tr>
 <th>Project</th><th class="num">In</th><th class="num">Out</th><th class="num">LoC</th><th class="num">Est. $</th></tr></thead><tbody></tbody></table></div>
-<div class="card"><h3>Model breakdown</h3><table id="tModels"><thead><tr>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg>Model breakdown</h3><table id="tModels"><thead><tr>
 <th>Model</th><th class="num">Msgs</th><th class="num">In</th><th class="num">Out</th><th class="num">Est. $</th></tr></thead><tbody></tbody></table></div>
-<div class="card"><h3>Git branches</h3><table id="tBranch"><thead><tr>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-6 7"/></svg>Git branches</h3><table id="tBranch"><thead><tr>
 <th>Branch</th><th class="num">Msgs</th><th class="num">Out</th><th class="num">LoC</th></tr></thead><tbody></tbody></table></div>
-<div class="card"><h3>Longest prompts</h3><ul class="plist" id="lPrompts"></ul></div>
-<div class="card"><h3>Most-edited files (by LoC)</h3><table id="tFiles"><thead><tr>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Longest prompts</h3><ul class="plist" id="lPrompts"></ul></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>Most-edited files<span class="hint">by LoC written</span></h3><table id="tFiles"><thead><tr>
 <th>File</th><th class="num">LoC written</th></tr></thead><tbody></tbody></table></div>
 </div>
 </div>
 
 <div id="viewWeek" style="display:none">
-<div class="card wide" style="margin-bottom:14px">
+<div class="card wide" style="margin-bottom:16px">
 <div class="wknav">
-<button id="wPrev">&larr; prev</button>
+<button class="btn" id="wPrev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>Prev</button>
 <h2 id="wTitle">…</h2>
-<button id="wNext">next &rarr;</button>
+<button class="btn" id="wNext">Next<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
 <span class="sp"></span>
-<button id="wCopy" class="act">&#128203; Copy as Markdown</button>
-<button id="wAI" class="act">&#10024; AI summary</button>
+<button class="btn act" id="wCopy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy as Markdown</button>
+<button class="btn act" id="wAI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>AI summary</button>
 </div>
 <div class="grid" id="wKpis" style="margin-bottom:0"></div>
 </div>
 <div class="cards">
-<div class="card wide"><h3>What you worked on</h3><div class="worklist" id="wWork"></div></div>
-<div class="card"><h3>Exploration vs building</h3><canvas id="cSplit"></canvas></div>
-<div class="card"><h3>This week, day by day</h3><canvas id="cWeekDays"></canvas></div>
-<div class="card wide" id="wAIcard" style="display:none"><h3>AI-written summary</h3>
+<div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>What you worked on</h3><div class="worklist" id="wWork"></div></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg>Exploration vs building</h3><canvas id="cSplit"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="14" y="6" width="3" height="12"/></svg>This week, day by day</h3><canvas id="cWeekDays"></canvas></div>
+<div class="card wide" id="wAIcard" style="display:none"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>AI-written summary</h3>
 <div class="aiout" id="wAItext"></div>
 <div class="note">Generated locally via <code>claude -p</code> — this is the only dashboard feature that consumes tokens, and only when you press the button.</div></div>
 </div>
@@ -687,22 +870,30 @@ font-size:22px;cursor:pointer}
 <div id="modal"><div class="mbox">
 <button id="mClose">&times;</button>
 <h2 id="mTitle"></h2>
+<div class="msub" id="mSub"></div>
 <canvas id="cProj" style="max-height:220px"></canvas>
 <h3>Sessions</h3><ul class="plist" id="mSess"></ul>
 <h3>Top files</h3><table id="mFiles"><thead><tr><th>File</th><th class="num">LoC written</th></tr></thead><tbody></tbody></table>
 </div></div>
 
-<footer>Costs are estimates at public API pricing (incl. cache read/write rates) — if you're on a subscription plan the real marginal cost is $0. Edit the PRICING table in the script to tune.</footer>
+<footer>100% local &middot; reads Claude Code logs from <code id="root">~/.claude/projects</code> &middot; auto-refreshes every 15s. Costs are estimates at public API pricing (incl. cache read/write rates) — on a subscription plan the real marginal cost is $0. Edit the PRICING table in the script to tune.</footer>
+</div>
 <script>
 const fmt=n=>n>=1e9?(n/1e9).toFixed(2)+'B':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':''+n;
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const fmtD=s=>{const p=s.split('-');return MON[+p[1]-1]+' '+(+p[2]);};
-let days=30,charts={},D=null,wIdx=null,view='dash';
+let days=30,charts={},D=null,wIdx=null,view='dash',customFrom='',customTo='';
 
 document.getElementById('range').onclick=e=>{if(e.target.dataset.d===undefined)return;
-days=+e.target.dataset.d;[...e.target.parentNode.children].forEach(b=>b.classList.remove('on'));
+days=+e.target.dataset.d;customFrom='';customTo='';
+document.getElementById('cFrom').value='';document.getElementById('cTo').value='';
+[...e.target.parentNode.children].forEach(b=>b.classList.remove('on'));
 e.target.classList.add('on');load();};
+document.getElementById('cApply').onclick=()=>{
+const f=document.getElementById('cFrom').value,t=document.getElementById('cTo').value;
+if(!f&&!t)return;customFrom=f;customTo=t;
+[...document.getElementById('range').children].forEach(b=>b.classList.remove('on'));load();};
 document.getElementById('tabDash').onclick=()=>setView('dash');
 document.getElementById('tabWeek').onclick=()=>setView('week');
 function setView(v){view=v;
@@ -712,75 +903,124 @@ document.getElementById('tabDash').classList.toggle('on',v==='dash');
 document.getElementById('tabWeek').classList.toggle('on',v==='week');
 if(D)render();}
 function mk(id,cfg){if(charts[id])charts[id].destroy();charts[id]=new Chart(document.getElementById(id),cfg);}
-Chart.defaults.color='#8b949e';Chart.defaults.borderColor='#30363d';
+const C={sky:'#56a3f5',emerald:'#34d399',violet:'#a78bfa',amber:'#fbbf24',rose:'#fb7185',teal:'#2dd4bf',coral:'#e8916b',slate:'#2c333f'};
+const PIE=[C.coral,C.sky,C.violet,C.emerald,C.amber,C.teal,C.rose];
+function areaFill(hex){return ctx=>{const ch=ctx.chart,a=ch.chartArea;if(!a)return hex+'22';
+const g=ch.ctx.createLinearGradient(0,a.top,0,a.bottom);g.addColorStop(0,hex+'59');g.addColorStop(1,hex+'03');return g;};}
+const GRID={grid:{color:'rgba(255,255,255,.05)',drawTicks:false},border:{display:false},ticks:{padding:8}};
+const XGRID={grid:{display:false},border:{display:false},ticks:{padding:6,maxRotation:0,autoSkip:true,maxTicksLimit:12}};
+Chart.defaults.font.family="'Segoe UI',-apple-system,Roboto,sans-serif";
+Chart.defaults.font.size=11.5;Chart.defaults.color='#7c8798';Chart.defaults.borderColor='rgba(255,255,255,.06)';
+Chart.defaults.plugins.legend.labels.usePointStyle=true;Chart.defaults.plugins.legend.labels.boxWidth=8;
+Chart.defaults.plugins.legend.labels.boxHeight=8;Chart.defaults.plugins.legend.labels.padding=15;
+Chart.defaults.plugins.tooltip.backgroundColor='rgba(16,20,28,.97)';Chart.defaults.plugins.tooltip.borderColor='rgba(255,255,255,.1)';
+Chart.defaults.plugins.tooltip.borderWidth=1;Chart.defaults.plugins.tooltip.padding=11;Chart.defaults.plugins.tooltip.cornerRadius=9;
+Chart.defaults.plugins.tooltip.titleColor='#e7edf5';Chart.defaults.plugins.tooltip.bodyColor='#aab4c4';
+Chart.defaults.plugins.tooltip.usePointStyle=true;Chart.defaults.plugins.tooltip.boxPadding=5;
+Chart.defaults.elements.bar.borderRadius=5;Chart.defaults.elements.bar.borderSkipped=false;
+Chart.defaults.elements.point.radius=0;Chart.defaults.elements.point.hoverRadius=5;Chart.defaults.elements.point.hitRadius=12;
+Chart.defaults.elements.line.tension=.35;Chart.defaults.elements.line.borderWidth=2;
+Chart.defaults.maintainAspectRatio=false;
+const IC={in:'<path d="M12 3v13m0 0 4-4m-4 4-4-4M4 21h16"/>',out:'<path d="M12 21V8m0 0 4 4m-4-4-4 4M4 3h16"/>',
+cache:'<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
+cost:'<path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+code:'<path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/>',prompt:'<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+session:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+alert:'<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/>',
+user:'<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+lever:'<path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/>'};
+const ic=k=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${IC[k]}</svg>`;
 
 async function load(){
-const r=await fetch('/api/stats?days='+days);D=await r.json();
+const qs=(customFrom||customTo)?('from='+encodeURIComponent(customFrom)+'&to='+encodeURIComponent(customTo)):('days='+days);
+const r=await fetch('/api/stats?'+qs);D=await r.json();
 document.getElementById('upd').textContent=D.generated;
 document.getElementById('root').textContent=D.root||'~/.claude/projects';
 var pw=document.getElementById('parsewarn');
-if(D.totals.parse_errors>0){if(!pw){pw=document.createElement('div');pw.id='parsewarn';pw.style.cssText='color:#f0883e;font-size:12px;margin-top:4px';document.querySelector('.sub').after(pw);}pw.textContent='\u26a0 '+D.totals.parse_errors.toLocaleString()+' log entries could not be parsed - the log format may have changed; stats may be incomplete.';}else if(pw){pw.remove();}
+if(D.totals.parse_errors>0){if(!pw){pw=document.createElement('div');pw.id='parsewarn';pw.className='parsewarn';document.getElementById('alerts').appendChild(pw);}pw.innerHTML='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg><span>'+D.totals.parse_errors.toLocaleString()+' log entries could not be parsed \u2014 the log format may have changed; stats may be incomplete.</span>';}else if(pw){pw.remove();}
 if(wIdx===null&&D.weeks.length)wIdx=D.weeks.length-1;
 if(wIdx!==null&&wIdx>=D.weeks.length)wIdx=D.weeks.length-1;
 render();}
 
 function render(){if(view==='dash')renderDash();else renderWeek();}
 
+function renderMomentum(){
+const card=document.getElementById('momCard');
+if(D.streak===undefined){card.style.display='none';return;}
+card.style.display='';
+const g=D.goals||{},today=D.today||{};
+const flame='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2s5 4.5 5 9a5 5 0 0 1-10 0c0-1.2.4-2.3.4-2.3S5 10 5 13a7 7 0 0 0 14 0c0-5.5-7-11-7-11z"/></svg>';
+const cal='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>';
+let h=`<div class="mblock"><div class="mico">${flame}</div><div><div class="mv">${D.streak}</div><div class="ml">day streak &middot; best ${D.best_streak}</div></div></div>`;
+h+=`<div class="sep"></div><div class="mblock"><div class="mico">${cal}</div><div><div class="mv">${D.active_days}</div><div class="ml">active days all-time</div></div></div>`;
+const bars=[];
+function bar(label,val,goal){if(!goal)return;const pc=Math.min(100,Math.round(val/goal*100)),over=val>goal;
+bars.push(`<div class="goalw"><div class="gt"><span>${label}</span><b>${fmt(val)} / ${fmt(goal)}</b></div><div class="bar${over?' over':''}"><i style="width:${pc}%"></i></div></div>`);}
+bar("Today's LoC",today.loc||0,g.daily_loc);
+bar("Today's output",today.tokens||0,g.daily_tokens);
+bar('This week output',D.week_tokens||0,g.weekly_tokens);
+if(bars.length)h+=`<div class="goals">${bars.join('')}</div>`;
+document.getElementById('mom').innerHTML=h;}
+
 function renderDash(){
 const d=D,t=d.totals;
-const kpis=[['Input tokens',fmt(t.input),''],['Output tokens',fmt(t.output),''],
-['Cache read',fmt(t.cache_read),t.cache_efficiency+'% cache hit'],
-['Est. API cost','$'+t.cost,'$0 real cost on subscription'],
-['Lines of code',fmt(t.loc),'written by Claude'],
-['Prompts',fmt(t.prompts),t.avg_prompt_lines+' lines avg'],
-['Sessions',t.sessions,t.avg_session_min+' min avg'],
-['Interruptions',t.interruptions,t.tool_errors+' tool errors'],
-['Your tokens',fmt(t.human_tokens),'typed in prompts (est.)'],
-['Leverage',t.leverage+'x','Claude tokens per token you type']];
-document.getElementById('kpis').innerHTML=kpis.map(k=>
-`<div class="kpi"><div class="l">${k[0]}</div><div class="v">${k[1]}</div><div class="s">${k[2]}</div></div>`).join('');
+renderMomentum();
+const kpis=[
+['Input tokens',fmt(t.input),'sent to Claude','in',C.sky,t.input,'input'],
+['Output tokens',fmt(t.output),'generated by Claude','out',C.emerald,t.output,'output'],
+['Cache read',fmt(t.cache_read),t.cache_efficiency+'% cache hit rate','cache',C.teal,t.cache_read,'cache_read'],
+['Est. API cost','$'+t.cost,'$0 on a subscription plan','cost',C.amber,t.cost,'cost'],
+['Lines of code',fmt(t.loc),'written by Claude','code',C.violet,t.loc,'loc'],
+['Prompts',fmt(t.prompts),t.avg_prompt_lines+' lines avg','prompt',C.coral,t.prompts,'prompts'],
+['Sessions',t.sessions,t.avg_session_min+' min avg','session',C.sky,t.sessions,'sessions'],
+['Friction',t.interruptions,t.tool_errors+' tool errors','alert',C.rose],
+['Your tokens',fmt(t.human_tokens),'typed in prompts (est.)','user',C.amber,t.human_tokens,'human_tokens'],
+['Leverage',t.leverage+'×','Claude tokens per typed token','lever',C.emerald]];
+document.getElementById('kpis').innerHTML=kpis.map(k=>{
+const dh=(k[6]&&D.prev)?delta(k[5],D.prev[k[6]]):'';
+return `<div class="kpi" style="--kc:${k[4]};--kbg:color-mix(in srgb, ${k[4]} 16%, transparent)"><div class="khead"><span class="l">${k[0]}</span><span class="ic">${ic(k[3])}</span></div><div class="v">${k[1]}</div>${dh?`<div class="kd">${dh}</div>`:''}<div class="s">${k[2]}</div></div>`;}).join('');
 const labels=d.days.map(x=>x.day.slice(5));
 mk('cTokens',{type:'bar',data:{labels,datasets:[
-{label:'Input',data:d.days.map(x=>x.input),backgroundColor:'#58a6ff'},
-{label:'Output',data:d.days.map(x=>x.output),backgroundColor:'#3fb950'},
-{label:'Cache read',data:d.days.map(x=>x.cache_read),backgroundColor:'#30363d'}]},
-options:{scales:{x:{stacked:true},y:{stacked:true}},plugins:{legend:{position:'bottom'}}}});
+{label:'Input',data:d.days.map(x=>x.input),backgroundColor:C.sky},
+{label:'Output',data:d.days.map(x=>x.output),backgroundColor:C.emerald},
+{label:'Cache read',data:d.days.map(x=>x.cache_read),backgroundColor:C.slate}]},
+options:{scales:{x:{stacked:true,...XGRID},y:{stacked:true,...GRID}},plugins:{legend:{position:'bottom'}}}});
 mk('cBalance',{type:'line',data:{labels,datasets:[
-{label:'You (typed)',data:d.days.map(x=>x.human_tokens),borderColor:'#d29922',backgroundColor:'rgba(210,153,34,.12)',fill:true,tension:.3},
-{label:'Claude (output)',data:d.days.map(x=>x.output),borderColor:'#58a6ff',backgroundColor:'rgba(88,166,255,.12)',fill:true,tension:.3}]},
-options:{scales:{y:{type:'logarithmic'}},plugins:{legend:{position:'bottom'}}}});
+{label:'You (typed)',data:d.days.map(x=>x.human_tokens),borderColor:C.amber,backgroundColor:areaFill(C.amber),fill:true},
+{label:'Claude (output)',data:d.days.map(x=>x.output),borderColor:C.coral,backgroundColor:areaFill(C.coral),fill:true}]},
+options:{scales:{x:XGRID,y:{type:'logarithmic',...GRID}},plugins:{legend:{position:'bottom'}}}});
 mk('cModels',{type:'doughnut',data:{labels:d.models.map(m=>m.name),
-datasets:[{data:d.models.map(m=>m.output),backgroundColor:['#58a6ff','#3fb950','#d29922','#bc8cff','#f85149','#39d2c0']}]},
-options:{plugins:{legend:{position:'bottom'}}}});
+datasets:[{data:d.models.map(m=>m.output),backgroundColor:PIE,borderColor:'#0e1117',borderWidth:2,hoverOffset:6}]},
+options:{cutout:'66%',plugins:{legend:{position:'bottom'}}}});
 mk('cLoc',{type:'line',data:{labels,datasets:[{label:'LoC',data:d.days.map(x=>x.loc),
-borderColor:'#bc8cff',backgroundColor:'rgba(188,140,255,.15)',fill:true,tension:.3}]},
-options:{plugins:{legend:{display:false}}}});
+borderColor:C.violet,backgroundColor:areaFill(C.violet),fill:true}]},
+options:{scales:{x:XGRID,y:GRID},plugins:{legend:{display:false}}}});
 mk('cRW',{type:'bar',data:{labels,datasets:[
-{label:'Exploration (reads/searches)',data:d.days.map(x=>x.reads),backgroundColor:'#58a6ff'},
-{label:'Building (file edits)',data:d.days.map(x=>x.writes),backgroundColor:'#3fb950'}]},
-options:{scales:{x:{stacked:true},y:{stacked:true}},plugins:{legend:{position:'bottom'}}}});
+{label:'Exploration (reads/searches)',data:d.days.map(x=>x.reads),backgroundColor:C.sky},
+{label:'Building (file edits)',data:d.days.map(x=>x.writes),backgroundColor:C.emerald}]},
+options:{scales:{x:{stacked:true,...XGRID},y:{stacked:true,...GRID}},plugins:{legend:{position:'bottom'}}}});
 mk('cFrict',{type:'bar',data:{labels,datasets:[
-{label:'Interruptions',data:d.days.map(x=>x.interruptions),backgroundColor:'#f85149'},
-{label:'Tool errors',data:d.days.map(x=>x.tool_errors),backgroundColor:'#d29922'}]},
-options:{scales:{x:{stacked:true},y:{stacked:true}},plugins:{legend:{position:'bottom'}}}});
+{label:'Interruptions',data:d.days.map(x=>x.interruptions),backgroundColor:C.rose},
+{label:'Tool errors',data:d.days.map(x=>x.tool_errors),backgroundColor:C.amber}]},
+options:{scales:{x:{stacked:true,...XGRID},y:{stacked:true,...GRID}},plugins:{legend:{position:'bottom'}}}});
 mk('cTools',{type:'bar',data:{labels:d.tools.map(x=>x[0]),datasets:[{data:d.tools.map(x=>x[1]),
-backgroundColor:'#d29922'}]},options:{indexAxis:'y',plugins:{legend:{display:false}}}});
+backgroundColor:C.coral,borderRadius:4}]},options:{indexAxis:'y',scales:{x:GRID,y:XGRID},plugins:{legend:{display:false}}}});
 mk('cSlash',{type:'bar',data:{labels:d.slash.map(x=>x[0]),datasets:[{data:d.slash.map(x=>x[1]),
-backgroundColor:'#39d2c0'}]},options:{indexAxis:'y',plugins:{legend:{display:false}}}});
+backgroundColor:C.teal,borderRadius:4}]},options:{indexAxis:'y',scales:{x:GRID,y:XGRID},plugins:{legend:{display:false}}}});
 const wd=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];const max=Math.max(1,...d.heatmap.flat());
-let hm='<div></div>'+[...Array(24).keys()].map(h=>`<div style="text-align:center">${h}</div>`).join('');
-d.heatmap.forEach((row,i)=>{hm+=`<div style="line-height:1.9">${wd[i]}</div>`+row.map((v,h)=>
-`<div class="cell" title="${wd[i]} ${h}h: ${v}" style="background:${v?`rgba(63,185,80,${.15+.85*v/max})`:'#1c2430'}"></div>`).join('');});
+let hm='<div></div>'+[...Array(24).keys()].map(h=>`<div class="hh">${h%2?'':h}</div>`).join('');
+d.heatmap.forEach((row,i)=>{hm+=`<div class="wd">${wd[i]}</div>`+row.map((v,h)=>
+`<div class="cell" title="${wd[i]} ${h}:00 — ${v} message${v===1?'':'s'}" style="background:${v?`rgba(232,145,107,${.15+.8*v/max})`:'rgba(255,255,255,.03)'}"></div>`).join('');});
 document.getElementById('heat').innerHTML=hm;
 document.querySelector('#tProj tbody').innerHTML=d.projects.map(p=>
-`<tr><td title="${esc(p.name)}">${esc(p.name.split('/').pop()||p.name)}</td><td class="num">${fmt(p.input)}</td><td class="num">${fmt(p.output)}</td><td class="num">${fmt(p.loc)}</td><td class="num">${p.cost}</td></tr>`).join('');
+`<tr><td title="${esc(p.name)}"><b>${esc(p.name.split('/').pop()||p.name)}</b></td><td class="num">${fmt(p.input)}</td><td class="num">${fmt(p.output)}</td><td class="num">${fmt(p.loc)}</td><td class="num">${p.cost}</td></tr>`).join('');
 document.querySelectorAll('#tProj tbody tr').forEach((tr,i)=>tr.onclick=()=>openProject(d.projects[i]));
 document.querySelector('#tModels tbody').innerHTML=d.models.map(m=>
-`<tr><td>${esc(m.name)}</td><td class="num">${m.msgs}</td><td class="num">${fmt(m.input)}</td><td class="num">${fmt(m.output)}</td><td class="num">${m.cost}</td></tr>`).join('');
+`<tr><td><b>${esc(m.name)}</b></td><td class="num">${m.msgs}</td><td class="num">${fmt(m.input)}</td><td class="num">${fmt(m.output)}</td><td class="num">${m.cost}</td></tr>`).join('');
 document.querySelector('#tBranch tbody').innerHTML=d.branches.map(b=>
-`<tr><td>${esc(b.name)}</td><td class="num">${b.msgs}</td><td class="num">${fmt(b.output)}</td><td class="num">${fmt(b.loc)}</td></tr>`).join('');
+`<tr><td><b>${esc(b.name)}</b></td><td class="num">${b.msgs}</td><td class="num">${fmt(b.output)}</td><td class="num">${fmt(b.loc)}</td></tr>`).join('');
 document.getElementById('lPrompts').innerHTML=d.longest_prompts.map(p=>
-`<li><b>${p.lines} lines / ${p.words} words</b> · ${p.day}<br>${esc(p.preview)}…</li>`).join('');
+`<li>${esc(p.preview)}…<div class="mt"><b>${p.lines} lines</b> · ${p.words} words · ${p.day}</div></li>`).join('');
 document.querySelector('#tFiles tbody').innerHTML=d.top_files.map(f=>
 `<tr><td>${esc(f[0])}</td><td class="num">${fmt(f[1])}</td></tr>`).join('');
 }
@@ -809,19 +1049,19 @@ const kpis=[
 ['Prompts',fmt(w.prompts),delta(w.prompts,prev&&prev.prompts)],
 ['Building',bp+'%',(100-bp)+'% exploration']];
 document.getElementById('wKpis').innerHTML=kpis.map(k=>
-`<div class="kpi"><div class="l">${k[0]}</div><div class="v">${k[1]}</div><div class="s">${k[2]||''}</div></div>`).join('');
+`<div class="kpi"><div class="khead"><span class="l">${k[0]}</span></div><div class="v">${k[1]}</div><div class="s">${k[2]||''}</div></div>`).join('');
 const g={};w.sessions.forEach(s=>{(g[s.project]=g[s.project]||[]).push(s)});
 document.getElementById('wWork').innerHTML=Object.keys(g).length?Object.keys(g).map(p=>
 `<h4>${esc(p)}</h4><ul>`+g[p].map(s=>
 `<li>${esc(s.title)}<br><span class="meta">${fmtD(s.day)} · ${s.min} min · ${fmt(s.loc)} LoC · ${s.prompts} prompts</span></li>`).join('')+'</ul>').join('')
 :'<span style="color:var(--dim)">No sessions logged this week.</span>';
 mk('cSplit',{type:'doughnut',data:{labels:['Building (file edits)','Exploration (reads/searches)'],
-datasets:[{data:[w.writes,w.reads],backgroundColor:['#3fb950','#58a6ff']}]},
-options:{plugins:{legend:{position:'bottom'}}}});
+datasets:[{data:[w.writes,w.reads],backgroundColor:[C.emerald,C.sky],borderColor:'#0e1117',borderWidth:2,hoverOffset:6}]},
+options:{cutout:'66%',plugins:{legend:{position:'bottom'}}}});
 mk('cWeekDays',{type:'bar',data:{labels:w.days.map(x=>fmtD(x.day)),datasets:[
-{label:'Output tokens',data:w.days.map(x=>x.output),backgroundColor:'#58a6ff',yAxisID:'y'},
-{label:'LoC',data:w.days.map(x=>x.loc),backgroundColor:'#bc8cff',yAxisID:'y1'}]},
-options:{scales:{y:{position:'left'},y1:{position:'right',grid:{drawOnChartArea:false}}},
+{label:'Output tokens',data:w.days.map(x=>x.output),backgroundColor:C.sky,yAxisID:'y'},
+{label:'LoC',data:w.days.map(x=>x.loc),backgroundColor:C.violet,yAxisID:'y1'}]},
+options:{scales:{x:XGRID,y:{position:'left',...GRID},y1:{position:'right',grid:{drawOnChartArea:false},border:{display:false}}},
 plugins:{legend:{position:'bottom'}}}});
 }
 
@@ -846,7 +1086,7 @@ const btn=document.getElementById('wCopy');
 try{await navigator.clipboard.writeText(weekMarkdown(D.weeks[wIdx]));btn.textContent='✔ Copied!';}
 catch(e){const ta=document.createElement('textarea');ta.value=weekMarkdown(D.weeks[wIdx]);
 document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();btn.textContent='✔ Copied!';}
-setTimeout(()=>btn.innerHTML='&#128203; Copy as Markdown',2000);};
+setTimeout(()=>btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy as Markdown',2000);};
 
 document.getElementById('wAI').onclick=async()=>{
 if(!D||!D.weeks.length)return;
@@ -856,25 +1096,45 @@ out.textContent='Running claude -p — this can take a minute…';
 try{const r=await fetch('/api/ai_summary?week='+encodeURIComponent(D.weeks[wIdx].key));
 const j=await r.json();out.textContent=j.ok?j.text:('Failed: '+j.error);}
 catch(e){out.textContent='Failed: '+e;}
-btn.disabled=false;btn.innerHTML='&#10024; AI summary';};
+btn.disabled=false;btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>AI summary';};
 
 // ---------------------------------------------------------- project deep-dive
 function openProject(p){
-document.getElementById('mTitle').textContent=p.name;
+document.getElementById('mTitle').textContent=p.name.split('/').pop()||p.name;
+document.getElementById('mSub').innerHTML=`${esc(p.name)} &middot; ${fmt(p.input)} in &middot; ${fmt(p.output)} out &middot; ${fmt(p.loc)} LoC &middot; ${p.sessions} sessions &middot; est. $${p.cost}`;
 document.getElementById('modal').style.display='flex';
 mk('cProj',{type:'bar',data:{labels:p.days.map(x=>x.day.slice(5)),datasets:[
-{label:'Output tokens',data:p.days.map(x=>x.output),backgroundColor:'#58a6ff',yAxisID:'y'},
-{label:'LoC',data:p.days.map(x=>x.loc),backgroundColor:'#bc8cff',yAxisID:'y1'}]},
-options:{scales:{y:{position:'left'},y1:{position:'right',grid:{drawOnChartArea:false}}},
+{label:'Output tokens',data:p.days.map(x=>x.output),backgroundColor:C.sky,yAxisID:'y'},
+{label:'LoC',data:p.days.map(x=>x.loc),backgroundColor:C.violet,yAxisID:'y1'}]},
+options:{scales:{x:XGRID,y:{position:'left',...GRID},y1:{position:'right',grid:{drawOnChartArea:false},border:{display:false}}},
 plugins:{legend:{position:'bottom'}}}});
 const sess=D.sessions_list.filter(s=>s.project===p.name);
 document.getElementById('mSess').innerHTML=sess.length?sess.map(s=>
-`<li><b>${esc(s.title)}</b><br>${s.day} · ${s.min} min · ${fmt(s.loc)} LoC · ${s.prompts} prompts · ${fmt(s.output)} tokens out</li>`).join('')
+`<li><b>${esc(s.title)}</b><div class="mt">${s.day} · ${s.min} min · ${fmt(s.loc)} LoC · ${s.prompts} prompts · ${fmt(s.output)} tokens out</div></li>`).join('')
 :'<li>No session details available.</li>';
 document.querySelector('#mFiles tbody').innerHTML=(p.files||[]).map(f=>
 `<tr><td>${esc(f[0])}</td><td class="num">${fmt(f[1])}</td></tr>`).join('');}
 document.getElementById('mClose').onclick=()=>document.getElementById('modal').style.display='none';
 document.getElementById('modal').onclick=e=>{if(e.target.id==='modal')e.target.style.display='none';};
+
+// ----------------------------------------------------------------- exports
+function download(name,text,type){const b=new Blob([text],{type});const u=URL.createObjectURL(b);
+const a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);}
+function rangeLabel(){return (customFrom||customTo)?((customFrom||'start')+'_to_'+(customTo||'now')):(days?('last'+days+'d'):'alltime');}
+document.getElementById('expJson').onclick=()=>{if(D)download('claude-usage_'+rangeLabel()+'.json',JSON.stringify(D,null,2),'application/json');};
+document.getElementById('expCsv').onclick=()=>{if(!D)return;
+const rows=[['date','input','output','cache_read','cache_write','loc','prompts','reads','writes','est_cost_usd']];
+D.days.forEach(x=>rows.push([x.day,x.input,x.output,x.cache_read,x.cache_write,x.loc,x.prompts,x.reads,x.writes,x.cost]));
+download('claude-usage_'+rangeLabel()+'.csv',rows.map(r=>r.join(',')).join('\n'),'text/csv');};
+document.getElementById('expCopy').onclick=async()=>{if(!D)return;const t=D.totals,btn=document.getElementById('expCopy');
+const txt=`Claude Code usage — ${rangeLabel().replace(/_/g,' ')}\n`+
+`Output tokens: ${t.output.toLocaleString()}\nInput tokens: ${t.input.toLocaleString()}\n`+
+`Cache read: ${t.cache_read.toLocaleString()} (${t.cache_efficiency}% hit)\n`+
+`Lines of code: ${t.loc.toLocaleString()}\nPrompts: ${t.prompts.toLocaleString()}\n`+
+`Sessions: ${t.sessions} (${t.avg_session_min} min avg)\nEst. API cost: $${t.cost}\nLeverage: ${t.leverage}x`;
+try{await navigator.clipboard.writeText(txt);}catch(e){const ta=document.createElement('textarea');ta.value=txt;
+document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();}
+const old=btn.innerHTML;btn.textContent='✔ Copied';setTimeout(()=>btn.innerHTML=old,1600);};
 
 load();setInterval(load,15000);
 </script></body></html>"""
@@ -903,13 +1163,58 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
         elif parsed.path == "/api/stats":
             q = parse_qs(parsed.query)
+            frm = (q.get("from") or [""])[0].strip()
+            to = (q.get("to") or [""])[0].strip()
             try:
-                days = int(q.get("days", ["30"])[0]) or None
+                days = int(q.get("days", ["30"])[0])
             except ValueError:
                 days = 30
-            st = self.scanner.build_stats()
-            data = stats_to_json(st, days)
+            # Build an all-time Stats (powers the Weekly tab, streaks and deltas)
+            # plus a range-scoped Stats so every card on the dashboard respects
+            # the selected window — not just the headline KPIs.
+            full = self.scanner.build_stats()
+            alldays = sorted(full.days.keys())
+            prev = []
+            if frm or to:                       # custom date range
+                cur = [d for d in alldays if (not frm or d >= frm) and (not to or d <= to)]
+                ranged = self.scanner.build_stats(frm or None, to or None)
+            elif days > 0:                       # rolling N-day window
+                cur = alldays[-days:]
+                prev = alldays[-2 * days:-days]  # the window just before it (for deltas)
+                ranged = self.scanner.build_stats(cur[0]) if cur else Stats()
+            else:                                # all time
+                cur = alldays
+                ranged = full
+            data = stats_to_json(ranged, None)
+            data["weeks"] = build_weeks(full)
             data["root"] = self.root
+
+            def sd(dl, k):
+                return sum(full.days[d][k] for d in dl)
+
+            if prev:
+                data["prev"] = {k: sd(prev, k) for k in
+                                ("output", "input", "loc", "prompts", "human_tokens", "cache_read")}
+                data["prev"]["cost"] = round(sd(prev, "cost"), 2)
+                pset, pc = set(prev), 0
+                for _sid, se in full.sessions.items():
+                    try:
+                        sday = datetime.fromisoformat(
+                            se["start"].replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d")
+                    except Exception:
+                        continue
+                    if sday in pset:
+                        pc += 1
+                data["prev"]["sessions"] = pc
+
+            data["streak"], data["best_streak"] = active_streak(alldays)
+            data["active_days"] = len(alldays)
+            data["goals"] = GOALS
+            if alldays:
+                last = alldays[-1]
+                data["today"] = {"day": last, "loc": full.days[last]["loc"],
+                                 "tokens": full.days[last]["output"]}
+                data["week_tokens"] = sum(full.days[d]["output"] for d in alldays[-7:])
             self._send(200, "application/json", json.dumps(data).encode())
         elif parsed.path == "/api/ai_summary":
             q = parse_qs(parsed.query)
