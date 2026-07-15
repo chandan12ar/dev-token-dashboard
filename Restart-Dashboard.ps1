@@ -19,7 +19,7 @@ if (-not (Test-Path $script)) {
 Write-Host '  Stopping running instances...'
 $killed = 0
 Get-CimInstance Win32_Process |
-    Where-Object { ($_.Name -eq 'python.exe' -or $_.Name -eq 'pythonw.exe') -and $_.CommandLine -like '*dev_token_dashboard*' } |
+    Where-Object { $_.Name -match '^pythonw?[\d.]*\.exe$' -and $_.CommandLine -like '*dev_token_dashboard*' } |
     ForEach-Object { if (Stop-Process -Id $_.ProcessId -Force -PassThru) { $killed++ } }
 foreach ($procId in ((Get-NetTCPConnection -LocalPort $port -State Listen).OwningProcess | Select-Object -Unique)) {
     if (Stop-Process -Id $procId -Force -PassThru) { $killed++ }

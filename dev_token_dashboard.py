@@ -57,8 +57,20 @@ CODE_TOOLS_EDIT = {"Edit", "StrEditReplace"}    # tools whose 'new_string' is ne
 READ_TOOLS = {"Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch",
               "NotebookRead", "TodoRead", "ToolSearch"}
 WRITE_TOOLS = CODE_TOOLS_WRITE | CODE_TOOLS_EDIT | {"MultiEdit", "NotebookEdit"}
+CMD_TOOLS = {"Bash", "PowerShell"}   # command runs — the verification proxy for diligence
+
+# Quiet hours for the wellness panel (24h clock, wraps midnight): messages with
+# a timestamp >= QUIET_START or < QUIET_END count as late-night activity.
+QUIET_START, QUIET_END = 23, 6
 
 CMD_RE = re.compile(r"<command-name>\s*(/?[\w:_-]+)\s*</command-name>")
+
+# prompts that read as corrections of Claude's previous output (heuristic,
+# matched at the start of the prompt) — a signal for the fluency report
+CORRECT_RE = re.compile(
+    r"^(no+[,.! ]|no+$|not (that|what|like)|wrong|nope|incorrect|actually[, ]"
+    r"|that'?s (not|wrong)|stop[,.! ]|undo |revert |don'?t |you (missed|forgot|broke))",
+    re.IGNORECASE)
 
 
 def price_for(model: str):
@@ -85,6 +97,7 @@ def _day_stat():
         "cost": 0.0, "loc": 0, "prompts": 0, "prompt_lines": 0,
         "prompt_words": 0, "messages": 0, "human_tokens": 0,
         "reads": 0, "writes": 0, "interruptions": 0, "tool_errors": 0,
+        "late_msgs": 0, "corrections": 0,
     }
 
 
@@ -111,6 +124,7 @@ class Stats:
         self.session_titles = {}    # sid -> AI-generated title from the logs
         self.branches = defaultdict(lambda: {"msgs": 0, "output": 0, "loc": 0})
         self.heatmap = defaultdict(int)   # (weekday, hour) -> messages
+        self.day_buckets = defaultdict(set)  # day -> set of active 10-min buckets
         self.prompt_words = 0
         self.prompt_chars = 0
         self.longest_prompts = []   # list of (lines, preview, day)
@@ -128,6 +142,7 @@ class Stats:
         s = self.sessions.setdefault(sid, {
             "start": ts, "end": ts, "msgs": 0, "project": project,
             "reads": 0, "writes": 0, "loc": 0, "prompts": 0, "output": 0,
+            "bash": 0,
         })
         if ts:
             if not s["start"] or ts < s["start"]:
@@ -176,6 +191,11 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         st.days[day]["messages"] += 1
     if hour is not None:
         st.heatmap[(weekday, hour)] += 1
+        if day:
+            # 10-minute activity buckets — the basis for "active time"
+            st.day_buckets[day].add(hour * 6 + ts.minute // 10)
+            if hour >= QUIET_START or hour < QUIET_END:
+                st.days[day]["late_msgs"] += 1
 
     msg = entry.get("message") or {}
     content = msg.get("content")
@@ -213,6 +233,8 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
             return
         lines = count_lines(text)
         words = len(text.split())
+        if day and CORRECT_RE.match(text.strip()):
+            st.days[day]["corrections"] += 1
         if day:
             st.days[day]["prompts"] += 1
             st.days[day]["prompt_lines"] += lines
@@ -285,6 +307,9 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
                     st.days[day]["writes"] += 1
                 if sess:
                     sess["writes"] += 1
+            elif name in CMD_TOOLS:
+                if sess:
+                    sess["bash"] += 1
             inp = block.get("input") or {}
             loc = 0
             if name in CODE_TOOLS_WRITE:
@@ -378,6 +403,57 @@ class Scanner:
 
 
 # ---------------------------------------------------------------------------
+# Task-type classification (heuristic: AI session title first, tool mix as
+# fallback) and wellness helpers
+# ---------------------------------------------------------------------------
+
+TASK_TYPES = ["feature", "bugfix", "refactor", "docs", "explore", "other"]
+
+
+def classify_session(title, reads=0, writes=0, loc=0):
+    t = " %s " % (title or "").lower()
+
+    def has(*words):
+        return any(w in t for w in words)
+
+    if has("fix", " bug", "error", "issue", "crash", "debug", "broken",
+           "fail", "troubleshoot", "repair", "not work"):
+        return "bugfix"
+    if has("refactor", "clean", "rename", "simplif", "reorganiz",
+           "restructur", "tidy", "polish", "dedup"):
+        return "refactor"
+    if has("readme", "document", " docs", " doc ", "changelog",
+           "write-up", "writeup", "comment"):
+        return "docs"
+    if has("add ", "implement", "build", "creat", " new ", "feature",
+           "support", "integrat", "set up", "setup", "install", "launch",
+           "generat", "redesign", "improve", "update", "upgrade"):
+        return "feature"
+    if has("explor", "investigat", "understand", "analy", "review",
+           "explain", "research", "compare", "look at", "check ",
+           "question", "how ", "why ", "what "):
+        return "explore"
+    # no title signal — fall back to what the session actually did
+    if loc > 0 or writes > reads:
+        return "feature"
+    if reads:
+        return "explore"
+    return "other"
+
+
+def longest_focus(buckets) -> int:
+    """Longest run of consecutive 10-min activity buckets within a day, in minutes."""
+    if not buckets:
+        return 0
+    b = sorted(buckets)
+    best = run = 1
+    for i in range(1, len(b)):
+        run = run + 1 if b[i] == b[i - 1] + 1 else 1
+        best = max(best, run)
+    return best * 10
+
+
+# ---------------------------------------------------------------------------
 # Weekly aggregation (for the Weekly Report tab)
 # ---------------------------------------------------------------------------
 
@@ -402,12 +478,16 @@ def build_weeks(st: Stats):
             "input": 0, "output": 0, "loc": 0, "prompts": 0,
             "reads": 0, "writes": 0, "interruptions": 0, "tool_errors": 0,
             "human_tokens": 0, "cost": 0.0, "minutes": 0.0,
+            "prompt_words": 0, "corrections": 0, "late_msgs": 0,
+            "messages": 0, "active_min": 0,
             "days": [], "sessions": [],
         })
         for f in ("input", "output", "loc", "prompts", "reads", "writes",
-                  "interruptions", "tool_errors", "human_tokens"):
+                  "interruptions", "tool_errors", "human_tokens",
+                  "prompt_words", "corrections", "late_msgs", "messages"):
             w[f] += ds[f]
         w["cost"] += ds["cost"]
+        w["active_min"] += len(st.day_buckets.get(day, ())) * 10
         w["days"].append({"day": day, "output": ds["output"], "loc": ds["loc"],
                           "reads": ds["reads"], "writes": ds["writes"]})
 
@@ -422,12 +502,14 @@ def build_weeks(st: Stats):
             continue
         mins = max(0.0, (b - a).total_seconds()) / 60
         weeks[key]["minutes"] += mins
+        title = st.session_titles.get(sid) or "Untitled session"
         weeks[key]["sessions"].append({
-            "id": sid[:8],
-            "title": st.session_titles.get(sid) or "Untitled session",
+            "id": sid[:8], "title": title,
             "project": s["project"], "day": a.strftime("%Y-%m-%d"),
             "min": round(mins), "loc": s["loc"], "reads": s["reads"],
             "writes": s["writes"], "output": s["output"], "prompts": s["prompts"],
+            "bash": s["bash"],
+            "type": classify_session(title, s["reads"], s["writes"], s["loc"]),
         })
 
     out = []
@@ -534,11 +616,13 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
             mins = round(max(0.0, (b - a).total_seconds()) / 60)
         except Exception:
             day, mins = "", 0
+        title = st.session_titles.get(sid) or "Untitled session"
         sessions_list.append({
-            "id": sid[:8], "title": st.session_titles.get(sid) or "Untitled session",
+            "id": sid[:8], "title": title,
             "project": s["project"], "day": day, "min": mins,
             "loc": s["loc"], "reads": s["reads"], "writes": s["writes"],
-            "output": s["output"], "prompts": s["prompts"],
+            "output": s["output"], "prompts": s["prompts"], "bash": s["bash"],
+            "type": classify_session(title, s["reads"], s["writes"], s["loc"]),
         })
     sessions_list.sort(key=lambda x: x["day"], reverse=True)
     del sessions_list[300:]
@@ -562,7 +646,9 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
             "leverage": round(tot("output") / tot("human_tokens"), 1) if tot("human_tokens") else 0,
             "parse_errors": st.parse_errors,
         },
-        "days": [{"day": d, **st.days[d], "cost": round(st.days[d]["cost"], 3)} for d in all_days],
+        "days": [{"day": d, **st.days[d], "cost": round(st.days[d]["cost"], 3),
+                  "active_min": len(st.day_buckets.get(d, ())) * 10,
+                  "focus_max": longest_focus(st.day_buckets.get(d, ()))} for d in all_days],
         "models": models,
         "tools": st.tools.most_common(12),
         "slash": st.slash.most_common(12),
@@ -575,6 +661,7 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
         ][:8],
         "top_files": st.files_touched.most_common(8),
         "sessions_list": sessions_list,
+        "quiet_hours": [QUIET_START, QUIET_END],
         # weekly report data is always computed over all history
         "weeks": build_weeks(st),
     }
@@ -585,7 +672,7 @@ def stats_to_json(st: Stats, days_filter=None) -> dict:
 # tokens, triggered only by an explicit button press in the UI)
 # ---------------------------------------------------------------------------
 
-def ai_week_summary(week: dict) -> dict:
+def _run_claude(prompt: str) -> dict:
     import shutil
     import subprocess
     # Resolve the absolute path once. Relying on the child process to re-resolve
@@ -594,24 +681,6 @@ def ai_week_summary(week: dict) -> dict:
     exe = shutil.which("claude")
     if not exe:
         return {"ok": False, "error": "claude CLI not found on PATH."}
-    sess = week["sessions"]
-    bullets = "\n".join(
-        "- [%s] %s (%s, %s min, %s LoC)" % (s["project"], s["title"], s["day"], s["min"], s["loc"])
-        for s in sess[:50]
-    ) or "- (no sessions logged this week)"
-    if len(sess) > 50:
-        bullets += "\n- ...and %d more sessions" % (len(sess) - 50)
-    hours = round(week["minutes"] / 60, 1)
-    prompt = (
-        "Write a short weekly work update for a developer's standup, covering "
-        "%s to %s.\n\nCoding sessions this week:\n%s\n\n"
-        "Stats: %s lines of code written, %s prompts, %s output tokens, "
-        "~%s hours in sessions, tool mix %s file edits vs %s reads/searches.\n\n"
-        "Format: one first-person paragraph of 3-5 sentences, then 3-6 short "
-        "bullet points of key accomplishments. Plain markdown, no headers, no fluff."
-        % (week["start"], week["end"], bullets, week["loc"], week["prompts"],
-           week["output"], hours, week["writes"], week["reads"])
-    )
     # Call the resolved executable directly, passing the prompt as an argument
     # (avoids stdin-piping quirks). Only .cmd/.bat shims need the cmd wrapper.
     if exe.lower().endswith((".cmd", ".bat")):
@@ -632,6 +701,53 @@ def ai_week_summary(week: dict) -> dict:
     err = (r.stderr or "").strip()
     return {"ok": False, "error": "claude -p exited %d with no text (%s)"
             % (r.returncode, (err or "no stdout or stderr")[:400])}
+
+
+def ai_week_summary(week: dict) -> dict:
+    sess = week["sessions"]
+    bullets = "\n".join(
+        "- [%s] %s (%s, %s min, %s LoC)" % (s["project"], s["title"], s["day"], s["min"], s["loc"])
+        for s in sess[:50]
+    ) or "- (no sessions logged this week)"
+    if len(sess) > 50:
+        bullets += "\n- ...and %d more sessions" % (len(sess) - 50)
+    hours = round(week["minutes"] / 60, 1)
+    prompt = (
+        "Write a short weekly work update for a developer's standup, covering "
+        "%s to %s.\n\nCoding sessions this week:\n%s\n\n"
+        "Stats: %s lines of code written, %s prompts, %s output tokens, "
+        "~%s hours in sessions, tool mix %s file edits vs %s reads/searches.\n\n"
+        "Format: one first-person paragraph of 3-5 sentences, then 3-6 short "
+        "bullet points of key accomplishments. Plain markdown, no headers, no fluff."
+        % (week["start"], week["end"], bullets, week["loc"], week["prompts"],
+           week["output"], hours, week["writes"], week["reads"])
+    )
+    return _run_claude(prompt)
+
+
+def ai_reflection(week: dict, question: str) -> dict:
+    """Discuss the weekly reflection question with claude -p (button-only)."""
+    types = Counter(s.get("type", "other") for s in week["sessions"])
+    mix = ", ".join("%d %s" % (n, t) for t, n in types.most_common()) or "no sessions"
+    prompt = (
+        "You are helping a developer reflect on how they use AI coding tools. "
+        "Their local usage dashboard asked them this reflection question:\n\n"
+        "\"%s\"\n\n"
+        "Context for the week %s to %s: %d sessions (%s), %s lines of code "
+        "written via the AI, %s prompts (%s corrections, %s interruptions), "
+        "%s file edits vs %s reads/searches, %s tool errors, ~%s active hours, "
+        "%s messages during quiet hours (11pm-6am).\n\n"
+        "Give a thoughtful, concise reflection (under 180 words): interpret what "
+        "the data suggests, name one trade-off worth considering, and end with "
+        "one concrete experiment to try next week. Plain text, no headers, "
+        "address the developer as 'you'."
+        % (question, week["start"], week["end"], len(week["sessions"]), mix,
+           week["loc"], week["prompts"], week.get("corrections", 0),
+           week["interruptions"], week["writes"], week["reads"],
+           week["tool_errors"], round(week.get("active_min", 0) / 60, 1),
+           week.get("late_msgs", 0))
+    )
+    return _run_claude(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -792,6 +908,20 @@ border-radius:18px;padding:26px;max-width:860px;width:100%;position:relative;box
 #mClose{position:absolute;top:16px;right:18px;width:32px;height:32px;border-radius:9px;background:var(--surface);
 border:1px solid var(--border);color:var(--dim);font-size:18px;cursor:pointer;transition:.16s;display:grid;place-items:center}
 #mClose:hover{color:var(--txt);border-color:var(--border-strong)}
+.facts{display:flex;gap:10px 34px;flex-wrap:wrap;margin-bottom:16px}
+.facts .f .fv{font-size:21px;font-weight:700;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+.facts .f .fl{font-size:11px;color:var(--dim);margin-top:2px}
+.flgrid{display:grid;grid-template-columns:300px 1fr;gap:24px;align-items:center}
+@media (max-width:900px){.flgrid{grid-template-columns:1fr}}
+.flrow{display:flex;align-items:center;gap:14px;padding:11px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.flrow:last-child{border-bottom:none}
+.flrow .fln{width:104px;font-weight:600;font-size:13px;flex:none}
+.flrow .flb{width:120px;flex:none}
+.flrow .fls{width:34px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums;flex:none}
+.flrow .flt{flex:1;color:var(--dim);font-size:11.5px;line-height:1.5;min-width:200px}
+.flrow .flt b{color:var(--txt-2);font-weight:600}
+.reflq{font-size:15px;line-height:1.65;color:var(--txt);background:var(--acc-soft);
+border-left:3px solid var(--acc);padding:14px 16px;border-radius:10px;margin-bottom:14px}
 @media (max-width:640px){.wrap{padding:0 14px}.cards{grid-template-columns:1fr}.card{padding:15px}}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 </style></head><body>
@@ -826,10 +956,12 @@ border:1px solid var(--border);color:var(--dim);font-size:18px;cursor:pointer;tr
 <div class="cards">
 <div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="12" y="6" width="3" height="12"/><rect x="17" y="13" width="3" height="5"/></svg>Daily tokens<span class="hint">input &middot; output &middot; cache read</span></h3><canvas id="cTokens"></canvas></div>
 <div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>You vs Claude<span class="hint">tokens you typed vs Claude produced &middot; log scale</span></h3><canvas id="cBalance"></canvas></div>
+<div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Time &amp; wellness<span class="hint">active time from 10-min activity buckets &middot; quiet hours 23:00&ndash;06:00</span></h3><div class="facts" id="wellFacts"></div><canvas id="cActive" style="max-height:200px"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg>Model usage<span class="hint">output tokens</span></h3><canvas id="cModels"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>Lines of code / day<span class="hint">written by Claude</span></h3><canvas id="cLoc"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 3 8 21M16 3l-3 18M4 9h16M3 15h16"/></svg>Exploration vs building<span class="hint">tool calls / day</span></h3><canvas id="cRW"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Friction / day<span class="hint">interruptions &amp; tool errors</span></h3><canvas id="cFrict"></canvas></div>
+<div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>Task mix / day<span class="hint">sessions classified by title</span></h3><canvas id="cTaskMix"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h7v7M4 20 21 4M4 4l16 16"/></svg>Tool usage</h3><canvas id="cTools"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6 3 12l6 6M15 6l6 6-6 6"/></svg>Slash commands</h3><canvas id="cSlash"></canvas></div>
 <div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>Activity heatmap<span class="hint">messages by weekday &times; hour</span></h3><div class="hm" id="heat"></div><div class="hleg">Less<i style="background:rgba(232,145,107,.15)"></i><i style="background:rgba(232,145,107,.4)"></i><i style="background:rgba(232,145,107,.65)"></i><i style="background:rgba(232,145,107,.9)"></i>More</div></div>
@@ -861,6 +993,14 @@ border:1px solid var(--border);color:var(--dim);font-size:18px;cursor:pointer;tr
 <div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>What you worked on</h3><div class="worklist" id="wWork"></div></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg>Exploration vs building</h3><canvas id="cSplit"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="14" y="6" width="3" height="12"/></svg>This week, day by day</h3><canvas id="cWeekDays"></canvas></div>
+<div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>AI Fluency report<span class="hint">delegation &middot; description &middot; discernment &middot; diligence</span></h3>
+<div class="flgrid"><canvas id="cFluency" style="max-height:270px"></canvas><div id="flList"></div></div>
+<div class="note">Heuristic scores computed locally from your logs, adapted for coding from Anthropic's 4D AI-fluency framework. Formulas in <code>docs/METRICS.md</code>.</div></div>
+<div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1 1.5 1 2.5h6c0-1 .2-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg>Reflection<span class="hint">a question this week's data raises</span></h3>
+<div class="reflq" id="reflQ">&hellip;</div>
+<button class="btn act" id="reflBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Discuss with Claude</button>
+<div class="aiout" id="reflOut" style="margin-top:14px"></div>
+<div class="note">Discussing runs <code>claude -p</code> locally — like the AI summary, it costs tokens only when you press the button.</div></div>
 <div class="card wide" id="wAIcard" style="display:none"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg>AI-written summary</h3>
 <div class="aiout" id="wAItext"></div>
 <div class="note">Generated locally via <code>claude -p</code> — this is the only dashboard feature that consumes tokens, and only when you press the button.</div></div>
@@ -883,6 +1023,8 @@ const fmt=n=>n>=1e9?(n/1e9).toFixed(2)+'B':n>=1e6?(n/1e6).toFixed(2)+'M':n>=1e3?
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const fmtD=s=>{const p=s.split('-');return MON[+p[1]-1]+' '+(+p[2]);};
+const fmtMin=m=>m>=60?Math.floor(m/60)+'h'+(m%60?' '+m%60+'m':''):m+'m';
+const TT=['feature','bugfix','refactor','docs','explore','other'];
 let days=30,charts={},D=null,wIdx=null,view='dash',customFrom='',customTo='';
 
 document.getElementById('range').onclick=e=>{if(e.target.dataset.d===undefined)return;
@@ -1003,6 +1145,28 @@ mk('cFrict',{type:'bar',data:{labels,datasets:[
 {label:'Interruptions',data:d.days.map(x=>x.interruptions),backgroundColor:C.rose},
 {label:'Tool errors',data:d.days.map(x=>x.tool_errors),backgroundColor:C.amber}]},
 options:{scales:{x:{stacked:true,...XGRID},y:{stacked:true,...GRID}},plugins:{legend:{position:'bottom'}}}});
+// --- time & wellness -------------------------------------------------------
+const actTot=d.days.reduce((a,x)=>a+(x.active_min||0),0);
+const msgTot=d.days.reduce((a,x)=>a+x.messages,0);
+const lateTot=d.days.reduce((a,x)=>a+(x.late_msgs||0),0);
+const focusMax=d.days.reduce((a,x)=>Math.max(a,x.focus_max||0),0);
+const wkndMsgs=d.days.reduce((a,x)=>{const g=new Date(x.day+'T12:00:00').getDay();return a+((g===0||g===6)?x.messages:0);},0);
+const actDays=d.days.filter(x=>x.messages>0).length;
+const wf=[[fmtMin(actTot),'active time in range'],
+[actDays?fmtMin(Math.round(actTot/actDays)):'0m','avg per active day'],
+[fmtMin(focusMax),focusMax>=180?'longest focus block — take breaks!':'longest focus block'],
+[(msgTot?Math.round(lateTot/msgTot*100):0)+'%','in quiet hours (23–06)'],
+[(msgTot?Math.round(wkndMsgs/msgTot*100):0)+'%','on weekends']];
+document.getElementById('wellFacts').innerHTML=wf.map(f=>`<div class="f"><div class="fv">${f[0]}</div><div class="fl">${f[1]}</div></div>`).join('');
+mk('cActive',{type:'bar',data:{labels,datasets:[{label:'Active minutes',data:d.days.map(x=>x.active_min||0),
+backgroundColor:d.days.map(x=>((x.late_msgs||0)>x.messages*.25&&x.messages)?C.rose:C.teal)}]},
+options:{scales:{x:XGRID,y:GRID},plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>fmtMin(c.parsed.y)+' active'+((d.days[c.dataIndex].late_msgs||0)>d.days[c.dataIndex].messages*.25?' · heavy quiet-hours use':'')}}}}});
+// --- task mix --------------------------------------------------------------
+const byDay={};d.days.forEach(x=>byDay[x.day]=Object.fromEntries(TT.map(t=>[t,0])));
+(D.sessions_list||[]).forEach(s=>{if(byDay[s.day]&&s.type)byDay[s.day][s.type]++;});
+const TC={feature:C.emerald,bugfix:C.rose,refactor:C.violet,docs:C.amber,explore:C.sky,other:C.slate};
+mk('cTaskMix',{type:'bar',data:{labels,datasets:TT.map(t=>({label:t,data:d.days.map(x=>byDay[x.day][t]),backgroundColor:TC[t]}))},
+options:{scales:{x:{stacked:true,...XGRID},y:{stacked:true,...GRID,ticks:{precision:0}}},plugins:{legend:{position:'bottom'}}}});
 mk('cTools',{type:'bar',data:{labels:d.tools.map(x=>x[0]),datasets:[{data:d.tools.map(x=>x[1]),
 backgroundColor:C.coral,borderRadius:4}]},options:{indexAxis:'y',scales:{x:GRID,y:XGRID},plugins:{legend:{display:false}}}});
 mk('cSlash',{type:'bar',data:{labels:d.slash.map(x=>x[0]),datasets:[{data:d.slash.map(x=>x[1]),
@@ -1031,6 +1195,61 @@ const pc=Math.round((c-p)/p*100);if(pc===0)return'<span style="color:var(--dim)"
 const up=pc>0;return `<span style="color:${up?'var(--green)':'var(--red)'}">${up?'&#9650;':'&#9660;'} ${Math.abs(pc)}% vs last wk</span>`;};
 
 function buildPct(w){const t=w.reads+w.writes;return t?Math.round(w.writes/t*100):0;}
+
+// --- AI fluency (4D) heuristics --------------------------------------------
+function fluencyOf(w){
+const sess=w.sessions,code=sess.filter(s=>s.loc>0);
+const lev=w.human_tokens?w.output/w.human_tokens:0;
+const codeShare=sess.length?code.length/sess.length:0;
+const delegation=Math.round(100*(.5*codeShare+.5*Math.min(1,lev/50)));
+const avgW=w.prompts?(w.prompt_words||0)/w.prompts:0;
+const oneShot=w.prompts?Math.max(0,1-((w.corrections||0)+w.interruptions)/w.prompts):0;
+const sweet=avgW<=0?0:avgW<8?avgW/8:avgW<=150?1:Math.max(0,1-(avgW-150)/300);
+const description=Math.round(100*(.65*oneShot+.35*sweet));
+const engaged=Math.min(1,((w.corrections||0)+w.interruptions)/Math.max(1,w.prompts*.05));
+const errCtl=Math.max(0,1-w.tool_errors/Math.max(1,w.writes||1));
+const discernment=Math.round(100*(.5*engaged+.5*errCtl));
+const verified=code.length?code.filter(s=>s.bash>0).length/code.length:0;
+const diligence=code.length?Math.round(100*verified):0;
+return{delegation,description,discernment,diligence,lev,codeShare,avgW,oneShot,engaged,verified,ncode:code.length};}
+
+function fluencyTips(f,w){
+return{
+delegation:f.delegation<50?'Try handing Claude whole tasks (implement + verify), not just questions.':'Healthy mix of asking and delegating real work.',
+description:f.description<50?'Front-load constraints, file paths and expected behavior in the first prompt.':'Most prompts land without needing a correction.',
+discernment:f.engaged<.3?'You rarely push back — spot-check diffs and say so when output misses.':(f.discernment<50?'High error rate — slow down and review output before continuing.':'You actively steer and catch issues.'),
+diligence:f.ncode===0?'No code sessions this week.':(f.diligence<50?'Ask Claude to run tests/commands after edits — most code sessions never verified.':'Most code sessions verified their work with commands.')};}
+
+function renderFluency(w,prev){
+const f=fluencyOf(w),tips=fluencyTips(f,w),fp=prev?fluencyOf(prev):null;
+const dims=[
+['Delegation',f.delegation,`<b>${Math.round(f.codeShare*100)}%</b> of sessions shipped code · <b>${f.lev.toFixed(1)}×</b> leverage`],
+['Description',f.description,`<b>${Math.round(f.oneShot*100)}%</b> of prompts needed no correction · <b>${Math.round(f.avgW)}</b> words avg`],
+['Discernment',f.discernment,`<b>${w.corrections||0}</b> corrections + <b>${w.interruptions}</b> interruptions · <b>${w.tool_errors}</b> tool errors`],
+['Diligence',f.diligence,`<b>${Math.round(f.verified*100)}%</b> of ${f.ncode} code session${f.ncode===1?'':'s'} ran commands after edits`]];
+const key=['delegation','description','discernment','diligence'];
+document.getElementById('flList').innerHTML=dims.map((d,i)=>
+`<div class="flrow"><span class="fln">${d[0]}</span><span class="flb"><span class="bar"><i style="width:${d[1]}%"></i></span></span><span class="fls">${d[1]}</span><span class="flt">${d[2]}<br>${tips[key[i]]}</span></div>`).join('');
+const ds=[{label:'This week',data:dims.map(d=>d[1]),borderColor:C.coral,backgroundColor:'rgba(232,145,107,.16)',pointBackgroundColor:C.coral,borderWidth:2}];
+if(fp)ds.push({label:'Last week',data:[fp.delegation,fp.description,fp.discernment,fp.diligence],borderColor:C.sky,backgroundColor:'rgba(86,163,245,.06)',pointBackgroundColor:C.sky,borderWidth:1.5});
+mk('cFluency',{type:'radar',data:{labels:dims.map(d=>d[0]),datasets:ds},
+options:{scales:{r:{min:0,max:100,ticks:{display:false,stepSize:25},grid:{color:'rgba(255,255,255,.08)'},angleLines:{color:'rgba(255,255,255,.08)'},pointLabels:{color:'#aab4c4',font:{size:12}}}},plugins:{legend:{position:'bottom'}}}});}
+
+// --- reflection question ----------------------------------------------------
+let reflQtext='';
+function pickReflection(w,idx){
+const c=[];
+const corrRate=w.prompts?(w.corrections||0)/w.prompts:0;
+if(corrRate>0.08)c.push(`You corrected Claude ${w.corrections} times this week (${Math.round(corrRate*100)}% of prompts). What context could your first prompts include so the second try isn't needed?`);
+const late=w.messages?(w.late_msgs||0)/w.messages:0;
+if(late>0.2)c.push(`${Math.round(late*100)}% of this week's activity happened between 11pm and 6am. Is late-night coding a deliberate choice — or a habit worth questioning?`);
+const tot=w.reads+w.writes,ex=tot?w.reads/tot:0;
+if(tot&&ex>0.65)c.push(`${Math.round(ex*100)}% of tool calls this week were exploration. Are you using Claude mostly to understand code — and is there building you could delegate too?`);
+if(tot&&ex<0.15)c.push(`${Math.round((1-ex)*100)}% of tool calls this week were edits. Are you reading and verifying what gets written — or shipping on trust?`);
+const code=w.sessions.filter(s=>s.loc>0),ver=code.length?code.filter(s=>s.bash>0).length/code.length:1;
+if(code.length>2&&ver<0.4)c.push(`Only ${Math.round(ver*100)}% of code-writing sessions ran a command afterwards. How do you know this week's ${fmt(w.loc)} new lines actually work?`);
+c.push(`What's one thing you want to keep doing yourself, even if Claude could do it faster?`);
+return c[idx%c.length];}
 
 function renderWeek(){
 const wk=D.weeks;
@@ -1063,10 +1282,24 @@ mk('cWeekDays',{type:'bar',data:{labels:w.days.map(x=>fmtD(x.day)),datasets:[
 {label:'LoC',data:w.days.map(x=>x.loc),backgroundColor:C.violet,yAxisID:'y1'}]},
 options:{scales:{x:XGRID,y:{position:'left',...GRID},y1:{position:'right',grid:{drawOnChartArea:false},border:{display:false}}},
 plugins:{legend:{position:'bottom'}}}});
+renderFluency(w,prev);
+reflQtext=pickReflection(w,wIdx);
+document.getElementById('reflQ').textContent=reflQtext;
+document.getElementById('reflOut').textContent='';
 }
 
 document.getElementById('wPrev').onclick=()=>{if(wIdx>0){wIdx--;renderWeek();}};
 document.getElementById('wNext').onclick=()=>{if(wIdx<D.weeks.length-1){wIdx++;renderWeek();}};
+
+document.getElementById('reflBtn').onclick=async()=>{
+if(!D||!D.weeks.length||!reflQtext)return;
+const btn=document.getElementById('reflBtn'),out=document.getElementById('reflOut');
+btn.disabled=true;btn.textContent='Thinking…';
+out.textContent='Running claude -p — this can take a minute…';
+try{const r=await fetch('/api/reflect?week='+encodeURIComponent(D.weeks[wIdx].key)+'&q='+encodeURIComponent(reflQtext));
+const j=await r.json();out.textContent=j.ok?j.text:('Failed: '+j.error);}
+catch(e){out.textContent='Failed: '+e;}
+btn.disabled=false;btn.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Discuss with Claude';};
 
 function weekMarkdown(w){
 const g={};w.sessions.forEach(s=>{(g[s.project]=g[s.project]||[]).push(s)});
@@ -1078,6 +1311,9 @@ md+=`- ${w.sessions.length} sessions, ~${(w.minutes/60).toFixed(1)} focus-hours\
 md+=`- ${w.loc.toLocaleString()} lines of code written with Claude\n`;
 md+=`- ${w.prompts.toLocaleString()} prompts · ${w.output.toLocaleString()} tokens generated\n`;
 md+=`- Work split: ${bp}% building / ${100-bp}% exploration\n`;
+const tc={};w.sessions.forEach(s=>{const t=s.type||'other';tc[t]=(tc[t]||0)+1});
+const mix=TT.filter(t=>tc[t]).map(t=>`${tc[t]} ${t}`).join(', ');
+if(mix)md+=`- Task mix: ${mix}\n`;
 return md;}
 
 document.getElementById('wCopy').onclick=async()=>{
@@ -1225,6 +1461,19 @@ class Handler(BaseHTTPRequestHandler):
                 payload = {"ok": False, "error": "unknown week %r" % wkey}
             else:
                 payload = ai_week_summary(week)
+            self._send(200, "application/json", json.dumps(payload).encode())
+        elif parsed.path == "/api/reflect":
+            q = parse_qs(parsed.query)
+            wkey = (q.get("week") or [""])[0]
+            question = (q.get("q") or [""])[0].strip()[:500]
+            st = self.scanner.build_stats()
+            week = next((w for w in build_weeks(st) if w["key"] == wkey), None)
+            if not week:
+                payload = {"ok": False, "error": "unknown week %r" % wkey}
+            elif not question:
+                payload = {"ok": False, "error": "no question provided"}
+            else:
+                payload = ai_reflection(week, question)
             self._send(200, "application/json", json.dumps(payload).encode())
         else:
             self._send(404, "text/plain", b"not found")

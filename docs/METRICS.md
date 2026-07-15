@@ -276,7 +276,69 @@ Weeks are **ISO weeks (Monday–Sunday)**, keyed like `2026-W28`.
 
 ---
 
-## 9. Known approximations (honest accounting)
+## 9. Time & wellness (v1.2)
+
+### Active time
+
+Each message's timestamp is dropped into a **10-minute bucket**
+(`hour × 6 + minute ÷ 10`, per local calendar day). Active time =
+`buckets × 10 min`. A lone message therefore counts as 10 minutes; a
+gap longer than ~10 minutes stops counting. This is deliberately closer
+to "time you actually spent" than session wall-clock span.
+
+- **Active time in range** = Σ daily bucket counts × 10
+- **Avg per active day** = active time ÷ days with ≥ 1 message
+- **Longest focus block** = longest run of *consecutive* buckets in a single
+  day × 10 (does not span midnight)
+
+### Quiet hours & weekends
+
+- **Quiet-hours share** = messages with local hour ≥ 23 or < 6, ÷ all
+  messages in range. Tune `QUIET_START` / `QUIET_END` at the top of the
+  script. Days where > 25 % of messages fall in quiet hours are drawn in
+  red on the active-minutes chart.
+- **Weekend share** = messages on Sat/Sun ÷ all messages in range.
+
+## 10. Task-type classification (v1.2)
+
+Every session is bucketed into **feature / bugfix / refactor / docs /
+explore / other** by keyword-matching its AI-generated title (bugfix
+keywords win over refactor, then docs, feature, explore). Sessions with
+no title signal fall back to tool mix: wrote code → feature; only
+reads → explore. It's a heuristic — expect roughly-right, not perfect.
+
+## 11. AI Fluency report (v1.2)
+
+Four 0–100 heuristic scores per ISO week, adapted for coding from
+Anthropic's 4D AI-fluency framework (Delegation, Description,
+Discernment, Diligence). All computed locally:
+
+| Dimension | Formula |
+|---|---|
+| **Delegation** | `50 × (code sessions ÷ sessions) + 50 × min(1, leverage ÷ 50)` — are you handing Claude real building work, not just questions? |
+| **Description** | `65 × one-shot rate + 35 × sweet-spot factor`. One-shot rate = `1 − (corrections + interruptions) ÷ prompts`. Sweet spot = avg prompt of 8–150 words scores 1.0, shorter/longer decays. |
+| **Discernment** | `50 × engagement + 50 × error control`. Engagement = corrections + interruptions reaching 5 % of prompts scores 1.0 (pushing back is *good* — it means you review output). Error control = `1 − tool errors ÷ edits`. |
+| **Diligence** | `% of code-writing sessions that also ran ≥ 1 Bash/PowerShell command` — a proxy for "verified the work" (tests, builds, runs). |
+
+**Corrections** are prompts that *start* with correction language
+("no", "wrong", "actually", "that's not", "undo", "revert",
+"you missed"…, case-insensitive regex `CORRECT_RE` in the script).
+Note the deliberate tension: corrections lower Description (the first
+prompt didn't land) but raise Discernment (you caught it).
+
+### Reflection question
+
+One data-backed question per week, picked deterministically (rotating by
+week index) from whichever rules fire: correction rate > 8 %,
+quiet-hours share > 20 %, exploration share > 65 %, building share
+> 85 %, verification rate < 40 % — with Anthropic's classic fallback:
+*"What's one thing you want to keep doing yourself, even if Claude could
+do it faster?"*. **Discuss with Claude** pipes the question + the week's
+stats through `claude -p` (token-costing, button-only, like AI summary).
+
+---
+
+## 12. Known approximations (honest accounting)
 
 | Metric | Approximation |
 |---|---|
@@ -286,6 +348,11 @@ Weeks are **ISO weeks (Monday–Sunday)**, keyed like `2026-W28`.
 | Session duration | wall-clock span including idle time |
 | 7/30/90-day ranges | last N *active* days, not strict calendar windows |
 | Messages | meta entries, command output and interruptions are filtered — so the count is lower than the official panel's |
+| Active time | 10-min buckets; an isolated message = 10 min; focus blocks don't span midnight |
+| Task types | keyword heuristics on AI titles; ambiguous sessions land in "other" |
+| Fluency scores | heuristic proxies, not measurements — trends week-over-week matter more than absolute values |
+| Corrections | only catches corrections at the *start* of a prompt |
+| Task mix / day chart | built from the 300 most recent sessions; very old days in long ranges may undercount |
 
 Everything else — token totals, cache numbers, tool counts, per-model and
 per-project splits — is exact arithmetic over deduplicated log entries.

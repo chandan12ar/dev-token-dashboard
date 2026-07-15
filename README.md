@@ -28,6 +28,28 @@ Claude Code has been used (it reads `~/.claude/projects/`).
 
 Full instructions, auto-start at logon, and troubleshooting: **[SETUP.md](SETUP.md)**
 
+## What's new (v1.2) — the "Reflect" update
+
+Inspired by Anthropic's [Reflect with Claude](https://www.anthropic.com/news/reflect-with-claude)
+(which covers claude.ai chat but *not* Claude Code — that's what this fills):
+
+- **AI Fluency report** — weekly 0–100 scores on the four AI-fluency
+  dimensions (Delegation, Description, Discernment, Diligence), adapted for
+  coding, with a radar chart vs last week and a concrete tip per dimension
+- **Time & wellness panel** — active time from 10-minute activity buckets,
+  average per active day, longest focus block, quiet-hours (23:00–06:00) and
+  weekend shares, plus an active-minutes chart that flags late-night-heavy days
+- **Reflection question** — each week the data picks one question worth
+  sitting with (too many corrections? all exploration? never verifying?), with
+  a **Discuss with Claude** button that runs `claude -p` locally on demand
+- **Task mix** — sessions auto-classified into feature / bugfix / refactor /
+  docs / explore from their AI titles, stacked per day, and included in the
+  weekly markdown export
+- **Fix** — `Restart-Dashboard.ps1` now also kills Store-Python processes
+  (`pythonw3.11.exe`), which previously survived restarts holding stale code
+
+All of it 100% local and zero-token, except the two explicit `claude -p` buttons.
+
 ## What's new (v1.1)
 
 - **Complete UI redesign** — sticky glass header, icon KPI cards with accent
@@ -64,7 +86,10 @@ Full formula reference for every metric: **[docs/METRICS.md](docs/METRICS.md)**
   progress bars
 - **Charts** — daily tokens, "You vs Claude" balance (log scale), model
   doughnut + breakdown, LoC per day, **exploration vs building** per day,
-  **friction** per day, tool & slash-command usage, weekday×hour heatmap
+  **friction** per day, **task mix** per day, tool & slash-command usage,
+  weekday×hour heatmap
+- **Time & wellness** — active time, longest focus block, quiet-hours and
+  weekend shares, active-minutes chart
 - **Tables** — projects (click a row for a per-project deep-dive with its
   own timeline, sessions, and files), model breakdown, git branches,
   longest prompts, most-edited files
@@ -78,11 +103,15 @@ titles grouped by project — Claude Code already stores an AI title for
 every session, so this is free), KPIs with week-over-week deltas, and an
 exploration-vs-building gauge. Then:
 
+- **🎯 AI Fluency report** — radar chart + per-dimension scores and tips
+  (Delegation · Description · Discernment · Diligence)
+- **💡 Reflection** — one data-backed question about how you worked this
+  week, with an optional **Discuss with Claude** button
 - **📋 Copy as Markdown** — one click gives you a formatted weekly update
-  to paste into Teams, Slack, or email
+  (now including the task mix) to paste into Teams, Slack, or email
 - **✨ AI summary** (optional) — pipes the week through `claude -p` for a
-  polished first-person paragraph. The only feature that costs tokens, and
-  only when you press it.
+  polished first-person paragraph. Along with "Discuss with Claude", the
+  only features that cost tokens, and only when you press them.
 
 ## Screenshots
 
