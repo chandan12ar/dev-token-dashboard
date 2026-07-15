@@ -117,8 +117,9 @@ exploration-vs-building gauge. Then:
 
 | | |
 |---|---|
-| ![You vs Claude](docs/screenshots/you-vs-claude.png) | ![Charts](docs/screenshots/charts.png) |
-| ![Tables](docs/screenshots/tables.png) | ![Weekly Report](docs/screenshots/weekly-report.png) |
+| **Daily tokens & You vs Claude**<br>![Daily tokens and You vs Claude charts](docs/screenshots/you-vs-claude.png) | **Time & wellness**<br>![Time and wellness panel with active-minutes chart](docs/screenshots/time-wellness.png) |
+| **Exploration, friction & task mix**<br>![Exploration vs building, friction, task mix and tool usage charts](docs/screenshots/charts-task-mix.png) | **AI Fluency report**<br>![AI Fluency radar with 4D scores and tips](docs/screenshots/ai-fluency.png) |
+| **Heatmap & tables**<br>![Activity heatmap, projects and model breakdown tables](docs/screenshots/tables.png) | **Weekly Report**<br>![Weekly Report tab with KPIs and session list](docs/screenshots/weekly-report.png) |
 
 ## Privacy
 
