@@ -911,8 +911,9 @@ border:1px solid var(--border);color:var(--dim);font-size:18px;cursor:pointer;tr
 .facts{display:flex;gap:10px 34px;flex-wrap:wrap;margin-bottom:16px}
 .facts .f .fv{font-size:21px;font-weight:700;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
 .facts .f .fl{font-size:11px;color:var(--dim);margin-top:2px}
-.flgrid{display:grid;grid-template-columns:300px 1fr;gap:24px;align-items:center}
-@media (max-width:900px){.flgrid{grid-template-columns:1fr}}
+.flgrid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:24px;align-items:center}
+.flchart{position:relative;height:270px;min-width:0}
+@media (max-width:900px){.flgrid{grid-template-columns:1fr}.flchart{height:230px}}
 .flrow{display:flex;align-items:center;gap:14px;padding:11px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
 .flrow:last-child{border-bottom:none}
 .flrow .fln{width:104px;font-weight:600;font-size:13px;flex:none}
@@ -994,7 +995,7 @@ border-left:3px solid var(--acc);padding:14px 16px;border-radius:10px;margin-bot
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg>Exploration vs building</h3><canvas id="cSplit"></canvas></div>
 <div class="card"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="14" y="6" width="3" height="12"/></svg>This week, day by day</h3><canvas id="cWeekDays"></canvas></div>
 <div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>AI Fluency report<span class="hint">delegation &middot; description &middot; discernment &middot; diligence</span></h3>
-<div class="flgrid"><canvas id="cFluency" style="max-height:270px"></canvas><div id="flList"></div></div>
+<div class="flgrid"><div class="flchart"><canvas id="cFluency"></canvas></div><div id="flList"></div></div>
 <div class="note">Heuristic scores computed locally from your logs, adapted for coding from Anthropic's 4D AI-fluency framework. Formulas in <code>docs/METRICS.md</code>.</div></div>
 <div class="card wide"><h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1 1.5 1 2.5h6c0-1 .2-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg>Reflection<span class="hint">a question this week's data raises</span></h3>
 <div class="reflq" id="reflQ">&hellip;</div>
@@ -1236,7 +1237,7 @@ mk('cFluency',{type:'radar',data:{labels:dims.map(d=>d[0]),datasets:ds},
 options:{scales:{r:{min:0,max:100,ticks:{display:false,stepSize:25},grid:{color:'rgba(255,255,255,.08)'},angleLines:{color:'rgba(255,255,255,.08)'},pointLabels:{color:'#aab4c4',font:{size:12}}}},plugins:{legend:{position:'bottom'}}}});}
 
 // --- reflection question ----------------------------------------------------
-let reflQtext='';
+let reflQtext='',reflWeekKey=null;
 function pickReflection(w,idx){
 const c=[];
 const corrRate=w.prompts?(w.corrections||0)/w.prompts:0;
@@ -1285,7 +1286,8 @@ plugins:{legend:{position:'bottom'}}}});
 renderFluency(w,prev);
 reflQtext=pickReflection(w,wIdx);
 document.getElementById('reflQ').textContent=reflQtext;
-document.getElementById('reflOut').textContent='';
+// clear the discussion only when switching weeks — not on the 15s auto-refresh
+if(reflWeekKey!==w.key){reflWeekKey=w.key;document.getElementById('reflOut').textContent='';}
 }
 
 document.getElementById('wPrev').onclick=()=>{if(wIdx>0){wIdx--;renderWeek();}};
