@@ -139,6 +139,9 @@ Your prompts and logs never leave your disk.
 
 ## Docs
 
+- [docs/DASHBOARD_GUIDE.md](docs/DASHBOARD_GUIDE.md) — **the tour**: every
+  section explained in plain language — what it tells you, how the data
+  becomes the number, and how to read it (great for showing your team)
 - [SETUP.md](SETUP.md) — install, run, auto-start on Windows/macOS/Linux
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — architecture and every panel explained
 - [docs/METRICS.md](docs/METRICS.md) — **the math**: exact formula behind every metric, what each dashboard section means, and the known approximations
