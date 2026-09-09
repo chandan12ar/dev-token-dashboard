@@ -3153,7 +3153,16 @@ def main():
                     help="Windows: run dashboard automatically at logon (Task Scheduler)")
     ap.add_argument("--uninstall-startup", action="store_true",
                     help="Windows: remove the logon task")
+    ap.add_argument("--setup-notifications", action="store_true",
+                    help="Wire up the statusLine hook for accurate plan-usage %% "
+                         "and toast notifications (Windows)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="With --setup-notifications, show what would change "
+                         "without writing anything")
     args = ap.parse_args()
+
+    if args.setup_notifications:
+        sys.exit(run_setup_notifications(dry_run=args.dry_run))
 
     if args.install_startup or args.uninstall_startup:
         if os.name != "nt":
