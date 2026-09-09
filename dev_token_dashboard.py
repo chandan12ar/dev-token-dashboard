@@ -34,10 +34,15 @@ from urllib.parse import urlparse, parse_qs
 # cache read ≈ 0.1x input.
 # ---------------------------------------------------------------------------
 PRICING = [
-    ("opus",   {"in": 15.0, "out": 75.0}),
-    ("sonnet", {"in": 3.0,  "out": 15.0}),
-    ("haiku",  {"in": 1.0,  "out": 5.0}),
-    ("fable",  {"in": 15.0, "out": 75.0}),
+    # ordered: first substring match wins. Checked against Anthropic's public
+    # pricing 2026-09: Opus 4/4.1 launched at $15/$75; every Opus since 4.5
+    # (incl. Opus 5) is $5/$25. Fable 5 is $10/$50.
+    ("opus-4-0", {"in": 15.0, "out": 75.0}),
+    ("opus-4-1", {"in": 15.0, "out": 75.0}),
+    ("opus",     {"in": 5.0,  "out": 25.0}),
+    ("sonnet",   {"in": 3.0,  "out": 15.0}),
+    ("haiku",    {"in": 1.0,  "out": 5.0}),
+    ("fable",    {"in": 10.0, "out": 50.0}),
 ]
 DEFAULT_PRICE = {"in": 3.0, "out": 15.0}
 
@@ -177,6 +182,7 @@ class Stats:
         self.longest_prompts = []   # list of (lines, preview, day)
         self.files_touched = Counter()
         self.seen_msg_ids = set()
+        self.seen_msg_usage = {}   # dedup_key -> last seen usage vector
         self.seen_tool_ids = set()
         self.errors = 0
         self.tool_errors = 0
@@ -327,12 +333,33 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
     mid = msg.get("id") or entry.get("uuid")
     dedup_key = (mid, entry.get("requestId"))
 
-    if usage and dedup_key not in st.seen_msg_ids:
-        st.seen_msg_ids.add(dedup_key)
-        i = usage.get("input_tokens", 0) or 0
-        o = usage.get("output_tokens", 0) or 0
-        cw = usage.get("cache_creation_input_tokens", 0) or 0
-        cr = usage.get("cache_read_input_tokens", 0) or 0
+    count_usage = False
+    uniq = 0
+    if usage:
+        vec = (
+            usage.get("input_tokens", 0) or 0,
+            usage.get("output_tokens", 0) or 0,
+            usage.get("cache_creation_input_tokens", 0) or 0,
+            usage.get("cache_read_input_tokens", 0) or 0,
+        )
+        if dedup_key not in st.seen_msg_ids:
+            st.seen_msg_ids.add(dedup_key)
+            st.seen_msg_usage[dedup_key] = vec
+            i, o, cw, cr = vec
+            count_usage = True
+            uniq = 1
+        else:
+            prev = st.seen_msg_usage.get(dedup_key, (0, 0, 0, 0))
+            st.seen_msg_usage[dedup_key] = tuple(max(c, p) for c, p in zip(vec, prev))
+            # Identical duplicate (per-content-block journaling): already
+            # counted, add nothing. Growing snapshot (same response, usage
+            # still rising): add only the growth, so the total ends at the
+            # response's final usage.
+            i = max(0, vec[0] - prev[0]); o = max(0, vec[1] - prev[1])
+            cw = max(0, vec[2] - prev[2]); cr = max(0, vec[3] - prev[3])
+            count_usage = bool(i or o or cw or cr)
+
+    if count_usage:
         p = price_for(model)
         cost = (i * p["in"] + o * p["out"] + cw * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1_000_000
         if day:
@@ -341,7 +368,7 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
             d["cache_read"] += cr; d["cache_write"] += cw
             d["cost"] += cost
         m = st.models[model]
-        m["msgs"] += 1; m["input"] += i; m["output"] += o
+        m["msgs"] += uniq; m["input"] += i; m["output"] += o
         m["cache_read"] += cr; m["cache_write"] += cw; m["cost"] += cost
         pr = st.projects[project]
         pr["input"] += i; pr["output"] += o; pr["cost"] += cost
@@ -352,7 +379,7 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         if sess:
             sess["output"] += o
         b = st.branches[branch]
-        b["msgs"] += 1; b["output"] += o
+        b["msgs"] += uniq; b["output"] += o
 
     # tool calls + lines of code
     if isinstance(content, list):
