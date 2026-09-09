@@ -811,5 +811,48 @@ class RunSetupNotificationsTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
 
 
+class ForeignStatuslineTests(unittest.TestCase):
+    def test_extract_script_path_from_quoted_command(self):
+        self.assertEqual(
+            dtd._extract_script_path('node "C:\\Users\\x\\.claude\\statusline.js"'),
+            "C:\\Users\\x\\.claude\\statusline.js")
+
+    def test_extract_script_path_returns_none_when_unquoted(self):
+        self.assertIsNone(dtd._extract_script_path("~/.claude/statusline.sh"))
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_foreign_statusline_does_not_write_settings(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            settings_path = os.path.join(d, "settings.json")
+            original = {"statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"}}
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(original, f)
+            prints = []
+            code = dtd.run_setup_notifications(claude_dir=d, print_fn=prints.append,
+                                                input_fn=lambda _: self.fail("must not prompt"),
+                                                isatty_fn=lambda: True)
+            self.assertEqual(code, 0)
+            with open(settings_path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), original)
+            self.assertFalse(os.path.exists(os.path.join(d, dtd.STATUSLINE_MARKER)))
+            self.assertTrue(any("existing statusline" in p.lower() for p in prints))
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_foreign_statusline_reports_fresh_capture_if_present(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            settings_path = os.path.join(d, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({"statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"}}, f)
+            rl_path = os.path.join(d, "rate_limits_latest.json")
+            with open(rl_path, "w", encoding="utf-8") as f:
+                json.dump({"rate_limits": {}, "captured_at": dtd.time.time()}, f)
+            prints = []
+            with patch.object(dtd, "RATE_LIMITS_PATH", rl_path):
+                dtd.run_setup_notifications(claude_dir=d, print_fn=prints.append,
+                                             input_fn=lambda _: self.fail("must not prompt"),
+                                             isatty_fn=lambda: True)
+            self.assertTrue(any("already has a fresh capture" in p for p in prints))
+
+
 if __name__ == "__main__":
     unittest.main()

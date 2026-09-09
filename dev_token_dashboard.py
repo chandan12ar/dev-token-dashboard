@@ -3108,8 +3108,32 @@ def run_setup_notifications(claude_dir=None, dry_run=False, input_fn=input,
     return 0
 
 
+def _extract_script_path(command):
+    m = re.search(r'"([^"]+)"', command)
+    return m.group(1) if m else None
+
+
 def _report_foreign_statusline(settings, print_fn):
-    raise NotImplementedError("implemented in Task 4")
+    cmd = settings["statusLine"]["command"]
+    print_fn(f"An existing statusLine is already configured: {cmd}")
+    script_path = _extract_script_path(cmd)
+    if script_path and os.path.isfile(script_path):
+        try:
+            with open(script_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            if "rate_limits" in content:
+                print_fn("Your existing script already looks like it references rate_limits.")
+        except OSError:
+            pass
+    if load_rate_limits(RATE_LIMITS_PATH) is not None:
+        print_fn(f"{RATE_LIMITS_PATH} already has a fresh capture -- you may already be covered.")
+    else:
+        print_fn(f"{RATE_LIMITS_PATH} has no fresh capture yet.")
+    print_fn("To add rate-limit capture to your own script, make it write this JSON")
+    print_fn("shape to ~/.claude/rate_limits_latest.json whenever `rate_limits` is")
+    print_fn("present in its stdin input (see the reference script below):")
+    print_fn(BUNDLED_STATUSLINE_JS)
+    print_fn("Full explanation: docs/DASHBOARD_GUIDE.md#plan-usage-limits")
 
 
 def default_root():
