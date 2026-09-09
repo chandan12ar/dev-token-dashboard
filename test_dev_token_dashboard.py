@@ -811,6 +811,23 @@ class RunSetupNotificationsTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
 
 
+class ShouldRunNotificationsTests(unittest.TestCase):
+    def test_true_by_default(self):
+        self.assertTrue(dtd.should_run_notifications(dict(dtd.NOTIFY, enabled=True)))
+
+    def test_false_when_disabled(self):
+        self.assertFalse(dtd.should_run_notifications(dict(dtd.NOTIFY, enabled=False)))
+
+    def test_true_when_key_absent(self):
+        notify = dict(dtd.NOTIFY)
+        del notify["enabled"]
+        self.assertTrue(dtd.should_run_notifications(notify))
+
+    def test_defaults_to_module_level_notify(self):
+        with patch.dict(dtd.NOTIFY, {"enabled": False}):
+            self.assertFalse(dtd.should_run_notifications())
+
+
 class ForeignStatuslineTests(unittest.TestCase):
     def test_extract_script_path_from_quoted_command(self):
         self.assertEqual(

@@ -91,6 +91,12 @@ OFFICIAL_MILESTONES = {
     "seven_day": (20, 40, 60, 80, 100),
 }
 
+
+def should_run_notifications(notify=None):
+    notify = NOTIFY if notify is None else notify
+    return bool(notify.get("enabled", True))
+
+
 CODE_TOOLS_WRITE = {"Write", "Create"}          # tools whose 'content' is new code
 CODE_TOOLS_EDIT = {"Edit", "StrEditReplace"}    # tools whose 'new_string' is new code
 
@@ -3219,7 +3225,10 @@ def main():
                 print(f"[warn] notification watcher error: {e}")
             time.sleep(NOTIFY["poll_seconds"])
 
-    threading.Thread(target=_notify_loop, daemon=True).start()
+    if should_run_notifications():
+        threading.Thread(target=_notify_loop, daemon=True).start()
+    else:
+        print('  Toast notifications: OFF (NOTIFY["enabled"] is False)')
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
