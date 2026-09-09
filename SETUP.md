@@ -113,6 +113,27 @@ WantedBy=default.target
 systemctl --user enable --now token-dashboard
 ```
 
+## 3b. Optional: accurate plan-usage numbers and toast notifications
+
+By default the "Plan usage limits" card on the dashboard shows a rough
+local estimate. To get Anthropic's real 5-hour/7-day numbers (and, on
+Windows, toast pop-ups as you cross usage milestones), run:
+
+```
+python dev_token_dashboard.py --setup-notifications
+```
+
+It wires up a Claude Code `statusLine` hook for you and shows exactly
+what it's about to change before writing anything. Preview without
+changing anything with `--setup-notifications --dry-run`. If you already
+have a custom `statusLine` script, it won't touch it — it'll tell you
+what to add instead. See
+[docs/DASHBOARD_GUIDE.md#plan-usage-limits](docs/DASHBOARD_GUIDE.md#plan-usage-limits)
+for how this works and why the number can lag by a few minutes when idle.
+
+Toast notifications are Windows-only for now; on macOS/Linux this sets
+up the accurate numbers only.
+
 ## 4. Optional: AI weekly summaries
 
 The Weekly Report tab has an "AI summary" button that turns your week into

@@ -81,11 +81,17 @@ guessed estimate.
 | **This week** | % of the rolling 7-day window used | `rate_limits.seven_day.used_percentage`, same hook |
 | **"as of Xm ago" / ⚠ warning** | how old this snapshot is | see below |
 
-*How it's captured:* a `statusLine` hook (`~/.claude/statusline.js`)
-writes Anthropic's real rate-limit numbers to
+*How it's captured:* a `statusLine` hook (`~/.claude/dev_token_dashboard_statusline.js`
+if you used `--setup-notifications`, or your own script if you already had
+one) writes Anthropic's real rate-limit numbers to
 `~/.claude/rate_limits_latest.json` every time it runs. The dashboard
 just reads that file — it never calls the Anthropic API itself, so this
 stays free.
+
+*Setting it up:* run `python dev_token_dashboard.py --setup-notifications`
+(add `--dry-run` to preview first) — it configures the `statusLine` hook
+for you and won't touch an existing custom one. See
+[SETUP.md](../SETUP.md#3b-optional-accurate-plan-usage-numbers-and-toast-notifications).
 
 *Why it can lag:* the hook only re-runs when a Claude Code session on
 this machine is actually active (a new message, `/compact`, etc.) — not

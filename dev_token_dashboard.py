@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -89,6 +90,12 @@ OFFICIAL_MILESTONES = {
     "five_hour": MILESTONES,
     "seven_day": (20, 40, 60, 80, 100),
 }
+
+
+def should_run_notifications(notify=None):
+    notify = NOTIFY if notify is None else notify
+    return bool(notify.get("enabled", True))
+
 
 CODE_TOOLS_WRITE = {"Write", "Create"}          # tools whose 'content' is new code
 CODE_TOOLS_EDIT = {"Edit", "StrEditReplace"}    # tools whose 'new_string' is new code
@@ -2907,6 +2914,243 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+# ---------------------------------------------------------------------------
+# Setup wizard (--setup-notifications): wires the statusLine hook so plan-
+# usage % and toast milestones use real Anthropic numbers instead of the
+# local estimate. See docs/superpowers/specs/2026-09-09-setup-notifications-
+# onboarding-design.md for the full design.
+# ---------------------------------------------------------------------------
+
+STATUSLINE_MARKER = "dev_token_dashboard_statusline.js"
+
+
+def claude_config_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def load_settings_json(path):
+    """Like load_notify_state, but distinguishes a missing file (fine, an
+    empty settings.json is valid) from a malformed one (must abort rather
+    than silently treat a broken config as empty and overwrite it)."""
+    if not os.path.exists(path):
+        return {}, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f), None
+    except json.JSONDecodeError as e:
+        return None, f"{path} is not valid JSON: {e}"
+    except OSError as e:
+        return None, f"could not read {path}: {e}"
+
+
+def classify_statusline(settings):
+    sl = settings.get("statusLine")
+    command = sl.get("command") if isinstance(sl, dict) else None
+    if not isinstance(command, str) or not command:
+        return "missing"
+    if STATUSLINE_MARKER in command:
+        return "ours"
+    return "foreign"
+
+
+def merge_statusline_config(settings, statusline_js_path):
+    new_settings = dict(settings)
+    if classify_statusline(settings) == "missing":
+        new_settings["statusLine"] = {
+            "type": "command",
+            "command": f'node "{statusline_js_path}"',
+            "refreshInterval": 30,
+        }
+    else:  # "ours" -- caller must not call this for "foreign"
+        new_settings["statusLine"] = dict(settings["statusLine"], refreshInterval=30)
+    return new_settings
+
+
+def node_available():
+    return shutil.which("node") is not None
+
+
+def write_settings_with_backup(settings_path, new_settings):
+    backup_path = None
+    if os.path.exists(settings_path):
+        backup_path = f"{settings_path}.bak-{int(time.time())}"
+        shutil.copy2(settings_path, backup_path)
+    tmp = settings_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(new_settings, f, indent=2)
+    os.replace(tmp, settings_path)
+    return backup_path
+
+
+# Written verbatim to <claude_config_dir>/dev_token_dashboard_statusline.js by
+# run_setup_notifications() -- never to statusline.js or any user-chosen path.
+# Trimmed from the hand-written ~/.claude/statusline.js already in use on the
+# maintainer's machine: same merge-onto-previous-snapshot side effect, plus a
+# minimal one-line status output for users who had no statusLine at all.
+BUNDLED_STATUSLINE_JS = r"""// dev-token-dashboard:managed-statusline
+// Captures Anthropic's real rate_limits (five_hour/seven_day) for
+// dev_token_dashboard.py's plan-usage panel and toast notifications.
+// See docs/DASHBOARD_GUIDE.md#plan-usage-limits.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+let raw = '';
+process.stdin.on('data', d => raw += d);
+process.stdin.on('end', () => {
+  let j = {};
+  try { j = JSON.parse(raw); } catch (e) { /* fall through with j={} */ }
+
+  if (j.rate_limits) {
+    const outPath = path.join(os.homedir(), '.claude', 'rate_limits_latest.json');
+    let merged = {};
+    try {
+      const prev = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+      merged = Object.assign({}, prev.rate_limits);
+    } catch (e) { /* no previous snapshot, or unreadable -- start fresh */ }
+    Object.assign(merged, j.rate_limits);
+    const payload = JSON.stringify({
+      rate_limits: merged,
+      captured_at: Date.now() / 1000,
+    });
+    try {
+      const tmp = outPath + '.tmp';
+      fs.writeFileSync(tmp, payload);
+      fs.renameSync(tmp, outPath);
+    } catch (e) { /* best-effort; never break the status line over this */ }
+  }
+
+  const dir = (j.workspace && j.workspace.current_dir) || j.cwd || '';
+  const model = (j.model && j.model.display_name) || '';
+  const ctx = j.context_window && j.context_window.used_percentage;
+  const rl = j.rate_limits || {};
+  const five = rl.five_hour && rl.five_hour.used_percentage;
+  const seven = rl.seven_day && rl.seven_day.used_percentage;
+
+  let line = dir + '  ' + model;
+  if (ctx != null) line += `  ctx ${Math.round(ctx)}%`;
+  if (five != null) line += `  5h ${Math.round(five)}%`;
+  if (seven != null) line += `  wk ${Math.round(seven)}%`;
+  process.stdout.write(line);
+});
+"""
+
+
+def _print_final_report(print_fn):
+    fresh = load_rate_limits(RATE_LIMITS_PATH) is not None
+    print_fn("")
+    print_fn("Rate-limit capture:  " + ("ok, fresh" if fresh else
+              "not yet captured (will appear after your next Claude Code message)"))
+    print_fn("Toast notifications: " + ("ON" if NOTIFY.get("enabled", True) else "OFF") +
+              '  (edit NOTIFY["enabled"] in the script to change)')
+
+
+def run_setup_notifications(claude_dir=None, dry_run=False, input_fn=input,
+                             print_fn=print, isatty_fn=None):
+    isatty_fn = isatty_fn or sys.stdin.isatty
+    claude_dir = claude_dir or claude_config_dir()
+    settings_path = os.path.join(claude_dir, "settings.json")
+    statusline_js_path = os.path.join(claude_dir, STATUSLINE_MARKER)
+
+    if os.name != "nt":
+        print_fn("Toast notifications aren't available on this OS yet -- "
+                  "setting up rate-limit capture only.")
+
+    settings, err = load_settings_json(settings_path)
+    if err:
+        print_fn(f"[!] {err}")
+        print_fn("    Fix or remove this file, then re-run --setup-notifications.")
+        return 1
+
+    kind = classify_statusline(settings)
+
+    if kind == "foreign":
+        _report_foreign_statusline(settings, print_fn)
+        _print_final_report(print_fn)
+        return 0
+
+    if not node_available():
+        print_fn("[!] `node` was not found on PATH. Claude Code itself requires "
+                  "Node.js, so this is unexpected -- install it and re-run.")
+        return 1
+
+    new_settings = merge_statusline_config(settings, statusline_js_path)
+    if new_settings == settings and os.path.isfile(statusline_js_path):
+        print_fn(f"Already configured -- {settings_path} needs no changes.")
+        _print_final_report(print_fn)
+        return 0
+
+    print_fn("This will write:")
+    print_fn(f"  {statusline_js_path}")
+    print_fn(f"  statusLine block in {settings_path}:")
+    print_fn(json.dumps(new_settings["statusLine"], indent=2))
+
+    if dry_run:
+        print_fn("Dry run -- nothing written.")
+        return 0
+
+    if not isatty_fn():
+        print_fn("[!] Not running interactively -- re-run from a terminal, "
+                  "or pass --dry-run to preview only.")
+        return 1
+
+    answer = input_fn("Proceed? [y/N] ").strip().lower()
+    if answer != "y":
+        print_fn("Cancelled -- nothing written.")
+        return 0
+
+    with open(statusline_js_path, "w", encoding="utf-8") as f:
+        f.write(BUNDLED_STATUSLINE_JS)
+    try:
+        backup_path = write_settings_with_backup(settings_path, new_settings)
+    except OSError as e:
+        print_fn(f"[!] Could not write {settings_path}: {e}")
+        print_fn(f"    {statusline_js_path} was written, but the statusLine hook "
+                  "isn't wired in yet -- fix the permissions and re-run.")
+        return 1
+    if backup_path:
+        print_fn(f"Backed up previous settings to {backup_path}")
+    print_fn(f"Wrote {statusline_js_path} and updated {settings_path}.")
+    _print_final_report(print_fn)
+    return 0
+
+
+def _extract_script_path(command):
+    m = re.search(r'"([^"]+)"', command)
+    return m.group(1) if m else None
+
+
+def _report_foreign_statusline(settings, print_fn):
+    cmd = settings["statusLine"]["command"]
+    print_fn(f"An existing statusLine is already configured: {cmd}")
+    script_path = _extract_script_path(cmd)
+    try:
+        if script_path and os.path.isfile(script_path):
+            with open(script_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+            if "rate_limits" in content:
+                print_fn("Your existing script already looks like it references rate_limits.")
+    except Exception:
+        pass
+    if load_rate_limits(RATE_LIMITS_PATH) is not None:
+        print_fn(f"{RATE_LIMITS_PATH} already has a fresh capture -- you may already be covered.")
+    else:
+        print_fn(f"{RATE_LIMITS_PATH} has no fresh capture yet.")
+    print_fn("To add rate-limit capture to your own script, make it write this JSON")
+    print_fn("shape to ~/.claude/rate_limits_latest.json whenever `rate_limits` is")
+    print_fn("present in its stdin input (see the reference script below):")
+    print_fn(BUNDLED_STATUSLINE_JS)
+    print_fn("Full explanation: docs/DASHBOARD_GUIDE.md#plan-usage-limits")
+
+
+def startup_hint(rate_limits_path=None, is_windows=None):
+    rate_limits_path = rate_limits_path or RATE_LIMITS_PATH
+    is_windows = (os.name == "nt") if is_windows is None else is_windows
+    if is_windows and not os.path.exists(rate_limits_path):
+        return "  Tip: plan-usage % is a local estimate. Run --setup-notifications for real Anthropic numbers."
+    return None
+
+
 def default_root():
     env = os.environ.get("CLAUDE_CONFIG_DIR")
     if env:
@@ -2924,7 +3168,16 @@ def main():
                     help="Windows: run dashboard automatically at logon (Task Scheduler)")
     ap.add_argument("--uninstall-startup", action="store_true",
                     help="Windows: remove the logon task")
+    ap.add_argument("--setup-notifications", action="store_true",
+                    help="Wire up the statusLine hook for accurate plan-usage %% "
+                         "and toast notifications (Windows)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="With --setup-notifications, show what would change "
+                         "without writing anything")
     args = ap.parse_args()
+
+    if args.setup_notifications:
+        sys.exit(run_setup_notifications(dry_run=args.dry_run))
 
     if args.install_startup or args.uninstall_startup:
         if os.name != "nt":
@@ -2969,6 +3222,9 @@ def main():
     url = f"http://localhost:{args.port}"
     print(f"  Dev Token Dashboard running at {url}")
     print(f"  Reading logs from: {args.dir}")
+    hint = startup_hint()
+    if hint:
+        print(hint)
     print("  Ctrl+C to stop.")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
@@ -2981,7 +3237,10 @@ def main():
                 print(f"[warn] notification watcher error: {e}")
             time.sleep(NOTIFY["poll_seconds"])
 
-    threading.Thread(target=_notify_loop, daemon=True).start()
+    if should_run_notifications():
+        threading.Thread(target=_notify_loop, daemon=True).start()
+    else:
+        print('  Toast notifications: OFF (NOTIFY["enabled"] is False)')
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

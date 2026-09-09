@@ -755,10 +755,14 @@ Expected: prints what it would write (or "Already configured" if this machine al
 - [ ] **Step 3: Manually verify against a scratch config, not the real one**
 
 ```bash
-mkdir -p /tmp/scratch-claude-config
-CLAUDE_CONFIG_DIR=/tmp/scratch-claude-config python dev_token_dashboard.py --setup-notifications
+scratch=$(mktemp -d)
+CLAUDE_CONFIG_DIR="$scratch" python dev_token_dashboard.py --setup-notifications
 ```
-Answer `y` at the prompt. Expected: `/tmp/scratch-claude-config/settings.json` and `/tmp/scratch-claude-config/dev_token_dashboard_statusline.js` are created; the real `~/.claude/settings.json` is untouched. Re-run the same command — expected: "Already configured -- ... needs no changes."
+Answer `y` at the prompt. Expected: `$scratch/settings.json` and
+`$scratch/dev_token_dashboard_statusline.js` are created; the real
+`~/.claude/settings.json` is untouched. Re-run the same command (same
+`$scratch`) — expected: "Already configured -- ... needs no changes."
+Clean up afterward: `rm -rf "$scratch"`.
 
 - [ ] **Step 4: Run the full test suite**
 
