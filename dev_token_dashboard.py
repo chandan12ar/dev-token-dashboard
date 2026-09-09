@@ -1587,6 +1587,7 @@ transition:width .55s cubic-bezier(.2,.7,.2,1)}
 .planw{display:flex;flex-direction:column;gap:12px}
 .plant{display:flex;align-items:baseline;gap:8px;font-weight:650}
 .plant .hint{margin-left:0}
+.plant .hint.stale{color:var(--amber);font-weight:650}
 .planrow{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
 .plancol{min-width:140px}
 .pcs{font-weight:600;font-size:.8125rem}
@@ -2341,8 +2342,19 @@ function renderPlanUsage(){
       '<div class="pcpct">'+pct+'% used</div></div>';};
   let rows=barRow('Current session',pw.pct,pw.resets_in_min);
   if(isOfficial&&pw.week_pct!=null)rows+=barRow('This week',pw.week_pct,pw.week_resets_in_min);
-  const age=isOfficial&&pw.captured_age_min!=null?
-    ' <span class="hint">as of '+(pw.captured_age_min<1?'just now':pw.captured_age_min+'m ago')+'</span>':'';
+  // The statusline only re-captures on Claude Code activity (see statusline.js),
+  // so a gap here means no session on this machine has made an API call
+  // recently -- the number shown is real, just not necessarily current.
+  // Above STALE_AGE_MIN, say so loudly rather than a quiet gray hint.
+  const STALE_AGE_MIN=2;
+  let age='';
+  if(isOfficial&&pw.captured_age_min!=null){
+    const stale=pw.captured_age_min>=STALE_AGE_MIN;
+    age=' <span class="hint'+(stale?' stale':'')+'" title="Updates only when a Claude Code session on this machine is active. It can lag the live /usage number during idle stretches.">'+
+      (stale?'⚠ last updated '+pw.captured_age_min+'m ago, may be behind'
+            :(pw.captured_age_min<1?'as of just now':'as of '+pw.captured_age_min+'m ago'))+
+      '</span>';
+  }
   $('planUsage').innerHTML=
     '<div class="planw"><div class="plant">Plan usage limits<span class="hint">'+
     (isOfficial?'(live)':'(estimate)')+'</span>'+age+'</div>'+rows+'</div>';}

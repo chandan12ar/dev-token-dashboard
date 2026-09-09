@@ -69,6 +69,36 @@ requests — even Chart.js is bundled locally.
 *How to read it:* purely motivational — a GitHub-style contribution
 streak for AI-assisted work.
 
+## Plan usage limits
+
+Shows your real Anthropic 5-hour and 7-day rate-limit usage — the same
+percentages the `/usage` command and claude.ai report — not a locally
+guessed estimate.
+
+| Item | What it tells you | Where it comes from |
+|---|---|---|
+| **Current session** | % of the rolling 5-hour plan window used | `rate_limits.five_hour.used_percentage` from Claude Code's `statusLine` hook |
+| **This week** | % of the rolling 7-day window used | `rate_limits.seven_day.used_percentage`, same hook |
+| **"as of Xm ago" / ⚠ warning** | how old this snapshot is | see below |
+
+*How it's captured:* a `statusLine` hook (`~/.claude/statusline.js`)
+writes Anthropic's real rate-limit numbers to
+`~/.claude/rate_limits_latest.json` every time it runs. The dashboard
+just reads that file — it never calls the Anthropic API itself, so this
+stays free.
+
+*Why it can lag:* the hook only re-runs when a Claude Code session on
+this machine is actually active (a new message, `/compact`, etc.) — not
+on a fixed timer, unless you set `refreshInterval` in `statusLine`
+settings (this project sets it to 30s). If no session has been active
+recently, the number shown is real but not current, and the card marks
+it with a yellow ⚠ once it's more than 2 minutes old. Refreshing the
+browser can't fix that by itself — it re-reads the same file; only new
+Claude Code activity (in any window) writes a fresher one. If the file
+is missing entirely or older than 30 minutes, the card falls back to a
+local token-count estimate and labels itself "(estimate)" instead of
+"(live)".
+
 ## KPI cards
 
 Each card shows the total for the selected range, plus a ▲/▼ percentage
@@ -285,3 +315,10 @@ No — honest heuristics, documented formula-by-formula in
 [METRICS.md](METRICS.md). Watch the trend, not the value. Everything
 that *is* exact (tokens, cache, tools, per-model/project splits) is
 exact arithmetic over deduplicated logs.
+
+**"Plan usage % doesn't match what claude.ai/`/usage` shows me right now"**
+It's real Anthropic data, not an estimate — but it's captured passively
+by a `statusLine` hook that only updates when a Claude Code session on
+this machine is active, so it can be a few minutes behind. See
+[Plan usage limits](#plan-usage-limits) above; the card itself flags a
+stale reading with a yellow ⚠ instead of hiding the lag.
