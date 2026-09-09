@@ -9,3 +9,7 @@ Thumbs.db
 
 # Local auto-start launcher (machine-specific)
 DevTokenDashboard-Startup.vbs
+
+# Notification threshold-tracking state (local runtime data)
+.notify_state.json
+.notify_state.json.tmp

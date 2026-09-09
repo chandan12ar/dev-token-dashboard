@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -48,6 +49,45 @@ GOALS = {
     "daily_loc": 500,        # target lines of code / day
     "daily_tokens": 0,       # output-token budget / day (e.g. 1_000_000)
     "weekly_tokens": 0,      # output-token budget / week (e.g. 5_000_000)
+}
+
+# ---------------------------------------------------------------------------
+# Live token-usage pop-up notifications for whatever Claude Code session is
+# currently running. Independent signals, each fired at most once per
+# threshold as it's crossed:
+#   - plan_pct:     ALL sessions' tokens combined, as a % of window_ceiling,
+#                   within a rolling ~5h window that resets like the Claude
+#                   app's "Current session" plan-usage panel. window_ceiling
+#                   is a local estimate (Anthropic's real ceiling isn't
+#                   queryable) — tune it by eyeballing the app's real %.
+#   - context_pct:  latest turn's (input+cache) as a % of context_window
+#   - session_step: cumulative session tokens, every flat session_step tokens
+#   - task_step:    cumulative tokens since the last user message, every
+#                   flat task_step tokens (resets each new user message)
+# ---------------------------------------------------------------------------
+NOTIFY = {
+    "enabled": True,
+    "context_window": 0,       # 0 = disabled; was firing per-turn context-fill pops
+    # weighted (input-token-equivalent) tokens for one 5h plan window — see
+    # weighted_tokens(). Calibrated 2026-09-07 against the real Pro app panel
+    # (35% used, resets in 3h16m -> ~104min elapsed): this session's actual
+    # weighted usage in that span was ~9.16M, so ceiling = 9.16M / 0.35.
+    # One data point on one (cache-heavy coding) session — re-tune if it
+    # drifts from the real panel.
+    "window_ceiling": 26_000_000,
+    "session_step": 0,         # 0 = disabled; redundant with plan_pct's 100% mark
+    "task_step": 0,            # 0 = disabled; was firing alongside session_step
+    "poll_seconds": 5,
+    "active_window_min": 15,   # only watch sessions written to in the last N min
+}
+MILESTONES = (25, 50, 75, 85, 100)
+# Per-kind override for the official rate-limit notifications (see
+# NotificationWatcher._poll_official_rate_limits) -- the weekly window is
+# watched at a coarser cadence than the 5h "current session" one, which
+# uses MILESTONES above.
+OFFICIAL_MILESTONES = {
+    "five_hour": MILESTONES,
+    "seven_day": (20, 40, 60, 80, 100),
 }
 
 CODE_TOOLS_WRITE = {"Write", "Create"}          # tools whose 'content' is new code
@@ -425,6 +465,505 @@ class Scanner:
                 print(f"[warn] {st.parse_errors} log entries could not be parsed "
                       "(log format may have changed - stats may be incomplete)")
             return st
+
+
+# ---------------------------------------------------------------------------
+# Token-usage notification thresholds (pure functions — no I/O, easy to test)
+# ---------------------------------------------------------------------------
+
+def milestones_crossed(prev_value, new_value, total, milestones=MILESTONES):
+    """Milestone percentages (of `total`) whose threshold lies in
+    (prev_value, new_value]. Comparing prev vs. new (rather than tracking
+    "already fired" state) means a threshold naturally refires if usage
+    drops below it (e.g. a context compaction) and climbs back past it."""
+    if not total or total <= 0:
+        return []
+    crossed = []
+    for m in milestones:
+        thresh = total * m / 100.0
+        if prev_value < thresh <= new_value:
+            crossed.append(m)
+    return crossed
+
+
+def steps_crossed(prev_total, new_total, step):
+    """Flat multiples of `step` whose value lies in (prev_total, new_total]."""
+    if not step or step <= 0:
+        return []
+    prev_n = int(prev_total // step)
+    new_n = int(new_total // step)
+    if new_n <= prev_n:
+        return []
+    return [step * n for n in range(prev_n + 1, new_n + 1)]
+
+
+def weighted_tokens(input_tokens, output_tokens, cache_write, cache_read):
+    """Quota-weighted usage in input-token-equivalent units, using the same
+    relative weights as PRICING (every tier prices output at 5x input,
+    cache write at 1.25x, cache read at 0.1x) — a raw token sum wildly
+    overcounts a cache-heavy coding session against Anthropic's real
+    rolling-window quota, since cache reads are far cheaper than fresh input."""
+    return (input_tokens + output_tokens * 5
+            + cache_write * 1.25 + cache_read * 0.1)
+
+
+class SessionTokenTracker:
+    """Replays a Claude Code session's usage events in order and reports
+    newly-crossed notification thresholds. Stateless besides the three
+    running totals, so it can be resumed after a restart by passing in the
+    previously persisted totals — avoids re-firing thresholds already seen."""
+
+    def __init__(self, notify=NOTIFY, session_total=0, task_total=0,
+                 last_context_usage=0):
+        self.notify = notify
+        self.session_total = session_total
+        self.task_total = task_total
+        self.last_context_usage = last_context_usage
+
+    def on_user_message(self):
+        """Call on each new real (non-tool-result) user message — starts a
+        new task, so the task_step counter resets."""
+        self.task_total = 0
+
+    def on_usage(self, input_tokens, output_tokens, cache_write, cache_read):
+        events = []
+        added = input_tokens + output_tokens + cache_write + cache_read
+        context_now = input_tokens + cache_write + cache_read
+
+        prev_context = self.last_context_usage
+        self.last_context_usage = context_now
+        for m in milestones_crossed(prev_context, context_now,
+                                     self.notify["context_window"]):
+            events.append(("context_pct", m, context_now))
+
+        prev_session = self.session_total
+        self.session_total += added
+        for step_val in steps_crossed(prev_session, self.session_total,
+                                       self.notify["session_step"]):
+            events.append(("session_step", step_val, self.session_total))
+
+        prev_task = self.task_total
+        self.task_total += added
+        for step_val in steps_crossed(prev_task, self.task_total,
+                                       self.notify["task_step"]):
+            events.append(("task_step", step_val, self.task_total))
+
+        return events
+
+    def state(self):
+        return {"session_total": self.session_total,
+                "task_total": self.task_total,
+                "last_context_usage": self.last_context_usage}
+
+
+WINDOW_SECONDS = 5 * 3600
+
+# Official rate-limit data, captured by a Claude Code statusLine hook (see
+# ~/.claude/statusline.js) and dropped as JSON every time the status line
+# renders — the exact 5h/7d plan-usage percentage Anthropic's backend
+# reports, not the ceiling guess PlanWindowTracker below makes. Preferred
+# over the estimate whenever it's fresh. The status line only updates while
+# a session is open and actively rendering, so a stale file (older than
+# RATE_LIMITS_STALE_SECONDS) is treated as unavailable and we fall back to
+# the estimate rather than show a number that's stopped moving.
+RATE_LIMITS_PATH = os.path.join(os.path.expanduser("~"), ".claude", "rate_limits_latest.json")
+RATE_LIMITS_STALE_SECONDS = 30 * 60
+
+
+def load_rate_limits(path, now=None):
+    now = time.time() if now is None else now
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if now - data.get("captured_at", 0) > RATE_LIMITS_STALE_SECONDS:
+        return None
+    return data
+
+
+class PlanWindowTracker:
+    """Approximates the Claude app's 'Current session' plan-usage panel: a
+    single GLOBAL rolling window (combining every Claude Code session, not
+    per-session like SessionTokenTracker) that starts on the first usage
+    event seen and resets fully — not a sliding average — once WINDOW_SECONDS
+    has elapsed, mirroring the app's hard reset rather than a decaying one.
+    `ceiling` is a local, user-tuned estimate; Anthropic's real per-window
+    token ceiling isn't queryable locally. Used only as a fallback when
+    load_rate_limits() has no fresh official number (see RATE_LIMITS_PATH)."""
+
+    def __init__(self, ceiling, window_start=None, window_total=0):
+        self.ceiling = ceiling
+        self.window_start = window_start
+        self.window_total = window_total
+
+    def add(self, ts_epoch, tokens):
+        if self.window_start is None or ts_epoch - self.window_start >= WINDOW_SECONDS:
+            self.window_start = ts_epoch
+            self.window_total = 0
+        prev_total = self.window_total
+        self.window_total += tokens
+        return milestones_crossed(prev_total, self.window_total, self.ceiling)
+
+    def pct(self):
+        if not self.ceiling:
+            return 0
+        return min(100, int(self.window_total / self.ceiling * 100))
+
+    def resets_in_seconds(self, now_epoch):
+        if self.window_start is None:
+            return 0
+        return max(0, int(self.window_start + WINDOW_SECONDS - now_epoch))
+
+    def state(self):
+        return {"window_start": self.window_start, "window_total": self.window_total}
+
+
+def load_notify_state(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_notify_state(path, state):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    os.replace(tmp, path)
+
+
+def _fmt_k(n):
+    n = n or 0
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1000:.1f}k"
+    return str(int(n))
+
+
+def send_windows_toast(title, message):
+    """Fire a native Windows toast via the built-in WinRT API through
+    powershell.exe — no pip dependency, no module install, matches how
+    Restart-Dashboard.ps1 already shells out to PowerShell."""
+    if os.name != "nt":
+        return
+    ps_script = (
+        '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, '
+        'ContentType=WindowsRuntime] > $null;'
+        '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, '
+        'ContentType=WindowsRuntime] > $null;'
+        '$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('
+        '[Windows.UI.Notifications.ToastTemplateType]::ToastText02);'
+        '$x = $t.GetElementsByTagName("text");'
+        '$x.Item(0).AppendChild($t.CreateTextNode($env:DTD_TOAST_TITLE)) > $null;'
+        '$x.Item(1).AppendChild($t.CreateTextNode($env:DTD_TOAST_MSG)) > $null;'
+        '$n = [Windows.UI.Notifications.ToastNotification]::new($t);'
+        '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('
+        '"Dev Token Dashboard").Show($n)'
+    )
+    env = dict(os.environ, DTD_TOAST_TITLE=title, DTD_TOAST_MSG=message)
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+             "-Command", ps_script],
+            env=env, creationflags=subprocess.CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        pass
+
+
+class NotificationWatcher:
+    """Polls the Scanner for sessions being actively written to and fires
+    token-usage notifications as SessionTokenTracker crosses thresholds.
+
+    Progress is persisted to `state_path` so restarting the dashboard mid
+    -session doesn't re-fire thresholds already seen. A session's very first
+    sighting (either on disk from a prior run, or freshly discovered) is
+    replayed silently to build an accurate baseline before any events fire —
+    otherwise reopening the dashboard mid-session would immediately dump a
+    burst of "you already passed 25/50/75%" notifications.
+    """
+
+    def __init__(self, scanner, notify=NOTIFY, state_path=None, rate_limits_path=None):
+        self.scanner = scanner
+        self.notify = notify
+        self.state_path = state_path or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), ".notify_state.json")
+        self.rate_limits_path = rate_limits_path or RATE_LIMITS_PATH
+        saved = load_notify_state(self.state_path)
+        self._raw_state = saved.get("sessions", {})
+        # last-seen official five_hour/seven_day used_percentage, so a
+        # restart doesn't refire milestones already crossed before it -- same
+        # "baseline on first sight" reasoning as _seen_counts/baseline_sids.
+        self._official_prev = dict(saved.get("official_prev", {}))
+        # how many entries of each file were already replayed *before* this
+        # process started — restoring this is what stops a restart from
+        # replaying a session's whole history on top of its already-saved
+        # cumulative total (which would double-count it, and can also mean
+        # firing thousands of already-past thresholds in one synchronous
+        # burst for a long-running session).
+        self._seen_counts = dict(saved.get("seen_counts", {}))
+        self.trackers = {}       # sid -> SessionTokenTracker
+        self.meta = {}           # sid -> {"project":..., "title":...}
+        self.recent_events = []  # for the /api/stats "notifications" field
+        self._lock = threading.Lock()
+        pw = saved.get("plan_window") or {}
+        self.plan_tracker = PlanWindowTracker(
+            ceiling=self.notify["window_ceiling"],
+            window_start=pw.get("window_start"),
+            window_total=pw.get("window_total", 0))
+
+    def _tracker_for(self, sid):
+        t = self.trackers.get(sid)
+        if t is None:
+            saved = self._raw_state.get(sid, {})
+            t = SessionTokenTracker(
+                notify=self.notify,
+                session_total=saved.get("session_total", 0),
+                task_total=saved.get("task_total", 0),
+                last_context_usage=saved.get("last_context_usage", 0),
+            )
+            self.trackers[sid] = t
+        return t
+
+    @staticmethod
+    def _is_real_user_text(content):
+        # Failed tool results ride back on "user"-type entries (see
+        # parse_entry) — a block-list made up entirely of tool_result isn't
+        # a real user message and shouldn't reset the per-task counter.
+        if isinstance(content, list):
+            if content and all(isinstance(b, dict) and b.get("type") == "tool_result"
+                                for b in content):
+                return False
+            return True
+        return bool(content)
+
+    def poll_once(self):
+        if not self.notify.get("enabled"):
+            return
+        with self.scanner._lock:
+            self.scanner.scan()
+            entries_by_path = dict(self.scanner._entries)
+        cutoff = time.time() - self.notify["active_window_min"] * 60
+        # Snapshot which sessions we already knew about *before* this poll
+        # cycle touches anything — a session's logs can span multiple files,
+        # and computing this per-file (against a live-mutating self.trackers)
+        # would let a session slip past the "first sight" baseline check on
+        # whichever file happens to be processed second.
+        known_before_poll = set(self._raw_state) | set(self.trackers)
+        # Coalesce every threshold crossed this poll into one entry per
+        # (sid, kind) — a burst of catch-up entries (dashboard was down, or
+        # several turns landed between polls) can cross the same kind of
+        # threshold repeatedly, and firing a toast per crossing turns one
+        # real event into a rapid-fire stack of near-identical popups.
+        pending = {}
+        # (ts_epoch, tokens) for every usage event this poll, across every
+        # session — the plan window is account-wide, not per session, so it
+        # has to see all of them merged in true chronological order.
+        plan_events = []
+        for path, entries in entries_by_path.items():
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime < cutoff:
+                continue
+            project = os.path.basename(os.path.dirname(path)) or "unknown"
+            project = project.lstrip("-").replace("--", "/").replace("-", "/")
+            self._replay(path, entries, project, known_before_poll, pending, plan_events)
+        for (sid, kind), (value, total) in pending.items():
+            self._fire(sid, kind, value, total)
+        plan_events.sort(key=lambda e: e[0])
+        plan_fire = None
+        for ts_epoch, tokens in plan_events:
+            crossed = self.plan_tracker.add(ts_epoch, tokens)
+            if crossed:
+                plan_fire = (crossed[-1], self.plan_tracker.window_total)
+        if plan_fire is not None:
+            self._fire_plan(*plan_fire)
+        self._poll_official_rate_limits()
+        self._save_state()
+
+    def _poll_official_rate_limits(self):
+        data = load_rate_limits(self.rate_limits_path)
+        if not data:
+            return
+        rl = data.get("rate_limits") or {}
+        for kind, label in (("five_hour", "Current 5h session"), ("seven_day", "This week")):
+            window = rl.get(kind)
+            if not window or window.get("used_percentage") is None:
+                continue
+            pct = window["used_percentage"]
+            prev = self._official_prev.get(kind)
+            if prev is not None:
+                crossed = milestones_crossed(prev, pct, 100,
+                                              milestones=OFFICIAL_MILESTONES[kind])
+                if crossed:
+                    self._fire_official(kind, label, crossed[-1], pct, window.get("resets_at"))
+            self._official_prev[kind] = pct
+
+    def _replay(self, path, entries, project, known_before_poll, pending, plan_events):
+        seen = self._seen_counts.get(path, 0)
+        new_entries = entries[seen:]
+        self._seen_counts[path] = len(entries)
+        if not new_entries:
+            return
+        baseline_sids = ({e.get("sessionId") for e in new_entries if e.get("sessionId")}
+                          - known_before_poll)
+        for entry in new_entries:
+            etype = entry.get("type")
+            sid = entry.get("sessionId")
+            if etype == "ai-title" and sid:
+                title = entry.get("aiTitle")
+                if title:
+                    self.meta.setdefault(sid, {})["title"] = title
+                continue
+            if etype not in ("user", "assistant") or entry.get("isMeta") or not sid:
+                continue
+            meta = self.meta.setdefault(sid, {})
+            meta.setdefault("project", project)
+            tracker = self._tracker_for(sid)
+            if etype == "user":
+                content = (entry.get("message") or {}).get("content")
+                if self._is_real_user_text(content):
+                    tracker.on_user_message()
+                continue
+            usage = (entry.get("message") or {}).get("usage") or {}
+            if not usage:
+                continue
+            input_tokens = usage.get("input_tokens", 0) or 0
+            output_tokens = usage.get("output_tokens", 0) or 0
+            cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+            cache_read = usage.get("cache_read_input_tokens", 0) or 0
+            events = tracker.on_usage(input_tokens, output_tokens, cache_write, cache_read)
+            if sid in baseline_sids:
+                continue
+            for kind, value, total in events:
+                pending[(sid, kind)] = (value, total)
+            # a brand-new session's own first sighting still skips the plan
+            # window too — same reasoning as baseline_sids above, otherwise
+            # reopening the dashboard mid-session would dump that session's
+            # entire history into the account-wide total in one shot.
+            try:
+                ts_epoch = datetime.fromisoformat(
+                    (entry.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                continue
+            plan_events.append((ts_epoch, weighted_tokens(
+                input_tokens, output_tokens, cache_write, cache_read)))
+
+    def _fire(self, sid, kind, value, total):
+        meta = self.meta.get(sid, {})
+        title = meta.get("title") or "Untitled session"
+        project = meta.get("project", "unknown")
+        label = {
+            "context_pct": f"Context {value}% full ({_fmt_k(total)} / "
+                            f"{_fmt_k(self.notify['context_window'])} tokens)",
+            "session_step": f"Session has used {_fmt_k(total)} tokens (+{_fmt_k(value)})",
+            "task_step": f"Current task has used {_fmt_k(total)} tokens (+{_fmt_k(value)})",
+        }[kind]
+        event = {
+            "id": f"{sid}:{kind}:{value}",
+            "ts": time.time(),
+            "project": project,
+            "title": title,
+            "message": label,
+        }
+        with self._lock:
+            self.recent_events.append(event)
+            del self.recent_events[:-50]
+        send_windows_toast(f"{project} — {title}"[:64], label)
+
+    def _fire_plan(self, value, total):
+        resets_in = self.plan_tracker.resets_in_seconds(time.time())
+        h, m = divmod(resets_in // 60, 60)
+        label = (f"Current session {value}% used ({_fmt_k(total)} / "
+                 f"{_fmt_k(self.notify['window_ceiling'])} tokens, est.) — "
+                 f"resets in {h}h {m}m")
+        event = {
+            "id": f"plan:{value}:{int(total)}",
+            "ts": time.time(),
+            "project": "plan",
+            "title": "Plan usage (estimate)",
+            "message": label,
+        }
+        with self._lock:
+            self.recent_events.append(event)
+            del self.recent_events[:-50]
+        send_windows_toast("Plan usage limits (estimate)", label)
+
+    def _fire_official(self, kind, label, milestone, pct, resets_at):
+        resets_txt = ""
+        if resets_at:
+            resets_in = max(0, int(resets_at - time.time()))
+            h, m = divmod(resets_in // 60, 60)
+            resets_txt = f" — resets in {h}h {m}m"
+        message = f"{label} {milestone}% used (official){resets_txt}"
+        event = {
+            "id": f"official:{kind}:{milestone}",
+            "ts": time.time(),
+            "project": "plan",
+            "title": f"{label} usage",
+            "message": message,
+        }
+        with self._lock:
+            self.recent_events.append(event)
+            del self.recent_events[:-50]
+        send_windows_toast(f"{label} usage", message)
+
+    def plan_window_snapshot(self):
+        official = load_rate_limits(self.rate_limits_path)
+        if official:
+            rl = official.get("rate_limits") or {}
+            five = rl.get("five_hour") or {}
+            if five.get("used_percentage") is not None:
+                seven = rl.get("seven_day") or {}
+
+                def resets_min(w):
+                    ra = w.get("resets_at")
+                    return max(0, int((ra - time.time()) // 60)) if ra else None
+
+                # The statusline only re-captures on session events (a new
+                # assistant message, /compact, ...), not on a timer, so the
+                # number can lag real usage by however long since the last
+                # render -- up to RATE_LIMITS_STALE_SECONDS. Surfacing that
+                # age lets the UI show *why* this can be a couple % behind
+                # what /usage reports at the exact moment you check it.
+                age_min = max(0, int((time.time() - official.get("captured_at", time.time())) // 60))
+                return {
+                    "source": "official",
+                    "pct": min(100, round(five["used_percentage"])),
+                    "resets_in_min": resets_min(five),
+                    "week_pct": (min(100, round(seven["used_percentage"]))
+                                 if seven.get("used_percentage") is not None else None),
+                    "week_resets_in_min": resets_min(seven),
+                    "captured_age_min": age_min,
+                }
+        return {
+            "source": "estimate",
+            "pct": self.plan_tracker.pct(),
+            "used": self.plan_tracker.window_total,
+            "ceiling": self.notify["window_ceiling"],
+            "resets_in_min": self.plan_tracker.resets_in_seconds(time.time()) // 60,
+        }
+
+    def _save_state(self):
+        # Merge onto the originally-loaded sessions rather than replacing
+        # them outright — a session outside the active window this poll
+        # (gone quiet, or not yet rescanned) must keep its persisted total;
+        # otherwise it would silently reset to 0 the next time it's touched.
+        sessions = dict(self._raw_state)
+        sessions.update({sid: t.state() for sid, t in self.trackers.items()})
+        state = {"sessions": sessions, "seen_counts": self._seen_counts,
+                  "plan_window": self.plan_tracker.state(),
+                  "official_prev": self._official_prev}
+        try:
+            save_notify_state(self.state_path, state)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -945,11 +1484,14 @@ border-top:1px solid var(--hair);
 opacity:var(--sc,0);transition:opacity .2s ease}
 
 .content{max-width:1280px;margin:0 auto;padding:6px 30px 56px}
-#alerts:not(:empty){margin:10px 0 4px}
+#alerts:not(:empty){margin:10px 0 4px;display:flex;flex-direction:column;gap:8px}
 .warn{display:inline-flex;gap:9px;align-items:center;font-size:.75rem;color:var(--amber);
 background:var(--fill);border:1px solid var(--hair);border-left:3px solid var(--amber);
 padding:10px 14px;border-radius:var(--r-ctl);box-shadow:var(--sh-1)}
 .warn svg{width:15px;height:15px;flex:none}
+.warn.notify{color:var(--sky);border-left-color:var(--sky)}
+.notifyX{margin-left:auto;background:none;border:0;color:inherit;cursor:pointer;
+font-size:1rem;line-height:1;padding:0 2px;flex:none}
 
 /* ═══════════════════════════ Controls ═══════════════════════════ */
 .seg{position:relative;display:inline-flex;background:var(--fill-3);
@@ -1040,6 +1582,17 @@ font-size:.6875rem;color:var(--txt-3);margin-bottom:6px;letter-spacing:.01em}
 background:linear-gradient(90deg,var(--acc),var(--acc-2));
 transition:width .55s cubic-bezier(.2,.7,.2,1)}
 .bar.over>i{background:linear-gradient(90deg,var(--amber),var(--rose))}
+
+/* ── Plan usage (est.) ── */
+.planw{display:flex;flex-direction:column;gap:12px}
+.plant{display:flex;align-items:baseline;gap:8px;font-weight:650}
+.plant .hint{margin-left:0}
+.planrow{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.plancol{min-width:140px}
+.pcs{font-weight:600;font-size:.8125rem}
+.pcr{font-size:.6875rem;color:var(--txt-3);margin-top:2px;letter-spacing:.01em}
+.planbar{flex:1;min-width:160px;height:8px}
+.pcpct{font-size:.75rem;color:var(--txt-3);white-space:nowrap}
 
 /* ── KPI tiles ── */
 .kgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px}
@@ -1279,6 +1832,7 @@ background:var(--fill)}
 <!-- ══════════════ Overview ══════════════ -->
 <section id="s-overview" class="stack">
   <div class="card flat" id="momCard" style="display:none;--i:0"><div class="mom" id="mom"></div></div>
+  <div class="card flat" id="planCard" style="display:none;--i:0"><div id="planUsage"></div></div>
   <div class="kgrid" id="kpis" style="--i:1"></div>
   <div class="card" style="--i:2"><div class="chead">
     <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8" rx="1"/><rect x="12" y="6" width="3" height="12" rx="1"/><rect x="17" y="13" width="3" height="5" rx="1"/></svg></span>
@@ -1718,6 +2272,20 @@ async function load(){
       D.totals.parse_errors.toLocaleString()+
       ' log entries could not be parsed — the log format may have changed; stats may be incomplete.</span>';
   }else if(pw){pw.remove();}
+  if(D.notifications&&D.notifications.length){
+    const seen=window.__notifySeen||(window.__notifySeen=new Set());
+    D.notifications.forEach(n=>{
+      if(seen.has(n.id))return;
+      seen.add(n.id);
+      const el=document.createElement('div');
+      el.className='warn notify';
+      el.innerHTML=ic('alert')+'<span>'+esc(n.project)+' — '+esc(n.title)+': '+
+        esc(n.message)+'</span><button class="notifyX" aria-label="Dismiss">&times;</button>';
+      el.querySelector('.notifyX').onclick=()=>el.remove();
+      $('alerts').appendChild(el);
+      setTimeout(()=>el.remove(),20000);
+    });
+  }
   if(wIdx===null&&D.weeks.length)wIdx=D.weeks.length-1;
   if(wIdx!==null&&wIdx>=D.weeks.length)wIdx=D.weeks.length-1;
   updateChrome();render();
@@ -1758,9 +2326,31 @@ function renderMomentum(){
   if(bars.length)h+='<div class="goals">'+bars.join('')+'</div>';
   $('mom').innerHTML=h;}
 
+function renderPlanUsage(){
+  const card=$('planCard'),pw=D.plan_window;
+  const active=pw&&(pw.source==='official'||pw.ceiling);
+  if(!active){card.style.display='none';return;}
+  card.style.display='';
+  const isOfficial=pw.source==='official';
+  const barRow=(title,pct,mins)=>{
+    const p=Math.min(100,pct),over=pct>=100,hasMins=mins!=null;
+    const rh=hasMins?Math.floor(mins/60):0,rm=hasMins?mins%60:0;
+    return '<div class="planrow"><div class="plancol"><div class="pcs">'+title+'</div>'+
+      (hasMins?'<div class="pcr">Resets in '+rh+'h '+rm+'m</div>':'')+'</div>'+
+      '<div class="bar planbar'+(over?' over':'')+'"><i style="width:'+p+'%"></i></div>'+
+      '<div class="pcpct">'+pct+'% used</div></div>';};
+  let rows=barRow('Current session',pw.pct,pw.resets_in_min);
+  if(isOfficial&&pw.week_pct!=null)rows+=barRow('This week',pw.week_pct,pw.week_resets_in_min);
+  const age=isOfficial&&pw.captured_age_min!=null?
+    ' <span class="hint">as of '+(pw.captured_age_min<1?'just now':pw.captured_age_min+'m ago')+'</span>':'';
+  $('planUsage').innerHTML=
+    '<div class="planw"><div class="plant">Plan usage limits<span class="hint">'+
+    (isOfficial?'(live)':'(estimate)')+'</span>'+age+'</div>'+rows+'</div>';}
+
 function renderOverview(){
   const d=D,t=d.totals;
   renderMomentum();
+  renderPlanUsage();
   const S=k=>d.days.map(x=>x[k]||0);
   const kpis=[
     ['Input tokens',fmt(t.input),'sent to Claude','in',C.sky,t.input,'input',S('input')],
@@ -2258,6 +2848,9 @@ class Handler(BaseHTTPRequestHandler):
             data["streak"], data["best_streak"] = active_streak(alldays)
             data["active_days"] = len(alldays)
             data["goals"] = GOALS
+            watcher = getattr(self, "watcher", None)
+            data["notifications"] = list(watcher.recent_events[-20:]) if watcher else []
+            data["plan_window"] = watcher.plan_window_snapshot() if watcher else None
             if alldays:
                 last = alldays[-1]
                 data["today"] = {"day": last, "loc": full.days[last]["loc"],
@@ -2355,8 +2948,11 @@ def main():
         print(json.dumps(stats_to_json(scanner.build_stats(), None), indent=2))
         return
 
+    watcher = NotificationWatcher(scanner)
+
     Handler.scanner = scanner
     Handler.root = args.dir
+    Handler.watcher = watcher
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://localhost:{args.port}"
     print(f"  Dev Token Dashboard running at {url}")
@@ -2364,6 +2960,16 @@ def main():
     print("  Ctrl+C to stop.")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+    def _notify_loop():
+        while True:
+            try:
+                watcher.poll_once()
+            except Exception as e:
+                print(f"[warn] notification watcher error: {e}")
+            time.sleep(NOTIFY["poll_seconds"])
+
+    threading.Thread(target=_notify_loop, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
