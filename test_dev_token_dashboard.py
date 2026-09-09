@@ -2,6 +2,7 @@
 
 Run with:  python -m unittest test_dev_token_dashboard -v
 """
+import json
 import os
 import tempfile
 import unittest
@@ -657,6 +658,46 @@ class ClaudeConfigDirTests(unittest.TestCase):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
             expected = os.path.join(os.path.expanduser("~"), ".claude")
             self.assertEqual(dtd.claude_config_dir(), expected)
+
+
+class NodeAvailableTests(unittest.TestCase):
+    def test_true_when_which_finds_node(self):
+        with patch.object(dtd.shutil, "which", return_value=r"C:\nodejs\node.exe"):
+            self.assertTrue(dtd.node_available())
+
+    def test_false_when_which_finds_nothing(self):
+        with patch.object(dtd.shutil, "which", return_value=None):
+            self.assertFalse(dtd.node_available())
+
+
+class WriteSettingsWithBackupTests(unittest.TestCase):
+    def test_no_backup_when_file_did_not_exist(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            backup = dtd.write_settings_with_backup(path, {"a": 1})
+            self.assertIsNone(backup)
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {"a": 1})
+
+    def test_backs_up_exact_prior_content_then_writes_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"old": true}')
+            backup = dtd.write_settings_with_backup(path, {"new": True})
+            self.assertIsNotNone(backup)
+            self.assertTrue(os.path.exists(backup))
+            with open(backup, encoding="utf-8") as f:
+                self.assertEqual(f.read(), '{"old": true}')
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {"new": True})
+
+    def test_written_file_is_valid_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            dtd.write_settings_with_backup(path, {"statusLine": {"type": "command"}})
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {"statusLine": {"type": "command"}})
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -2956,6 +2957,79 @@ def merge_statusline_config(settings, statusline_js_path):
     else:  # "ours" -- caller must not call this for "foreign"
         new_settings["statusLine"] = dict(settings["statusLine"], refreshInterval=30)
     return new_settings
+
+
+def node_available():
+    return shutil.which("node") is not None
+
+
+def write_settings_with_backup(settings_path, new_settings):
+    backup_path = None
+    if os.path.exists(settings_path):
+        backup_path = f"{settings_path}.bak-{int(time.time())}"
+        with open(settings_path, "r", encoding="utf-8") as f:
+            original = f.read()
+        with open(backup_path, "w", encoding="utf-8") as f:
+            f.write(original)
+    tmp = settings_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(new_settings, f, indent=2)
+    os.replace(tmp, settings_path)
+    return backup_path
+
+
+# Written verbatim to <claude_config_dir>/dev_token_dashboard_statusline.js by
+# run_setup_notifications() -- never to statusline.js or any user-chosen path.
+# Trimmed from the hand-written ~/.claude/statusline.js already in use on the
+# maintainer's machine: same merge-onto-previous-snapshot side effect, plus a
+# minimal one-line status output for users who had no statusLine at all.
+BUNDLED_STATUSLINE_JS = r"""// dev-token-dashboard:managed-statusline
+// Captures Anthropic's real rate_limits (five_hour/seven_day) for
+// dev_token_dashboard.py's plan-usage panel and toast notifications.
+// See docs/DASHBOARD_GUIDE.md#plan-usage-limits.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+let raw = '';
+process.stdin.on('data', d => raw += d);
+process.stdin.on('end', () => {
+  let j = {};
+  try { j = JSON.parse(raw); } catch (e) { /* fall through with j={} */ }
+
+  if (j.rate_limits) {
+    const outPath = path.join(os.homedir(), '.claude', 'rate_limits_latest.json');
+    let merged = {};
+    try {
+      const prev = JSON.parse(fs.readFileSync(outPath, 'utf8'));
+      merged = Object.assign({}, prev.rate_limits);
+    } catch (e) { /* no previous snapshot, or unreadable -- start fresh */ }
+    Object.assign(merged, j.rate_limits);
+    const payload = JSON.stringify({
+      rate_limits: merged,
+      captured_at: Date.now() / 1000,
+    });
+    try {
+      const tmp = outPath + '.tmp';
+      fs.writeFileSync(tmp, payload);
+      fs.renameSync(tmp, outPath);
+    } catch (e) { /* best-effort; never break the status line over this */ }
+  }
+
+  const dir = (j.workspace && j.workspace.current_dir) || j.cwd || '';
+  const model = (j.model && j.model.display_name) || '';
+  const ctx = j.context_window && j.context_window.used_percentage;
+  const rl = j.rate_limits || {};
+  const five = rl.five_hour && rl.five_hour.used_percentage;
+  const seven = rl.seven_day && rl.seven_day.used_percentage;
+
+  let line = dir + '  ' + model;
+  if (ctx != null) line += `  ctx ${Math.round(ctx)}%`;
+  if (five != null) line += `  5h ${Math.round(five)}%`;
+  if (seven != null) line += `  wk ${Math.round(seven)}%`;
+  process.stdout.write(line);
+});
+"""
 
 
 def default_root():
