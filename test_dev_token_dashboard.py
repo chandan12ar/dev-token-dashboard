@@ -4,6 +4,7 @@ Run with:  python -m unittest test_dev_token_dashboard -v
 """
 import json
 import os
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -682,13 +683,23 @@ class WriteSettingsWithBackupTests(unittest.TestCase):
     def test_backs_up_exact_prior_content_then_writes_new(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "settings.json")
+            # Use multi-line JSON with embedded newlines to detect text-mode translation bugs
+            original_content = '{\n  "old": true\n}'
             with open(path, "w", encoding="utf-8") as f:
-                f.write('{"old": true}')
+                f.write(original_content)
+            # Read the original bytes before calling the function
+            with open(path, "rb") as f:
+                original_bytes = f.read()
             backup = dtd.write_settings_with_backup(path, {"new": True})
             self.assertIsNotNone(backup)
             self.assertTrue(os.path.exists(backup))
-            with open(backup, encoding="utf-8") as f:
-                self.assertEqual(f.read(), '{"old": true}')
+            # Check backup filename format
+            self.assertRegex(backup, r".*\.bak-\d+$")
+            # Verify backup preserves exact bytes (binary comparison to catch newline translation)
+            with open(backup, "rb") as f_backup:
+                backup_bytes = f_backup.read()
+            self.assertEqual(backup_bytes, original_bytes)
+            # Verify new settings were written
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), {"new": True})
 

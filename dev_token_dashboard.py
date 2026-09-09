@@ -2967,10 +2967,7 @@ def write_settings_with_backup(settings_path, new_settings):
     backup_path = None
     if os.path.exists(settings_path):
         backup_path = f"{settings_path}.bak-{int(time.time())}"
-        with open(settings_path, "r", encoding="utf-8") as f:
-            original = f.read()
-        with open(backup_path, "w", encoding="utf-8") as f:
-            f.write(original)
+        shutil.copy2(settings_path, backup_path)
     tmp = settings_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(new_settings, f, indent=2)
