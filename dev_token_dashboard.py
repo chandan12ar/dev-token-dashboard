@@ -3117,14 +3117,14 @@ def _report_foreign_statusline(settings, print_fn):
     cmd = settings["statusLine"]["command"]
     print_fn(f"An existing statusLine is already configured: {cmd}")
     script_path = _extract_script_path(cmd)
-    if script_path and os.path.isfile(script_path):
-        try:
+    try:
+        if script_path and os.path.isfile(script_path):
             with open(script_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             if "rate_limits" in content:
                 print_fn("Your existing script already looks like it references rate_limits.")
-        except OSError:
-            pass
+    except Exception:
+        pass
     if load_rate_limits(RATE_LIMITS_PATH) is not None:
         print_fn(f"{RATE_LIMITS_PATH} already has a fresh capture -- you may already be covered.")
     else:

@@ -853,6 +853,25 @@ class ForeignStatuslineTests(unittest.TestCase):
                                              isatty_fn=lambda: True)
             self.assertTrue(any("already has a fresh capture" in p for p in prints))
 
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_foreign_statusline_catches_non_oserror_exceptions(self, _node):
+        """Verify that non-OSError exceptions (e.g. ValueError from isfile) are caught."""
+        with tempfile.TemporaryDirectory() as d:
+            settings_path = os.path.join(d, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump({"statusLine": {"type": "command", "command": 'node "/bad/path"'}}, f)
+            prints = []
+            # Mock os.path.isfile to raise ValueError (simulating a path with null bytes)
+            with patch.object(dtd.os.path, "isfile", side_effect=ValueError("null byte in path")):
+                code = dtd.run_setup_notifications(claude_dir=d, print_fn=prints.append,
+                                                    input_fn=lambda _: self.fail("must not prompt"),
+                                                    isatty_fn=lambda: True)
+            # Should complete without raising the ValueError
+            self.assertEqual(code, 0)
+            # Should still print the existing statusline message and final report
+            self.assertTrue(any("existing statusline" in p.lower() for p in prints))
+            self.assertTrue(any("Rate-limit capture:" in p for p in prints))
+
 
 if __name__ == "__main__":
     unittest.main()
