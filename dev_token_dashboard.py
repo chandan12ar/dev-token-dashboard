@@ -3041,8 +3041,11 @@ def _print_final_report(print_fn):
     print_fn("")
     print_fn("Rate-limit capture:  " + ("ok, fresh" if fresh else
               "not yet captured (will appear after your next Claude Code message)"))
-    print_fn("Toast notifications: " + ("ON" if NOTIFY.get("enabled", True) else "OFF") +
-              '  (edit NOTIFY["enabled"] in the script to change)')
+    if os.name != "nt":
+        print_fn("Toast notifications: OFF (Windows only)")
+    else:
+        print_fn("Toast notifications: " + ("ON" if should_run_notifications() else "OFF") +
+                  '  (edit NOTIFY["enabled"] in the script to change)')
 
 
 def run_setup_notifications(claude_dir=None, dry_run=False, input_fn=input,
@@ -3125,7 +3128,8 @@ def _report_foreign_statusline(settings, print_fn):
     print_fn(f"An existing statusLine is already configured: {cmd}")
     script_path = _extract_script_path(cmd)
     try:
-        if script_path and os.path.isfile(script_path):
+        if (script_path and os.path.isfile(script_path)
+                and os.path.getsize(script_path) < 1_000_000):
             with open(script_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
             if "rate_limits" in content:
@@ -3143,10 +3147,16 @@ def _report_foreign_statusline(settings, print_fn):
     print_fn("Full explanation: docs/DASHBOARD_GUIDE.md#plan-usage-limits")
 
 
-def startup_hint(rate_limits_path=None, is_windows=None):
+def startup_hint(rate_limits_path=None, is_windows=None, statusline_js_path=None):
     rate_limits_path = rate_limits_path or RATE_LIMITS_PATH
     is_windows = (os.name == "nt") if is_windows is None else is_windows
-    if is_windows and not os.path.exists(rate_limits_path):
+    statusline_js_path = statusline_js_path or os.path.join(claude_config_dir(), STATUSLINE_MARKER)
+    # Right after a successful --setup-notifications run, rate_limits_latest.json
+    # doesn't exist yet (only the *next* Claude Code message populates it), but
+    # our managed script does -- checking for it too avoids nudging someone who
+    # just finished the setup this tip is telling them to run.
+    if (is_windows and not os.path.exists(rate_limits_path)
+            and not os.path.exists(statusline_js_path)):
         return "  Tip: plan-usage % is a local estimate. Run --setup-notifications for real Anthropic numbers."
     return None
 
@@ -3170,7 +3180,7 @@ def main():
                     help="Windows: remove the logon task")
     ap.add_argument("--setup-notifications", action="store_true",
                     help="Wire up the statusLine hook for accurate plan-usage %% "
-                         "and toast notifications (Windows)")
+                         "(toast notifications: Windows only)")
     ap.add_argument("--dry-run", action="store_true",
                     help="With --setup-notifications, show what would change "
                          "without writing anything")

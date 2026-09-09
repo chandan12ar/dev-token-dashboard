@@ -4,7 +4,8 @@ Run with:  python -m unittest test_dev_token_dashboard -v
 """
 import json
 import os
-import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -931,10 +932,12 @@ class ForeignStatuslineTests(unittest.TestCase):
 
 class StartupHintTests(unittest.TestCase):
     def test_none_on_non_windows_even_if_missing(self):
-        self.assertIsNone(dtd.startup_hint("/no/such/path.json", is_windows=False))
+        self.assertIsNone(dtd.startup_hint("/no/such/path.json", is_windows=False,
+                                            statusline_js_path="/no/such/statusline.js"))
 
     def test_hint_when_windows_and_never_captured(self):
-        hint = dtd.startup_hint("/no/such/path.json", is_windows=True)
+        hint = dtd.startup_hint("/no/such/path.json", is_windows=True,
+                                 statusline_js_path="/no/such/statusline.js")
         self.assertIsNotNone(hint)
         self.assertIn("--setup-notifications", hint)
 
@@ -943,7 +946,87 @@ class StartupHintTests(unittest.TestCase):
             path = os.path.join(d, "rate_limits_latest.json")
             with open(path, "w", encoding="utf-8") as f:
                 f.write("{}")
-            self.assertIsNone(dtd.startup_hint(path, is_windows=True))
+            self.assertIsNone(dtd.startup_hint(path, is_windows=True,
+                                                statusline_js_path="/no/such/statusline.js"))
+
+    def test_none_when_statusline_script_already_exists(self):
+        # right after a successful --setup-notifications run, rate_limits_latest.json
+        # doesn't exist yet (it only appears after the next Claude Code message) --
+        # but the managed script does, so the nudge would be confusing here and
+        # must be suppressed.
+        with tempfile.TemporaryDirectory() as d:
+            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            with open(js_path, "w", encoding="utf-8") as f:
+                f.write("// managed")
+            self.assertIsNone(dtd.startup_hint("/no/such/rate_limits.json", is_windows=True,
+                                                statusline_js_path=js_path))
+
+
+class PrintFinalReportTests(unittest.TestCase):
+    def test_toast_on_when_enabled_and_windows(self):
+        prints = []
+        with patch.object(dtd.os, "name", "nt"), \
+             patch.dict(dtd.NOTIFY, {"enabled": True}):
+            dtd._print_final_report(prints.append)
+        self.assertTrue(any("Toast notifications: ON" in p for p in prints), prints)
+
+    def test_toast_off_when_disabled_on_windows(self):
+        prints = []
+        with patch.object(dtd.os, "name", "nt"), \
+             patch.dict(dtd.NOTIFY, {"enabled": False}):
+            dtd._print_final_report(prints.append)
+        self.assertTrue(any(p == "Toast notifications: OFF"
+                             '  (edit NOTIFY["enabled"] in the script to change)'
+                             for p in prints), prints)
+
+    def test_toast_off_windows_only_on_non_windows(self):
+        prints = []
+        with patch.object(dtd.os, "name", "posix"), \
+             patch.dict(dtd.NOTIFY, {"enabled": True}):
+            dtd._print_final_report(prints.append)
+        self.assertTrue(any("Toast notifications: OFF (Windows only)" in p for p in prints), prints)
+
+
+class ReportForeignStatuslineSizeGuardTests(unittest.TestCase):
+    @staticmethod
+    def _settings_for(command):
+        return {"statusLine": {"type": "command", "command": command}}
+
+    def test_skips_reading_a_large_foreign_script(self):
+        with tempfile.TemporaryDirectory() as d:
+            big_path = os.path.join(d, "huge.js")
+            with open(big_path, "wb") as f:
+                # the string IS present, so a guard-less read would find it --
+                # this proves the size guard is what skips it, not the content
+                f.write(b"// references rate_limits\n")
+                f.seek(1_000_001)
+                f.write(b"\0")
+            prints = []
+            dtd._report_foreign_statusline(
+                self._settings_for(f'node "{big_path}"'), prints.append)
+            self.assertFalse(any("references rate_limits" in p for p in prints), prints)
+
+    def test_still_reads_a_small_foreign_script(self):
+        with tempfile.TemporaryDirectory() as d:
+            small_path = os.path.join(d, "small.js")
+            with open(small_path, "w", encoding="utf-8") as f:
+                f.write("// writes rate_limits somewhere")
+            prints = []
+            dtd._report_foreign_statusline(
+                self._settings_for(f'node "{small_path}"'), prints.append)
+            self.assertTrue(any("references rate_limits" in p for p in prints), prints)
+
+
+class BundledStatuslineJsTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_bundled_js_is_syntactically_valid(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "statusline.js")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(dtd.BUNDLED_STATUSLINE_JS)
+            result = subprocess.run(["node", "--check", path],
+                                     capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
