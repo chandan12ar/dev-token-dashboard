@@ -3029,6 +3029,89 @@ process.stdin.on('end', () => {
 """
 
 
+def _print_final_report(print_fn):
+    fresh = load_rate_limits(RATE_LIMITS_PATH) is not None
+    print_fn("")
+    print_fn("Rate-limit capture:  " + ("ok, fresh" if fresh else
+              "not yet captured (will appear after your next Claude Code message)"))
+    print_fn("Toast notifications: " + ("ON" if NOTIFY.get("enabled", True) else "OFF") +
+              '  (edit NOTIFY["enabled"] in the script to change)')
+
+
+def run_setup_notifications(claude_dir=None, dry_run=False, input_fn=input,
+                             print_fn=print, isatty_fn=None):
+    isatty_fn = isatty_fn or sys.stdin.isatty
+    claude_dir = claude_dir or claude_config_dir()
+    settings_path = os.path.join(claude_dir, "settings.json")
+    statusline_js_path = os.path.join(claude_dir, STATUSLINE_MARKER)
+
+    if os.name != "nt":
+        print_fn("Toast notifications aren't available on this OS yet -- "
+                  "setting up rate-limit capture only.")
+
+    settings, err = load_settings_json(settings_path)
+    if err:
+        print_fn(f"[!] {err}")
+        print_fn("    Fix or remove this file, then re-run --setup-notifications.")
+        return 1
+
+    kind = classify_statusline(settings)
+
+    if kind == "foreign":
+        _report_foreign_statusline(settings, print_fn)
+        _print_final_report(print_fn)
+        return 0
+
+    if not node_available():
+        print_fn("[!] `node` was not found on PATH. Claude Code itself requires "
+                  "Node.js, so this is unexpected -- install it and re-run.")
+        return 1
+
+    new_settings = merge_statusline_config(settings, statusline_js_path)
+    if new_settings == settings:
+        print_fn(f"Already configured -- {settings_path} needs no changes.")
+        _print_final_report(print_fn)
+        return 0
+
+    print_fn("This will write:")
+    print_fn(f"  {statusline_js_path}")
+    print_fn(f"  statusLine block in {settings_path}:")
+    print_fn(json.dumps(new_settings["statusLine"], indent=2))
+
+    if dry_run:
+        print_fn("Dry run -- nothing written.")
+        return 0
+
+    if not isatty_fn():
+        print_fn("[!] Not running interactively -- re-run from a terminal, "
+                  "or pass --dry-run to preview only.")
+        return 1
+
+    answer = input_fn("Proceed? [y/N] ").strip().lower()
+    if answer != "y":
+        print_fn("Cancelled -- nothing written.")
+        return 0
+
+    with open(statusline_js_path, "w", encoding="utf-8") as f:
+        f.write(BUNDLED_STATUSLINE_JS)
+    try:
+        backup_path = write_settings_with_backup(settings_path, new_settings)
+    except OSError as e:
+        print_fn(f"[!] Could not write {settings_path}: {e}")
+        print_fn(f"    {statusline_js_path} was written, but the statusLine hook "
+                  "isn't wired in yet -- fix the permissions and re-run.")
+        return 1
+    if backup_path:
+        print_fn(f"Backed up previous settings to {backup_path}")
+    print_fn(f"Wrote {statusline_js_path} and updated {settings_path}.")
+    _print_final_report(print_fn)
+    return 0
+
+
+def _report_foreign_statusline(settings, print_fn):
+    raise NotImplementedError("implemented in Task 4")
+
+
 def default_root():
     env = os.environ.get("CLAUDE_CONFIG_DIR")
     if env:

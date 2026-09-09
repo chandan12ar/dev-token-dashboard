@@ -711,5 +711,105 @@ class WriteSettingsWithBackupTests(unittest.TestCase):
                 self.assertEqual(json.load(f), {"statusLine": {"type": "command"}})
 
 
+class RunSetupNotificationsTests(unittest.TestCase):
+    def _run(self, claude_dir, **kwargs):
+        prints = []
+        kwargs.setdefault("print_fn", prints.append)
+        kwargs.setdefault("isatty_fn", lambda: True)
+        code = dtd.run_setup_notifications(claude_dir=claude_dir, **kwargs)
+        return code, prints
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_dry_run_writes_nothing(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            code, prints = self._run(d, dry_run=True, input_fn=lambda _: self.fail("must not prompt"))
+            self.assertEqual(code, 0)
+            self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
+            self.assertFalse(os.path.exists(os.path.join(d, dtd.STATUSLINE_MARKER)))
+            self.assertTrue(any("Dry run" in p for p in prints))
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_missing_statusline_writes_after_yes(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            code, prints = self._run(d, input_fn=lambda _: "y")
+            self.assertEqual(code, 0)
+            settings_path = os.path.join(d, "settings.json")
+            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            self.assertTrue(os.path.exists(settings_path))
+            self.assertTrue(os.path.exists(js_path))
+            with open(settings_path, encoding="utf-8") as f:
+                settings = json.load(f)
+            self.assertIn(dtd.STATUSLINE_MARKER, settings["statusLine"]["command"])
+            self.assertEqual(settings["statusLine"]["refreshInterval"], 30)
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_missing_statusline_declines_on_no(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            code, prints = self._run(d, input_fn=lambda _: "n")
+            self.assertEqual(code, 0)
+            self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
+            self.assertTrue(any("Cancelled" in p for p in prints))
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_ours_already_correct_reports_no_changes(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            settings_path = os.path.join(d, "settings.json")
+            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            existing = {"statusLine": {"type": "command",
+                                        "command": f'node "{js_path}"', "refreshInterval": 30}}
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(existing, f)
+            code, prints = self._run(d, input_fn=lambda _: self.fail("must not prompt"))
+            self.assertEqual(code, 0)
+            self.assertTrue(any("Already configured" in p for p in prints))
+            with open(settings_path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), existing)  # untouched
+
+    @patch.object(dtd, "node_available", return_value=False)
+    def test_missing_node_aborts_without_writing(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            code, prints = self._run(d, input_fn=lambda _: self.fail("must not prompt"))
+            self.assertEqual(code, 1)
+            self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
+            self.assertTrue(any("node" in p.lower() for p in prints))
+
+    def test_malformed_settings_aborts_without_writing(self):
+        with tempfile.TemporaryDirectory() as d:
+            settings_path = os.path.join(d, "settings.json")
+            with open(settings_path, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            code, prints = self._run(d, input_fn=lambda _: self.fail("must not prompt"))
+            self.assertEqual(code, 1)
+            self.assertTrue(any("not valid JSON" in p for p in prints))
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_non_interactive_without_dry_run_aborts(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            code, prints = self._run(d, isatty_fn=lambda: False,
+                                      input_fn=lambda _: self.fail("must not prompt"))
+            self.assertEqual(code, 1)
+            self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
+            self.assertTrue(any("not running interactively" in p.lower() for p in prints))
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_final_report_shown_after_successful_write(self, _node):
+        with tempfile.TemporaryDirectory() as d:
+            _, prints = self._run(d, input_fn=lambda _: "y")
+            self.assertTrue(any("Rate-limit capture:" in p for p in prints))
+            self.assertTrue(any("Toast notifications:" in p for p in prints))
+
+    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(dtd, "write_settings_with_backup", side_effect=OSError("Permission denied"))
+    def test_write_permission_error_reported_not_crashed(self, _write, _node):
+        with tempfile.TemporaryDirectory() as d:
+            code, prints = self._run(d, input_fn=lambda _: "y")
+            self.assertEqual(code, 1)
+            self.assertTrue(any("permission denied" in p.lower() for p in prints))
+            # the statusline script write happens before the settings write in
+            # source order, so it may exist -- but settings.json must not, since
+            # write_settings_with_backup is what raised before touching it
+            self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
+
+
 if __name__ == "__main__":
     unittest.main()
