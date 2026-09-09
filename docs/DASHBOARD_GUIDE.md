@@ -87,6 +87,11 @@ writes Anthropic's real rate-limit numbers to
 just reads that file — it never calls the Anthropic API itself, so this
 stays free.
 
+*Setting it up:* run `python dev_token_dashboard.py --setup-notifications`
+(add `--dry-run` to preview first) — it configures the `statusLine` hook
+for you and won't touch an existing custom one. See
+[SETUP.md](../SETUP.md#3b-optional-accurate-plan-usage-numbers-and-toast-notifications).
+
 *Why it can lag:* the hook only re-runs when a Claude Code session on
 this machine is actually active (a new message, `/compact`, etc.) — not
 on a fixed timer, unless you set `refreshInterval` in `statusLine`
