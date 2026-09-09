@@ -3142,6 +3142,14 @@ def _report_foreign_statusline(settings, print_fn):
     print_fn("Full explanation: docs/DASHBOARD_GUIDE.md#plan-usage-limits")
 
 
+def startup_hint(rate_limits_path=None, is_windows=None):
+    rate_limits_path = rate_limits_path or RATE_LIMITS_PATH
+    is_windows = (os.name == "nt") if is_windows is None else is_windows
+    if is_windows and not os.path.exists(rate_limits_path):
+        return "  Tip: plan-usage % is a local estimate. Run --setup-notifications for real Anthropic numbers."
+    return None
+
+
 def default_root():
     env = os.environ.get("CLAUDE_CONFIG_DIR")
     if env:
@@ -3213,6 +3221,9 @@ def main():
     url = f"http://localhost:{args.port}"
     print(f"  Dev Token Dashboard running at {url}")
     print(f"  Reading logs from: {args.dir}")
+    hint = startup_hint()
+    if hint:
+        print(hint)
     print("  Ctrl+C to stop.")
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

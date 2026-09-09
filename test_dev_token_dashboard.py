@@ -890,5 +890,22 @@ class ForeignStatuslineTests(unittest.TestCase):
             self.assertTrue(any("Rate-limit capture:" in p for p in prints))
 
 
+class StartupHintTests(unittest.TestCase):
+    def test_none_on_non_windows_even_if_missing(self):
+        self.assertIsNone(dtd.startup_hint("/no/such/path.json", is_windows=False))
+
+    def test_hint_when_windows_and_never_captured(self):
+        hint = dtd.startup_hint("/no/such/path.json", is_windows=True)
+        self.assertIsNotNone(hint)
+        self.assertIn("--setup-notifications", hint)
+
+    def test_none_when_file_already_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "rate_limits_latest.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{}")
+            self.assertIsNone(dtd.startup_hint(path, is_windows=True))
+
+
 if __name__ == "__main__":
     unittest.main()
