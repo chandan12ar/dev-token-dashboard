@@ -81,8 +81,9 @@ guessed estimate.
 | **This week** | % of the rolling 7-day window used | `rate_limits.seven_day.used_percentage`, same hook |
 | **"as of Xm ago" / ⚠ warning** | how old this snapshot is | see below |
 
-*How it's captured:* a `statusLine` hook (`~/.claude/statusline.js`)
-writes Anthropic's real rate-limit numbers to
+*How it's captured:* a `statusLine` hook (`~/.claude/dev_token_dashboard_statusline.js`
+if you used `--setup-notifications`, or your own script if you already had
+one) writes Anthropic's real rate-limit numbers to
 `~/.claude/rate_limits_latest.json` every time it runs. The dashboard
 just reads that file — it never calls the Anthropic API itself, so this
 stays free.

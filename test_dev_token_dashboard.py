@@ -593,6 +593,16 @@ class StatuslineConfigTests(unittest.TestCase):
         settings = {"statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"}}
         self.assertEqual(dtd.classify_statusline(settings), "foreign")
 
+    def test_classify_missing_when_command_not_a_string(self):
+        # A non-string command (e.g. an int, from a hand-edited settings.json)
+        # must not raise TypeError from `in` on a non-string. It's treated as
+        # "missing" (no usable command string present), consistent with the
+        # existing convention that any malformed shape -- statusLine not a
+        # dict, command key absent -- also classifies as "missing" rather
+        # than "foreign".
+        settings = {"statusLine": {"type": "command", "command": 12345}}
+        self.assertEqual(dtd.classify_statusline(settings), "missing")
+
     def test_merge_adds_full_block_when_missing(self):
         new = dtd.merge_statusline_config({}, "/home/x/.claude/dev_token_dashboard_statusline.js")
         self.assertEqual(new["statusLine"], {
@@ -759,11 +769,40 @@ class RunSetupNotificationsTests(unittest.TestCase):
                                         "command": f'node "{js_path}"', "refreshInterval": 30}}
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(existing, f)
+            # The script file must actually exist on disk for this to be a true
+            # no-op (see test_ours_correct_but_script_file_missing_falls_through_to_write
+            # for the case where it doesn't).
+            with open(js_path, "w", encoding="utf-8") as f:
+                f.write("// existing script")
             code, prints = self._run(d, input_fn=lambda _: self.fail("must not prompt"))
             self.assertEqual(code, 0)
             self.assertTrue(any("Already configured" in p for p in prints))
             with open(settings_path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), existing)  # untouched
+
+    @patch.object(dtd, "node_available", return_value=True)
+    def test_ours_correct_but_script_file_missing_falls_through_to_write(self, _node):
+        # Regression test for Finding 1: settings already match (refreshInterval
+        # 30, "ours" command) but the .js file itself is missing from disk --
+        # e.g. deleted, or a settings.json that arrived on a second device
+        # without its companion script. The wizard must NOT claim "Already
+        # configured" (the hook is actually broken -- node has nothing to run)
+        # and must instead proceed to the write flow so it can be repaired.
+        with tempfile.TemporaryDirectory() as d:
+            settings_path = os.path.join(d, "settings.json")
+            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            existing = {"statusLine": {"type": "command",
+                                        "command": f'node "{js_path}"', "refreshInterval": 30}}
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(existing, f)
+            self.assertFalse(os.path.exists(js_path))  # sanity: script truly absent
+
+            code, prints = self._run(d, input_fn=lambda _: "y")
+
+            self.assertEqual(code, 0)
+            self.assertFalse(any("Already configured" in p for p in prints))
+            self.assertTrue(any("This will write" in p for p in prints))
+            self.assertTrue(os.path.exists(js_path))  # repaired
 
     @patch.object(dtd, "node_available", return_value=False)
     def test_missing_node_aborts_without_writing(self, _node):

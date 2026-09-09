@@ -2945,9 +2945,10 @@ def load_settings_json(path):
 
 def classify_statusline(settings):
     sl = settings.get("statusLine")
-    if not isinstance(sl, dict) or not sl.get("command"):
+    command = sl.get("command") if isinstance(sl, dict) else None
+    if not isinstance(command, str) or not command:
         return "missing"
-    if STATUSLINE_MARKER in sl["command"]:
+    if STATUSLINE_MARKER in command:
         return "ours"
     return "foreign"
 
@@ -3074,7 +3075,7 @@ def run_setup_notifications(claude_dir=None, dry_run=False, input_fn=input,
         return 1
 
     new_settings = merge_statusline_config(settings, statusline_js_path)
-    if new_settings == settings:
+    if new_settings == settings and os.path.isfile(statusline_js_path):
         print_fn(f"Already configured -- {settings_path} needs no changes.")
         _print_final_report(print_fn)
         return 0
