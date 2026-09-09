@@ -572,5 +572,92 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             self.assertEqual(mock_toast.call_count, 1)
 
 
+class StatuslineConfigTests(unittest.TestCase):
+    def test_classify_missing_when_no_statusline_key(self):
+        self.assertEqual(dtd.classify_statusline({}), "missing")
+
+    def test_classify_missing_when_statusline_not_a_dict(self):
+        self.assertEqual(dtd.classify_statusline({"statusLine": "oops"}), "missing")
+
+    def test_classify_missing_when_command_absent(self):
+        self.assertEqual(dtd.classify_statusline({"statusLine": {"type": "command"}}), "missing")
+
+    def test_classify_ours_when_marker_in_command(self):
+        settings = {"statusLine": {"type": "command",
+                                    "command": 'node "C:\\Users\\x\\.claude\\dev_token_dashboard_statusline.js"'}}
+        self.assertEqual(dtd.classify_statusline(settings), "ours")
+
+    def test_classify_foreign_when_other_command(self):
+        settings = {"statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"}}
+        self.assertEqual(dtd.classify_statusline(settings), "foreign")
+
+    def test_merge_adds_full_block_when_missing(self):
+        new = dtd.merge_statusline_config({}, "/home/x/.claude/dev_token_dashboard_statusline.js")
+        self.assertEqual(new["statusLine"], {
+            "type": "command",
+            "command": 'node "/home/x/.claude/dev_token_dashboard_statusline.js"',
+            "refreshInterval": 30,
+        })
+
+    def test_merge_preserves_other_top_level_keys(self):
+        settings = {"model": "opusplan", "enabledPlugins": {"foo": True}}
+        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        self.assertEqual(new["model"], "opusplan")
+        self.assertEqual(new["enabledPlugins"], {"foo": True})
+
+    def test_merge_patches_refresh_interval_only_when_ours(self):
+        settings = {"statusLine": {"type": "command",
+                                    "command": 'node "/x/dev_token_dashboard_statusline.js"'},
+                    "model": "opusplan"}
+        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        self.assertEqual(new["statusLine"]["refreshInterval"], 30)
+        self.assertEqual(new["statusLine"]["command"], settings["statusLine"]["command"])
+        self.assertEqual(new["model"], "opusplan")
+
+    def test_merge_is_a_noop_when_already_correct(self):
+        settings = {"statusLine": {"type": "command",
+                                    "command": 'node "/x/dev_token_dashboard_statusline.js"',
+                                    "refreshInterval": 30}}
+        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        self.assertEqual(new, settings)
+
+
+class LoadSettingsJsonTests(unittest.TestCase):
+    def test_missing_file_returns_empty_dict_no_error(self):
+        settings, err = dtd.load_settings_json("/no/such/settings.json")
+        self.assertEqual(settings, {})
+        self.assertIsNone(err)
+
+    def test_valid_json_returns_parsed_dict(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"model": "opusplan"}')
+            settings, err = dtd.load_settings_json(path)
+            self.assertEqual(settings, {"model": "opusplan"})
+            self.assertIsNone(err)
+
+    def test_malformed_json_returns_error_not_empty_dict(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            settings, err = dtd.load_settings_json(path)
+            self.assertIsNone(settings)
+            self.assertIsNotNone(err)
+
+
+class ClaudeConfigDirTests(unittest.TestCase):
+    def test_uses_env_var_when_set(self):
+        with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/custom/dir"}):
+            self.assertEqual(dtd.claude_config_dir(), "/custom/dir")
+
+    def test_falls_back_to_home_claude(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            expected = os.path.join(os.path.expanduser("~"), ".claude")
+            self.assertEqual(dtd.claude_config_dir(), expected)
+
+
 if __name__ == "__main__":
     unittest.main()

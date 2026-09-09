@@ -2907,6 +2907,57 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+# ---------------------------------------------------------------------------
+# Setup wizard (--setup-notifications): wires the statusLine hook so plan-
+# usage % and toast milestones use real Anthropic numbers instead of the
+# local estimate. See docs/superpowers/specs/2026-09-09-setup-notifications-
+# onboarding-design.md for the full design.
+# ---------------------------------------------------------------------------
+
+STATUSLINE_MARKER = "dev_token_dashboard_statusline.js"
+
+
+def claude_config_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def load_settings_json(path):
+    """Like load_notify_state, but distinguishes a missing file (fine, an
+    empty settings.json is valid) from a malformed one (must abort rather
+    than silently treat a broken config as empty and overwrite it)."""
+    if not os.path.exists(path):
+        return {}, None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f), None
+    except json.JSONDecodeError as e:
+        return None, f"{path} is not valid JSON: {e}"
+    except OSError as e:
+        return None, f"could not read {path}: {e}"
+
+
+def classify_statusline(settings):
+    sl = settings.get("statusLine")
+    if not isinstance(sl, dict) or not sl.get("command"):
+        return "missing"
+    if STATUSLINE_MARKER in sl["command"]:
+        return "ours"
+    return "foreign"
+
+
+def merge_statusline_config(settings, statusline_js_path):
+    new_settings = dict(settings)
+    if classify_statusline(settings) == "missing":
+        new_settings["statusLine"] = {
+            "type": "command",
+            "command": f'node "{statusline_js_path}"',
+            "refreshInterval": 30,
+        }
+    else:  # "ours" -- caller must not call this for "foreign"
+        new_settings["statusLine"] = dict(settings["statusLine"], refreshInterval=30)
+    return new_settings
+
+
 def default_root():
     env = os.environ.get("CLAUDE_CONFIG_DIR")
     if env:
