@@ -589,6 +589,40 @@ def load_rate_limits(path, now=None):
     return data
 
 
+def load_rate_limits_any_age(path):
+    """Like load_rate_limits(), but never discards the file for being old.
+
+    The statusline hook only re-captures when Claude Code is actively used
+    on this machine (see statusline.js), so a quiet stretch longer than
+    RATE_LIMITS_STALE_SECONDS makes load_rate_limits() return None. But a
+    real Anthropic-reported percentage from an hour ago is still a better
+    basis for plan_window_snapshot()'s fallback than PlanWindowTracker's
+    single-session-calibrated ceiling guess -- callers pair this with each
+    window's `resets_at` to tell a merely-old number from one that's since
+    reset to 0%. Only a missing or corrupt file returns None here."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _official_pct_now(window, now):
+    """A rate-limit window's used_percentage, adjusted for a capture that's
+    old enough its `resets_at` has already passed -- i.e. the account-side
+    window has since reset to 0% even though the last capture we have on
+    disk still shows whatever it was at right before the reset. Without
+    this, an old-but-real capture could be *more* misleading than the local
+    estimate it's meant to replace."""
+    pct = window.get("used_percentage")
+    if pct is None:
+        return None
+    resets_at = window.get("resets_at")
+    if resets_at is not None and now >= resets_at:
+        return 0
+    return pct
+
+
 class PlanWindowTracker:
     """Approximates the Claude app's 'Current session' plan-usage panel: a
     single GLOBAL rolling window (combining every Claude Code session, not
@@ -612,8 +646,16 @@ class PlanWindowTracker:
         self.window_total += tokens
         return milestones_crossed(prev_total, self.window_total, self.ceiling)
 
-    def pct(self):
-        if not self.ceiling:
+    def pct(self, now_epoch):
+        # add() only rolls window_start/window_total over to a fresh window
+        # when a *new* usage event arrives. During an idle stretch spanning
+        # the 5h boundary, nothing has called add() yet, so without this
+        # check pct() would keep reporting the previous, already-expired
+        # window's leftover percentage (while resets_in_seconds() correctly
+        # says the window is already over) -- e.g. "8% used, resets in 0h 0m".
+        if not self.ceiling or self.window_start is None:
+            return 0
+        if now_epoch - self.window_start >= WINDOW_SECONDS:
             return 0
         return min(100, int(self.window_total / self.ceiling * 100))
 
@@ -922,39 +964,48 @@ class NotificationWatcher:
         send_windows_toast(f"{label} usage", message)
 
     def plan_window_snapshot(self):
-        official = load_rate_limits(self.rate_limits_path)
+        now = time.time()
+        # Prefer a fresh (<=RATE_LIMITS_STALE_SECONDS) capture; failing
+        # that, fall back to whatever official capture exists, however old
+        # -- Anthropic's real last-known percentage beats the local ceiling
+        # guess even when stale, as long as we account for windows that
+        # have since reset (see _official_pct_now below). Only when no
+        # capture has EVER been written do we drop to the raw estimate.
+        official = load_rate_limits(self.rate_limits_path) or load_rate_limits_any_age(self.rate_limits_path)
         if official:
             rl = official.get("rate_limits") or {}
             five = rl.get("five_hour") or {}
-            if five.get("used_percentage") is not None:
+            five_pct = _official_pct_now(five, now)
+            if five_pct is not None:
                 seven = rl.get("seven_day") or {}
+                seven_pct = _official_pct_now(seven, now)
 
                 def resets_min(w):
                     ra = w.get("resets_at")
-                    return max(0, int((ra - time.time()) // 60)) if ra else None
+                    return max(0, int((ra - now) // 60)) if ra else None
 
                 # The statusline only re-captures on session events (a new
                 # assistant message, /compact, ...), not on a timer, so the
                 # number can lag real usage by however long since the last
-                # render -- up to RATE_LIMITS_STALE_SECONDS. Surfacing that
-                # age lets the UI show *why* this can be a couple % behind
-                # what /usage reports at the exact moment you check it.
-                age_min = max(0, int((time.time() - official.get("captured_at", time.time())) // 60))
+                # render. Surfacing that age lets the UI show *why* this can
+                # be behind what /usage reports at the exact moment you check
+                # it -- and, past RATE_LIMITS_STALE_SECONDS, that it's from a
+                # session that's gone idle rather than a live number.
+                age_min = max(0, int((now - official.get("captured_at", now)) // 60))
                 return {
                     "source": "official",
-                    "pct": min(100, round(five["used_percentage"])),
+                    "pct": min(100, round(five_pct)),
                     "resets_in_min": resets_min(five),
-                    "week_pct": (min(100, round(seven["used_percentage"]))
-                                 if seven.get("used_percentage") is not None else None),
+                    "week_pct": min(100, round(seven_pct)) if seven_pct is not None else None,
                     "week_resets_in_min": resets_min(seven),
                     "captured_age_min": age_min,
                 }
         return {
             "source": "estimate",
-            "pct": self.plan_tracker.pct(),
+            "pct": self.plan_tracker.pct(now),
             "used": self.plan_tracker.window_total,
             "ceiling": self.notify["window_ceiling"],
-            "resets_in_min": self.plan_tracker.resets_in_seconds(time.time()) // 60,
+            "resets_in_min": self.plan_tracker.resets_in_seconds(now) // 60,
         }
 
     def _save_state(self):
@@ -2354,12 +2405,13 @@ function renderPlanUsage(){
   // recently -- the number shown is real, just not necessarily current.
   // Above STALE_AGE_MIN, say so loudly rather than a quiet gray hint.
   const STALE_AGE_MIN=2;
+  const fmtAge=m=>m<60?m+'m':Math.floor(m/60)+'h '+(m%60)+'m';
   let age='';
   if(isOfficial&&pw.captured_age_min!=null){
     const stale=pw.captured_age_min>=STALE_AGE_MIN;
     age=' <span class="hint'+(stale?' stale':'')+'" title="Updates only when a Claude Code session on this machine is active. It can lag the live /usage number during idle stretches.">'+
-      (stale?'⚠ last updated '+pw.captured_age_min+'m ago, may be behind'
-            :(pw.captured_age_min<1?'as of just now':'as of '+pw.captured_age_min+'m ago'))+
+      (stale?'⚠ last updated '+fmtAge(pw.captured_age_min)+' ago, may be behind'
+            :(pw.captured_age_min<1?'as of just now':'as of '+fmtAge(pw.captured_age_min)+' ago'))+
       '</span>';
   }
   $('planUsage').innerHTML=

@@ -157,7 +157,21 @@ class PlanWindowTrackerTests(unittest.TestCase):
     def test_pct_caps_at_100(self):
         t = dtd.PlanWindowTracker(ceiling=100_000)
         t.add(0, 150_000)
-        self.assertEqual(t.pct(), 100)
+        self.assertEqual(t.pct(now_epoch=100), 100)
+
+    def test_pct_returns_zero_once_window_has_expired_without_a_new_event(self):
+        # add() only resets window_start/window_total when a *new* usage
+        # event arrives -- during an idle stretch past the 5h boundary,
+        # nothing has called add() yet, so pct() must not keep reporting
+        # the previous (now-expired) window's leftover percentage. This is
+        # the exact "8% used, resets in 0h 0m" glitch seen in production:
+        # resets_in_seconds() correctly says the window is over, but pct()
+        # was still dividing the stale window_total by the ceiling.
+        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t.add(0, 80_000)
+        expired_now = self.WINDOW_SECONDS + 500
+        self.assertEqual(t.resets_in_seconds(expired_now), 0)
+        self.assertEqual(t.pct(now_epoch=expired_now), 0)
 
     def test_resets_in_seconds_counts_down_from_window_start(self):
         t = dtd.PlanWindowTracker(ceiling=100_000)
@@ -515,12 +529,45 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             ids = sorted(e["id"] for e in w.recent_events if e["id"].startswith("official:"))
             self.assertEqual(ids, ["official:five_hour:25", "official:seven_day:20"])
 
-    def test_snapshot_falls_back_to_estimate_when_stale_or_missing(self):
+    def test_snapshot_falls_back_to_estimate_only_when_never_captured(self):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")  # never written -> missing
             w = self._watcher(root, rl_path)
             snap = w.plan_window_snapshot()
             self.assertEqual(snap["source"], "estimate")
+
+    def test_snapshot_prefers_stale_official_over_local_estimate(self):
+        # A real (if hours-old) Anthropic percentage is still more
+        # trustworthy than PlanWindowTracker's ceiling guess -- a stale
+        # capture should not make the dashboard fall all the way back to
+        # the local estimate.
+        with tempfile.TemporaryDirectory() as root:
+            rl_path = os.path.join(root, "rl.json")
+            stale_at = dtd.time.time() - dtd.RATE_LIMITS_STALE_SECONDS - 3600
+            self._write_rl(rl_path, 42, seven_pct=17, captured_at=stale_at)
+            w = self._watcher(root, rl_path)
+            snap = w.plan_window_snapshot()
+            self.assertEqual(snap["source"], "official")
+            self.assertEqual(snap["pct"], 42)
+            self.assertEqual(snap["week_pct"], 17)
+            self.assertGreaterEqual(snap["captured_age_min"], 60)
+
+    def test_snapshot_treats_a_stale_capture_past_its_reset_as_zero(self):
+        # If the window's resets_at has already passed, the account-side
+        # window has reset even though our last capture predates that --
+        # showing the old leftover percentage here would be worse than
+        # showing nothing.
+        with tempfile.TemporaryDirectory() as root:
+            rl_path = os.path.join(root, "rl.json")
+            dtd.save_notify_state(rl_path, {
+                "rate_limits": {"five_hour": {"used_percentage": 91,
+                                               "resets_at": dtd.time.time() - 60}},
+                "captured_at": dtd.time.time() - dtd.RATE_LIMITS_STALE_SECONDS - 3600,
+            })
+            w = self._watcher(root, rl_path)
+            snap = w.plan_window_snapshot()
+            self.assertEqual(snap["source"], "official")
+            self.assertEqual(snap["pct"], 0)
 
     @patch.object(dtd, "send_windows_toast")
     def test_first_sighting_sets_baseline_without_firing(self, mock_toast):
