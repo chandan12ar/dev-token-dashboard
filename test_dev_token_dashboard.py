@@ -596,6 +596,68 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             self.assertEqual(mock_toast.call_count, 1)
 
     @patch.object(dtd, "send_windows_toast")
+    def test_same_window_does_not_refire_on_noisy_official_pct(self, mock_toast):
+        # Anthropic's reported used_percentage for the *same* window (same
+        # resets_at) can wobble by a point or two between statusline
+        # captures rather than climbing monotonically. Once 85% has fired,
+        # dipping back to 84% and re-crossing 85% moments later — still
+        # inside the same window — must not fire a second toast; that's
+        # exactly the "same alert 6-8 times in a row" bug, not a real new
+        # crossing like a context compaction resetting usage.
+        with tempfile.TemporaryDirectory() as root:
+            rl_path = os.path.join(root, "rl.json")
+            self._write_rl(rl_path, 80)
+            w = self._watcher(root, rl_path)
+            w.poll_once()  # baseline at 80%
+
+            self._write_rl(rl_path, 87)  # crosses 85%
+            w.poll_once()
+            self.assertEqual(mock_toast.call_count, 1)
+
+            self._write_rl(rl_path, 84)  # wobbles back under 85%
+            w.poll_once()
+            self._write_rl(rl_path, 86)  # ...and back over — same window
+            w.poll_once()
+            self._write_rl(rl_path, 84)
+            w.poll_once()
+            self._write_rl(rl_path, 85)
+            w.poll_once()
+
+            official_events = [e for e in w.recent_events if e["id"].startswith("official:")]
+            self.assertEqual(len(official_events), 1, w.recent_events)
+            self.assertEqual(mock_toast.call_count, 1)
+
+    @patch.object(dtd, "send_windows_toast")
+    def test_new_window_refires_milestones_from_zero(self, mock_toast):
+        # A genuinely new 5h window (different resets_at) must be free to
+        # fire 25/50/75/85 again from scratch, even though the previous
+        # window already fired them all.
+        with tempfile.TemporaryDirectory() as root:
+            rl_path = os.path.join(root, "rl.json")
+            resets1 = dtd.time.time() + 1000
+            dtd.save_notify_state(rl_path, {
+                "rate_limits": {"five_hour": {"used_percentage": 80, "resets_at": resets1}},
+                "captured_at": dtd.time.time()})
+            w = self._watcher(root, rl_path)
+            w.poll_once()  # baseline at 80%
+
+            dtd.save_notify_state(rl_path, {
+                "rate_limits": {"five_hour": {"used_percentage": 87, "resets_at": resets1}},
+                "captured_at": dtd.time.time()})
+            w.poll_once()  # crosses 85% in window 1
+            self.assertEqual(mock_toast.call_count, 1)
+
+            resets2 = resets1 + 5 * 3600
+            dtd.save_notify_state(rl_path, {
+                "rate_limits": {"five_hour": {"used_percentage": 30, "resets_at": resets2}},
+                "captured_at": dtd.time.time()})
+            w.poll_once()  # new window: crosses 25%
+            self.assertEqual(mock_toast.call_count, 2)
+
+            official_events = [e for e in w.recent_events if e["id"] == "official:five_hour:25"]
+            self.assertEqual(len(official_events), 1, w.recent_events)
+
+    @patch.object(dtd, "send_windows_toast")
     def test_restart_does_not_refire_already_crossed_milestone(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")

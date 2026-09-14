@@ -748,6 +748,17 @@ class NotificationWatcher:
         # restart doesn't refire milestones already crossed before it -- same
         # "baseline on first sight" reasoning as _seen_counts/baseline_sids.
         self._official_prev = dict(saved.get("official_prev", {}))
+        # which milestones have already fired *within the account's current
+        # window* for each kind, plus that window's resets_at -- unlike
+        # _official_prev's simple prev<thresh<=new check, this survives the
+        # officially-reported used_percentage wobbling by a point or two
+        # between statusline captures (not a true drop-and-reclimb like a
+        # context compaction) without refiring the same milestone repeatedly.
+        # Cleared only when resets_at itself changes, i.e. a genuinely new
+        # window has started.
+        self._official_fired = {k: set(v) for k, v in
+                                 (saved.get("official_fired") or {}).items()}
+        self._official_window_reset_at = dict(saved.get("official_window_reset_at", {}))
         # how many entries of each file were already replayed *before* this
         # process started — restoring this is what stops a restart from
         # replaying a session's whole history on top of its already-saved
@@ -846,12 +857,26 @@ class NotificationWatcher:
             if not window or window.get("used_percentage") is None:
                 continue
             pct = window["used_percentage"]
+            resets_at = window.get("resets_at")
+            milestones = OFFICIAL_MILESTONES[kind]
+
+            if self._official_window_reset_at.get(kind) != resets_at:
+                self._official_window_reset_at[kind] = resets_at
+                self._official_fired[kind] = set()
+            fired = self._official_fired.setdefault(kind, set())
+
             prev = self._official_prev.get(kind)
             if prev is not None:
-                crossed = milestones_crossed(prev, pct, 100,
-                                              milestones=OFFICIAL_MILESTONES[kind])
-                if crossed:
-                    self._fire_official(kind, label, crossed[-1], pct, window.get("resets_at"))
+                eligible = [m for m in milestones if pct >= m and m not in fired]
+                if eligible:
+                    milestone = max(eligible)
+                    fired.update(m for m in milestones if m <= milestone)
+                    self._fire_official(kind, label, milestone, pct, resets_at)
+            else:
+                # first sighting of this kind: seed the baseline without
+                # firing, same "don't dump history on open" reasoning as
+                # baseline_sids in _replay.
+                fired.update(m for m in milestones if pct >= m)
             self._official_prev[kind] = pct
 
     def _replay(self, path, entries, project, known_before_poll, pending, plan_events):
@@ -1017,7 +1042,9 @@ class NotificationWatcher:
         sessions.update({sid: t.state() for sid, t in self.trackers.items()})
         state = {"sessions": sessions, "seen_counts": self._seen_counts,
                   "plan_window": self.plan_tracker.state(),
-                  "official_prev": self._official_prev}
+                  "official_prev": self._official_prev,
+                  "official_fired": {k: sorted(v) for k, v in self._official_fired.items()},
+                  "official_window_reset_at": self._official_window_reset_at}
         try:
             save_notify_state(self.state_path, state)
         except OSError:
