@@ -70,6 +70,40 @@ The share of context that came from cache instead of being re-processed at
 full price. High (95%+) is normal and good — it's why long Claude Code
 sessions stay cheap.
 
+### Cache-reset rate (mid-session cache health)
+
+A session's *first* API call is expected to write the whole prefix to
+cache — that's normal, not a problem. Every call *after* the first,
+though, should mostly be reading that cache back, not rewriting it. A
+non-first call where `cache_write > cache_read` means the prefix broke
+(idle past the cache TTL, a tool list or model change, etc.) and the next
+call is paying full price again, invisibly, on a dollar-only view:
+
+```
+cache_reset_pct = resets / non_first_calls × 100
+```
+
+where a "reset" is any call after a session's first with
+`cache_creation_input_tokens > cache_read_input_tokens`. When this exceeds
+5% of turns in the selected range, the **Cache read** KPI subtitle swaps
+to a warning instead of showing the hit rate.
+
+### Cold-start tax
+
+Writing a session's frozen prefix to cache for the first time is the most
+expensive call it makes — often a large share of the session's total cost.
+This metric asks: across the selected range, what fraction of total
+session cost was just that first call?
+
+```
+cold_start_pct = Σ(first_call_cost) / Σ(session_cost) × 100
+```
+
+Both sums are weighted by cost, not simple session averages, so a handful
+of expensive cold sessions can't be washed out by many cheap warm ones.
+High values point at frequent short/cold-start sessions rather than fewer,
+longer, warm ones.
+
 ---
 
 ## 3. Estimated API cost
@@ -353,6 +387,7 @@ stats through `claude -p` (token-costing, button-only, like AI summary).
 | Fluency scores | heuristic proxies, not measurements — trends week-over-week matter more than absolute values |
 | Corrections | only catches corrections at the *start* of a prompt |
 | Task mix / day chart | built from the 300 most recent sessions; very old days in long ranges may undercount |
+| Cold-start tax / cache-reset rate | per-session, like reads/writes/LoC — if a custom date range starts mid-session, that session's *visible* first call is treated as its cold start even if the real first call happened earlier, outside the range |
 
 Everything else — token totals, cache numbers, tool counts, per-model and
 per-project splits — is exact arithmetic over deduplicated log entries.
