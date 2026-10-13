@@ -295,7 +295,7 @@ in the entire dashboard that consume tokens — and only when pressed.
 
 ---
 
-# Tab 3: My Adoption *(v1.3)*
+# Tab 3: My Adoption *(v1.3, extended in v1.4)*
 
 A personal scorecard: **how deeply are you using Claude Code, and are you
 getting better at it?** It is for you, not for a manager. It only ever
@@ -304,11 +304,14 @@ Weekly Report it always uses full history, so the range filter is hidden.
 
 ## Your score and level
 
-One number from 0 to 100 and a level: **Explorer → Practitioner → Power user →
-Orchestrator**. The ring and the ladder under it show how far you are
-and how many points you need for the next level. A short sentence underneath
-sums up the last 28 days in plain words, and a ▲/▼ shows the change versus the
-28 days before.
+One number from 0 to 100 and one of six levels: **Explorer → Practitioner →
+Power user → Expert → Pro → Pro Max**. The ring and the ladder under it show
+how far you are and how many points you need for the next level. The top two
+need more than a score: **Pro** needs every pillar at 50 or more, and **Pro Max**
+needs every pillar at 70 or more and weekly scores of 85 or more for four weeks
+in a row. If a gate is holding you back, the page says exactly what to fix. A
+short sentence underneath sums up the last 28 days in plain words, and a ▲/▼
+shows the change versus the 28 days before.
 
 ## Four pillars
 
@@ -316,11 +319,20 @@ sums up the last 28 days in plain words, and a ▲/▼ shows the change versus t
 |---|---|
 | **Habit** | Do you show up regularly? Days used and how evenly they spread across the weeks |
 | **Range** | Do you use what Claude Code offers? Plan mode, subagents, skills, connected tools, CLAUDE.md... |
-| **Craft** | Do you work with Claude well? The four AI-fluency skills from the Weekly Report |
+| **Craft** | Do you work with Claude well? Mostly the four AI-fluency skills from the Weekly Report, blended with your **Flow** and **Quality** scores |
 | **Impact** | What does Claude get done for you? Lines written per active day and how often it ships code |
 
 Each tile has a bar, a ▲/▼ versus the previous 4 weeks, and a tag for your
 strongest pillar and the one with most room to grow.
+
+## What changed lately, and your adoption journey
+
+Two cards under the score. **What changed lately** lists up to four plain lines:
+a pillar that rose or fell by 5 points or more, a level change, or a feature you
+used for the first time. **Your adoption journey** shows four stages, each with its
+evidence: *Started*, *Recurring* (2+ active days a week for 3 weeks running),
+*Integrated* (4+ features in use) and *Verified outcomes* (at least half of your
+edit sessions ended with a test, build or lint).
 
 ## Your next 3 moves
 
@@ -330,8 +342,8 @@ tried plan mode yet" with a one-line how-to. It is rule-based (no AI, no tokens)
 ## The detail cards
 
 - **Habit** — a GitHub-style calendar of the last 17 weeks, plus active days per week
-- **Range** — a checklist of eight features; used ones show how often, unused ones show how to start
-- **Craft** — the four fluency skills with a bar, trend arrow and tip
+- **Range** — a checklist of ten features (adds hooks and task lists); used ones show how often, unused ones show how to start
+- **Craft** — the four fluency skills plus Flow and Quality, each with a bar and trend arrow, and links to those tabs
 - **Impact** — lines Claude wrote, share of active days that shipped code, leverage, and a weekly chart
 - **Your adoption over time** — the score at the end of each of the last 12 weeks
 - **Healthy habits** — active time, longest focus block, late-night and weekend share

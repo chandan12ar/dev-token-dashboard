@@ -1,4 +1,5 @@
-"""Tests for the token-usage notification feature in dev_token_dashboard.py.
+"""Tests for dev_token_dashboard.py: notifications and setup, plus the My Adoption,
+Flow, Quality, Value, Advisor and Data Health engines.
 
 Run with:  python -m unittest test_dev_token_dashboard -v
 """

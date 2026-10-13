@@ -2,8 +2,9 @@
 
 A **100% local** dashboard for your Claude Code usage. Zero token cost — it
 never calls any API. It reads the session logs Claude Code already saves on
-your machine and turns them into live charts, developer insights, and a
-ready-to-paste **weekly update**.
+your machine and turns them into live charts, developer insights, a
+ready-to-paste **weekly update**, a personal **adoption scorecard**, and
+**flow / quality / value** analysis with evidence-based advice.
 
 One Python file, standard library only, no pip installs, works offline.
 
@@ -12,8 +13,10 @@ One Python file, standard library only, no pip installs, works offline.
 **How is this different from [ccusage](https://github.com/ryoppippi/ccusage)?**
 ccusage is a great token/cost counter. This focuses on *developer insights* —
 leverage ratio, exploration-vs-building, friction, per-project deep-dives —
-plus a **Weekly Report tab that writes your standup update for you**. And it
-needs no Node/npm: just Python, which you already have.
+plus a **Weekly Report tab that writes your standup update for you**, a **My
+Adoption** scorecard, and tabs that show whether work flows smoothly, gets
+checked, and what it costs, each number labelled Observed, Derived, Proxy or
+Estimated. And it needs no Node/npm: just Python, which you already have.
 
 ## Quick start
 
@@ -129,7 +132,24 @@ Full formula reference for every metric: **[docs/METRICS.md](docs/METRICS.md)**
 - **Exports** — copy summary, CSV of daily stats, full JSON payload
 
 ### My Adoption tab
-See *What's new (v1.3)* above and [docs/DASHBOARD_GUIDE.md](docs/DASHBOARD_GUIDE.md#tab-3-my-adoption-v13).
+A personal scorecard: Adoption Score and one of six levels, four pillars (Habit,
+Range, Craft, Impact), what changed lately, an adoption journey, a feature
+checklist, a habit calendar and a "next 3 moves" coach. Compares you only with
+your own past. See [the guide](docs/DASHBOARD_GUIDE.md#tab-3-my-adoption-v13-extended-in-v14).
+
+### Engineering insight tabs
+Five tabs that follow the selected range (Advisor and Data Health always use
+recent history), all from local logs only:
+
+- **Flow** — turn time, clean first-pass turns, failure recovery, where tool time goes, session shape
+- **Quality** — verified after the last edit, first-run pass rate, tests alongside code, rework hotspots, safety signals
+- **Value** — cost per 100 lines and per verified session, cache savings, cost spikes, model mix (no score by design)
+- **Advisor** — ranked, evidence-quoting recommendations with one-click experiments (no AI, no tokens)
+- **Data Health** — what your logs can and cannot measure, the metric catalog, and **privacy mode**
+
+Every metric carries an **Observed / Derived / Proxy / Estimated** badge. See
+[the guide](docs/DASHBOARD_GUIDE.md#tabs-4-8-engineering-insight-v14) and
+[the formulas](docs/METRICS.md#13-flow-tab-v14).
 
 ### Weekly Report tab
 Built for standups. For any week it shows **what you worked on** (session
@@ -154,6 +174,9 @@ exploration-vs-building gauge. Then:
 | **Daily tokens & You vs Claude**<br>![Daily tokens and You vs Claude charts](docs/screenshots/you-vs-claude.png) | **Time & wellness**<br>![Time and wellness panel with active-minutes chart](docs/screenshots/time-wellness.png) |
 | **Exploration, friction & task mix**<br>![Exploration vs building, friction, task mix and tool usage charts](docs/screenshots/charts-task-mix.png) | **AI Fluency report**<br>![AI Fluency radar with 4D scores and tips](docs/screenshots/ai-fluency.png) |
 | **Heatmap & tables**<br>![Activity heatmap, projects and model breakdown tables](docs/screenshots/tables.png) | **Weekly Report**<br>![Weekly Report tab with KPIs and session list](docs/screenshots/weekly-report.png) |
+| **My Adoption**<br>![My Adoption score, level, pillars and journey](docs/screenshots/my-adoption.png) | **Flow**<br>![Flow score, turn time and tool time](docs/screenshots/flow.png) |
+| **Quality**<br>![Quality score, verification loop and rework hotspots](docs/screenshots/quality.png) | **Value**<br>![Cost, cache savings and model mix](docs/screenshots/value.png) |
+| **Advisor**<br>![Advisor recommendations with evidence](docs/screenshots/advisor.png) | **Data Health**<br>![What the logs can measure, and the metric catalog](docs/screenshots/data-health.png) |
 
 ## Privacy
 

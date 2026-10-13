@@ -19,9 +19,15 @@ with a timestamp, session ID, git branch, and either:
 
 | Event type | What we extract |
 |---|---|
-| `assistant` message | `usage` block (input / output / cache tokens), model name, tool calls with their full input |
-| `user` message | prompt text (or a tool result riding back, including errors) |
+| `assistant` message | `usage` block (input / output / cache tokens), model name, `stop_reason`, thinking time and effort, tool calls with their full input |
+| `user` message | prompt text, or a tool result riding back: its `tool_use_id` (to time the call), error flag, and any `permissionDecision` |
+| `system` entry | `stop_hook_summary` (hooks that ran) |
+| `attachment` entry | counted for the Data Health tab only |
 | `ai-title` entry | the AI-generated session title (used by the Weekly Report) |
+| `permission-mode` entry | auto / default / plan snapshots |
+
+Fields can differ between Claude Code versions. The **Data Health** tab shows
+which of them your logs actually contain, and the versions seen.
 
 The dashboard re-parses only files whose `(mtime, size)` changed, rebuilds all
 aggregates in memory, and serves them at `/api/stats`. **Nothing is ever sent

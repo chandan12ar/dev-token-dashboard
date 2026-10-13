@@ -150,12 +150,17 @@ only when you press the button — everything else is free forever.
 | Port already in use | Another instance is running (check http://localhost:8787), or pass `--port 9000`. |
 | Page loads but charts are empty | Hard-refresh (`Ctrl+F5`); if you deleted `chart.umd.min.js` the page falls back to the CDN and needs internet once. |
 | Task Scheduler install fails | Run the terminal as Administrator, or use the Startup-folder method (option B). |
+| A new tab says "Not enough data yet" | Flow needs 5 timed turns and Quality needs 3 sessions where Claude edited files, within the selected date range. Widen the range (30d or 90d). My Adoption needs 3 active days in the last 4 weeks. |
+| A metric is missing or shows "not in your logs" | Open the **Data Health** tab. It lists which signals your Claude Code version writes (for example permission decisions or thinking time). Missing signals are shown as missing, never as zero. |
 | Cost card looks wrong | It's an estimate at public API pricing; edit the `PRICING` table at the top of the script. On a subscription your real marginal cost is $0. |
 
 ## What next
 
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — architecture, every panel
-  explained, and what the Weekly Report tab does
+  explained, and what the Weekly Report, My Adoption and Engineering insight
+  tabs do
+- [docs/DASHBOARD_GUIDE.md](docs/DASHBOARD_GUIDE.md) — a plain-language tour of
+  every tab, including how to read the scores
 - [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md) — why our token totals
   differ from the official Claude Code panel, and why ours are the
   accurate ones
