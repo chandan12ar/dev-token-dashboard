@@ -196,6 +196,7 @@ Your prompts and logs never leave your disk.
 
 ## Docs
 
+- [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) — **the story**: the problem this solves, what every page does, how the scores work, how it helps a developer, and the roadmap
 - [docs/DASHBOARD_GUIDE.md](docs/DASHBOARD_GUIDE.md) — **the tour**: every
   section explained in plain language — what it tells you, how the data
   becomes the number, and how to read it (great for showing your team)
