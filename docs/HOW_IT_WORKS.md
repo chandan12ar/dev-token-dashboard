@@ -109,7 +109,20 @@ tabs. The parser additionally records the days each Claude Code feature was used
 (plan mode, subagents, skills, MCP tools, slash commands, web research, commands run), and
 `build_adoption()` turns that into the payload under `adoption` in `/api/stats`.
 It is always computed over full history, never the selected range. Formulas:
-[METRICS.md §12](METRICS.md#12-my-adoption-v13).
+[METRICS.md §12](METRICS.md#12-my-adoption-v13-extended-in-v14).
+
+## Engineering insight tabs (Flow, Quality, Value, Advisor, Data Health)
+
+The parser also records per-event facts, each with its local day: turn start and
+end (a prompt to Claude's `end_turn` reply), every tool call paired with its result
+by `tool_use_id` (timing and pass/fail), the kind of each shell command (test,
+build, lint), failure episodes, edits by file, safety patterns (category only),
+permission decisions, thinking time and effort. Because every record carries its
+day, `build_flow`, `build_quality` and `build_value` can slice any window out of
+full history without re-parsing, which is also how the period-over-period deltas
+and the Advisor's 28-day window work. `build_health` reports which of these
+signals the logs actually contain, and `METRIC_CATALOG` is the single source for
+every metric's confidence badge, formula and limitation.
 
 ## Other developer features
 

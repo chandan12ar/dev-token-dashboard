@@ -337,7 +337,57 @@ tried plan mode yet" with a one-line how-to. It is rule-based (no AI, no tokens)
 - **Healthy habits** — active time, longest focus block, late-night and weekend share
 - **How your score is worked out** — a collapsible plain-language summary of the weights
 
-Exact formulas: [METRICS.md §12](METRICS.md#12-my-adoption-v13).
+Exact formulas: [METRICS.md §12](METRICS.md#12-my-adoption-v13-extended-in-v14).
+
+---
+
+# Tabs 4-8: Engineering insight *(v1.4)*
+
+Five more tabs, grouped under **Engineering insight** in the sidebar. They
+answer the harder questions: *does work flow smoothly, is it checked, what does
+it cost, and what should I change?* All of it comes from the same local logs.
+Nothing needs Jira, GitHub or CI. Every number has a small badge (**Observed**,
+**Derived**, **Proxy** or **Estimated**) so a rough signal is never presented as a fact.
+Hover a badge for the formula.
+
+## Flow
+
+How smoothly work moves, over the selected range. A score out of 100, plus:
+**turn time** (your prompt to Claude finishing), **clean first-pass turns** (no
+error, interruption or correction), **failures fixed** (and stuck loops of 3+
+failures in a row), and **time to first edit**. Charts show turn time and clean
+turns per day; "Where tool time goes" shows which commands eat the clock.
+
+## Quality
+
+Whether speed comes with checking. A score plus: how often a **test, build or
+lint ran after Claude's last edit**, whether the **first run passed**, whether
+**tests were written alongside code**, and the **re-edit share**. Below: rework
+hotspots (files edited again and again), friction, **safety signals**
+(force-push, recursive delete, secret-like files) and how actions were permitted.
+
+## Value
+
+What it costs and what you get back. No score: dollars have no universal
+"good", so each figure is compared with your previous period. Shows cost, cost
+per 100 lines, cost per verified session, **how much caching saved**, daily cost
+with spikes marked, and the model mix.
+
+## Advisor
+
+Your top moves, picked from your data, each quoting its evidence, for example
+"A test ran after Claude's last edit in 7 % of edit sessions (1 of 15)". Pick
+**Try it as an experiment** and the dashboard remembers the number today and shows
+how it moves. "What is going well" balances the list. Rule-based: no AI, no tokens.
+
+## Data Health
+
+What *your* logs let us measure and what they cannot, so a missing signal is
+shown as missing, not zero. Also the log inventory, Claude Code versions, the
+full **metric catalog** with each formula and limitation, and **Privacy mode**
+(hides titles, prompt previews and file names on screen).
+
+Exact formulas: [METRICS.md §13-§17](METRICS.md#13-flow-tab-v14).
 
 ---
 
@@ -367,6 +417,15 @@ It is a self-comparison tool with deliberately demanding targets (about three
 active days a week, six features in use, 300 lines per active day for full
 marks). Look at the four pillars and "Your next 3 moves", and watch the trend.
 A rising score matters more than the number.
+
+**"Can it tell me my acceptance rate?"**
+Only if your logs record permission decisions. The Data Health tab shows whether
+they do. If not, it says so rather than inventing a number. The closest honest
+signals are *verified after last edit* and *re-edit share*.
+
+**"Does this need Jira, GitHub or CI?"**
+No. Everything uses the Claude Code logs on your machine. Metrics that need other
+tools (PR cycle time, deploy frequency, defects) are deliberately not shown.
 
 **"Are the fluency scores real measurements?"**
 No — honest heuristics, documented formula-by-formula in

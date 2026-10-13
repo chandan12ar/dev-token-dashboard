@@ -372,7 +372,7 @@ stats through `claude -p` (token-costing, button-only, like AI summary).
 
 ---
 
-## 12. My Adoption (v1.3)
+## 12. My Adoption (v1.3, extended in v1.4)
 
 A personal scorecard on its own tab. Everything is measured over a rolling
 **28-day window ending on your most recent active day**, compared with the 28
@@ -389,10 +389,10 @@ baseline" instead of a score.
 |---|---|---|
 | **Habit** | Do you show up regularly? | `60 × min(1, active_days ÷ 12) + 40 × (weeks with ≥ 2 active days ÷ 4)`: 12 active days is about 3 a week |
 | **Range** | Do you use what Claude Code offers? | `75 × min(1, features_used ÷ 6) + 25 × substantial-session share` |
-| **Craft** | Do you work with Claude well? | the mean of the four AI-fluency dimensions in §11, computed over the window |
+| **Craft** | Do you work with Claude well? | `0.6 × fluency mean + 0.2 × Flow score + 0.2 × Quality score` (§13, §14). The fluency mean is the four dimensions in §11. If Flow or Quality has no score yet, its weight is shared out among the rest |
 | **Impact** | What does Claude get done for you? | `50 × min(1, LoC per active day ÷ 300) + 50 × (active days where Claude wrote code ÷ active days)` |
 
-*Features* are eight things you can switch on, detected from the logs. Each
+*Features* are ten things you can switch on, detected from the logs. Each
 counts if you used it at least once in the window:
 
 | Feature | Detected from |
@@ -400,8 +400,10 @@ counts if you used it at least once in the window:
 | Project memory | a `CLAUDE.md` or `AGENTS.md` in the working folder of a project you were active in |
 | Run & verify | `Bash` / `PowerShell` tool calls |
 | Plan mode | `EnterPlanMode` / `ExitPlanMode` tool calls, or a `plan` permission-mode snapshot |
-| Subagents | `Agent` / `Task` tool calls |
+| Subagents | `Agent` / `Task` tool calls, or subagent (sidechain) log lines |
 | Skills | `Skill` tool calls |
+| Hooks | `stop_hook_summary` entries |
+| Task lists | `TodoWrite` / `TaskCreate` / `TaskUpdate` tool calls |
 | Connected tools | any `mcp__*` tool call |
 | Slash commands | slash-command invocations |
 | Web research | `WebSearch` / `WebFetch` tool calls |
@@ -414,15 +416,25 @@ A session is **substantial** when it has ≥ 10 tool actions (reads + edits + co
 score = 0.25 × Habit + 0.25 × Range + 0.30 × Craft + 0.20 × Impact
 ```
 
-| Score | Level |
-|---|---|
-| 0-24 | Explorer |
-| 25-49 | Practitioner |
-| 50-74 | Power user |
-| 75-100 | Orchestrator |
+| Score | Level | Extra condition |
+|---|---|---|
+| 0-19 | Explorer | none |
+| 20-39 | Practitioner | none |
+| 40-59 | Power user | none |
+| 60-74 | Expert | none |
+| 75-89 | Pro | every pillar ≥ 50 |
+| 90-100 | Pro Max | every pillar ≥ 70, **and** the score at each of the last 4 weekly points ≥ 85 |
+
+If your score reaches a level but the extra condition fails, you stay one level
+down and the page says exactly what to fix ("Lift Range (now 40) to 50 to unlock Pro").
 
 The trend chart recomputes the score as of each of the last 12 week-ends
 (same 28-day window), skipping weeks with fewer than 3 active days.
+
+### "What changed lately" and the adoption journey
+
+- **What changed lately**: up to four lines: pillars that moved 5+ points, a level change, and any feature used for the first time in the window.
+- **Adoption journey**: *Started* (first active day); *Recurring* (2+ active days a week for 3 weeks in a row); *Integrated* (4+ features used in the window); *Verified outcomes* (3+ edit sessions and at least half of them ended with a test, build or lint).
 
 ### "Your next 3 moves" (coach)
 
@@ -435,6 +447,8 @@ shown (at most two "try a feature" tips):
 - Impact below 50 → "aim Claude at real changes"
 - more than 20 % of activity between 11pm and 6am → "protect your evenings" (ranked high on purpose)
 
+The Advisor tab (§16) reuses these and adds the evidence-based rules.
+
 ### Healthy habits
 
 Average active minutes per active day, longest single-day focus block, share
@@ -443,7 +457,127 @@ all over the window.
 
 ---
 
-## 13. Known approximations (honest accounting)
+## 13. Flow tab (v1.4)
+
+All numbers follow the selected date range. Every metric carries a confidence
+badge (§17). Sources are fields verified in real Claude Code logs.
+
+| Metric | Formula |
+|---|---|
+| **Turn time** | A *turn* starts at a prompt you typed and ends at Claude's reply with `stop_reason = end_turn`. Median and 90th percentile of the elapsed seconds. Includes any time waiting for you to approve an action |
+| **Clean first-pass turns** | `turns with no tool error, no interruption and no correction ÷ all turns`. A *correction* is a next prompt that starts with correction wording (`CORRECT_RE`). Turns that never reached `end_turn` count as not clean |
+| **Failure episodes** | The same tool failing in a session. It is *recovered* when that tool later succeeds in that session; steps to recover = tool results in between. *Stuck* = 3 or more failures in a row |
+| **Where tool time goes** | Seconds between each `tool_use` and its `tool_result` (matched by id), grouped by tool or, for shell commands, by what ran (`git push`, `pytest`, `python`...). Share = group seconds ÷ all tool seconds |
+| **Time to first edit** | Seconds from a session's first entry to Claude's first edit tool call; median over sessions that edited |
+| **Session length** | Last entry minus first entry of a session, median and 90th percentile |
+| **Thinking time, effort** | `thinkingDurationMs` and `effort` as reported on Claude's responses |
+
+```
+Flow score = 100 × (0.5 × clean-turn rate + 0.3 × recovery rate + 0.2 × (1 − stuck share))
+```
+Needs 5 turns. With no failures at all, recovery counts as 100 % and stuck share as 0.
+
+**Subagents:** log lines flagged `isSidechain` are kept out of turn and verification tracking so a subagent finishing does not end your turn.
+
+---
+
+## 14. Quality tab (v1.4)
+
+| Metric | Formula |
+|---|---|
+| **Verified after last edit** (proxy) | Sessions where a *test, build or lint* command ran after Claude's last edit ÷ sessions where Claude edited. A command's kind comes from what it invokes (`pytest`, `npm run build`, `ruff`...), never from text inside a heredoc, quote or commit message |
+| **First-run pass rate** | For each session and kind of check, whether the first run succeeded (no error flag). Fail → fixed counts sessions where a failed run was later followed by a pass |
+| **Tests alongside code** (proxy) | Edit sessions that edited a test file (`tests/`, `test_*`, `*_test.*`, `*.spec.*`...) ÷ edit sessions |
+| **Re-edit share** (proxy) | Edits to a file already edited earlier in the same session ÷ all edits |
+| **Rework hotspots** (proxy) | Files edited 5+ times that were edited 3+ times in one session or on 3+ days |
+| **Errors and interruptions** | Failed tool results per 100 edits; interruptions per 100 prompts |
+| **Safety signals** (proxy) | Counts of force-push, hard reset, `git clean -f`, recursive delete, pipe-to-shell, skipped git hooks, `chmod 777`, SQL drops, and reads/edits of secret-like files (`.env`, `*.pem`, keys, credentials). Only the category is stored, never the command |
+| **Permission decisions** | The `permissionDecision` recorded with tool results, by decision and source, when the logs include it |
+
+```
+Quality score = weighted mean of: 40% verified + 20% tests alongside + 20% (1 − min(1, re-edit share ÷ 50%))
+                + 20% first-run pass (only when a check ran; otherwise the others are re-weighted)
+```
+Needs 3 edit sessions.
+
+---
+
+## 15. Value tab (v1.4)
+
+No score: a dollar figure has no universal "good", so each number is shown with
+its change against your own previous period.
+
+| Metric | Formula |
+|---|---|
+| **Estimated cost** | Token usage priced from the `PRICING` table (§3) |
+| **Cost per 100 lines** | `estimated cost ÷ lines Claude wrote × 100` |
+| **Cost per verified session** | Estimated cost of verified edit sessions ÷ their count |
+| **Cache savings** | `(cache_read × 0.90 − cache_write × 0.25) × input price` per response: reads billed at 10 % instead of 100 %, minus the 25 % write premium. Assumes the same tokens would otherwise be sent uncached |
+| **Cold-start tax / cache rebuilds** | As in §2, restricted to sessions in the window |
+| **Cost spikes** | Days costing ≥ 2× the window's median active day (and ≥ $0.50); needs 5 active days. Names the biggest session that day |
+| **Model mix** | Each model's share of estimated cost; a session's primary model is the one that cost the most in it |
+| **Top-tier model on no-edit sessions** (proxy) | Share of top-tier-model cost (input price ≥ $10/M) spent in sessions where Claude made no edits |
+
+---
+
+## 16. Advisor tab (v1.4)
+
+Ranked, evidence-quoting recommendations over the same 28-day window as My
+Adoption. Rule-based: no AI is called and no tokens are used. Each carries its
+confidence badge and, where it makes sense, a one-click **experiment**:
+the dashboard stores the current value of the related metric in your browser
+(`localStorage`) and shows how it moves. The figure uses a rolling 4-week window,
+so it responds slowly.
+
+| Rule | Fires when |
+|---|---|
+| Make Claude check its own work | verified after last edit < 60 % (3+ edit sessions) |
+| First test or build run often fails | first-run pass < 60 % over 5+ session-check pairs |
+| Sharper first prompts | clean first-pass turns < 60 % (8+ turns) |
+| Break out of failure loops | 2+ stuck loops |
+| A tool dominates your time | one tool or command ≥ 35 % of tool time and ≥ 60 s |
+| Start a fresh session per task | 90th-percentile session ≥ 3 h, or median ≥ 90 min |
+| Short sessions pay the cache set-up cost | cold-start tax ≥ 45 % over 8+ sessions |
+| Cache rebuilt mid-session | ≥ 8 % of follow-up calls |
+| Files edited again and again | re-edit share ≥ 35 % over 30+ edits |
+| Ask for tests alongside code | tests alongside < 40 % (5+ edit sessions) |
+| Risky commands / secret files | any detected |
+| Cost spike | a spike day exists |
+| Top-tier model on sessions with no edits | ≥ 50 % of top-tier cost (≥ $5) |
+| Coach items | feature, habit, craft, impact and evening rules from §12 |
+
+"What is going well" lists the matching positives, such as high verification or a long streak.
+
+---
+
+## 17. Data Health and confidence labels (v1.4)
+
+Every metric on the new tabs has a badge:
+
+| Badge | Meaning |
+|---|---|
+| **Observed** | read straight from a field in the log |
+| **Derived** | computed from observed fields with a stated formula |
+| **Proxy** | an indirect signal that may not mean what it suggests |
+| **Estimated** | depends on list prices or a model |
+
+The **Data Health** tab shows, from *your* logs, which signals exist (tool
+timing, turn timing, permission decisions, thinking time, effort, hooks, subagent
+activity, timestamps, session titles), the log entry types and counts, the Claude
+Code versions seen, parse failures and duplicate lines dropped. A metric whose
+signal is missing says so instead of showing zero. The **metric catalog** on that
+tab lists every metric's formula and limitation (single source: `METRIC_CATALOG`
+in the script). **Privacy mode** hides session titles, prompt previews and file
+names on screen.
+
+**Considered and rejected after checking real logs:** the `edited_text_file`
+attachment ("a file changed outside Claude") also fires when Claude edits a file
+through a shell command, so it cannot tell your hand edits from Claude's. It is
+not used as a "human touch-up" metric.
+
+---
+
+## 18. Known approximations (honest accounting)
 
 | Metric | Approximation |
 |---|---|
@@ -462,6 +596,12 @@ all over the window.
 | Adoption Score | a heuristic blend with hand-picked weights and targets; the levels are motivational labels, not a standard. Watch your trend rather than the exact number |
 | Feature detection | inferred from tool names in the logs; a feature you used without a tool call (for example a CLAUDE.md you wrote but no session has run in) is only seen if the project folder still exists |
 | Window | the last 28 calendar days ending on your most recent active day, so a long break does not make the score collapse |
+| Turn and tool times | include any wait for you to approve an action; a session is not a task |
+| Shell-made edits | edits Claude makes through shell commands (sed, scripts) are invisible to LoC, edit and re-edit counts |
+| Verified / first-run pass | a check *ran* and exited without the error flag; it does not prove the code is correct |
+| Command kinds | detected from the invoked command's name; unusual wrappers or custom scripts are classed "other" |
+| Cache savings | list-price arithmetic that assumes you would otherwise have sent the same tokens uncached |
+| Flow, Quality and Adoption scores | heuristic blends with hand-picked weights; the trend matters more than the number |
 
 Everything else — token totals, cache numbers, tool counts, per-model and
 per-project splits — is exact arithmetic over deduplicated log entries.

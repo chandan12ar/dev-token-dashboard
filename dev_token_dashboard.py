@@ -15,9 +15,11 @@ Requires: Python 3.8+ (standard library only).
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
@@ -69,10 +71,14 @@ ADOPTION = {
 }
 ADOPTION_LEVELS = [
     (0, "Explorer", "You're getting to know Claude Code."),
-    (25, "Practitioner", "Claude Code is part of your regular workflow."),
-    (50, "Power user", "You hand over real work and check the results."),
-    (75, "Orchestrator", "You run Claude Code like a team: plans, helpers and checks."),
+    (20, "Practitioner", "Claude Code is part of your regular workflow."),
+    (40, "Power user", "You hand over real work and check the results."),
+    (60, "Expert", "You use the range of Claude Code and it mostly works first time."),
+    (75, "Pro", "You work with Claude Code like a skilled teammate: planned, verified, steady."),
+    (90, "Pro Max", "Top of the ladder: strong on every pillar, week after week."),
 ]
+# The top two rungs need more than a score: no weak pillar, and (Pro Max) a sustained run.
+LEVEL_GATES = {"Pro": {"min_pillar": 50}, "Pro Max": {"min_pillar": 70, "sustain_weeks": 4, "sustain_score": 85}}
 
 # ---------------------------------------------------------------------------
 # Live token-usage pop-up notifications for whatever Claude Code session is
@@ -134,7 +140,148 @@ CMD_TOOLS = {"Bash", "PowerShell"}   # command runs — the verification proxy f
 TOOL_FEATURES = {"EnterPlanMode": "plan", "ExitPlanMode": "plan",
                  "Agent": "subagents", "Task": "subagents",
                  "WebSearch": "web", "WebFetch": "web", "Skill": "skills",
-                 "Bash": "verify", "PowerShell": "verify"}
+                 "Bash": "verify", "PowerShell": "verify",
+                 "TodoWrite": "tasks", "TaskCreate": "tasks", "TaskUpdate": "tasks"}
+# ---- log-derived signals for the Flow / Quality / Value tabs -----------------
+EXIT_RE = re.compile(r"Exit code (-?\d+)")
+TEST_FILE_RE = re.compile(
+    r"(^|/)(tests?|__tests__|specs?)/|(^|/)test_[^/]*$|_test\.[A-Za-z]+$|\.(test|spec)\.[A-Za-z]+$",
+    re.IGNORECASE)
+SECRET_PATH_RE = re.compile(
+    r"(^|/)\.env(\.[\w-]+)?$|\.pem$|(^|/)id_(rsa|ed25519)$|(^|/)credentials(\.\w+)?$"
+    r"|(^|/)secrets?\.(json|ya?ml|toml)$", re.IGNORECASE)
+# What a shell command was for. Patterns are matched against each *invoked*
+# command (see _cmd_segments), never against heredoc bodies or quoted text, so a
+# script that merely mentions "pytest" or "--no-verify" does not count.
+CMD_KIND_RES = [
+    ("test", re.compile(
+        r"(pytest|py\.test|unittest|nosetests|tox|nox|jest|vitest|mocha|karma|rspec|phpunit|ctest)\b"
+        r"|go\s+test\b|cargo\s+test\b|(npm|yarn|pnpm|bun)\s+(run\s+)?test\b"
+        r"|(mvnw?|gradlew?)\b.*\btest\b|dotnet\s+test\b|make\s+test\b"
+        r"|(python[\d.]*\s+)?(\S*/)?manage\.py\s+test\b|playwright\s+test\b|cypress\s+run\b",
+        re.IGNORECASE)),
+    ("lint", re.compile(
+        r"(eslint|ruff|flake8|pylint|mypy|pyright|golangci-lint|rubocop|stylelint|shellcheck)\b"
+        r"|tsc\b.*--noEmit|prettier\b.*--check|black\b.*--check"
+        r"|(npm|yarn|pnpm)\s+(run\s+)?(lint|typecheck)\b|cargo\s+clippy\b|make\s+lint\b",
+        re.IGNORECASE)),
+    ("build", re.compile(
+        r"(tsc|webpack|rollup|esbuild|cmake)\b|vite\s+build\b|gradlew?\s+(build|assemble)\b"
+        r"|mvnw?\b.*\b(package|compile|install)\b|cargo\s+build\b|go\s+build\b|dotnet\s+build\b"
+        r"|make\b|(build|compileall|py_compile)\b|(npm|yarn|pnpm)\s+(run\s+)?build\b"
+        r"|node\s+--check\b", re.IGNORECASE)),
+]
+# commands worth surfacing as a safety signal (category only is stored, never the command)
+RISKY_CMD_RES = [
+    ("force_push", re.compile(r"git\s+push\b.*(--force\b|--force-with-lease|\s-f\b)")),
+    ("hard_reset", re.compile(r"git\s+reset\s+--hard\b")),
+    ("git_clean", re.compile(r"git\s+clean\s+-[a-zA-Z]*f")),
+    ("recursive_delete", re.compile(r"rm\s+-[a-zA-Z]*[rR]")),
+    ("pipe_to_shell", re.compile(r"(curl|wget)\b.*\|\s*(sudo\s+)?(ba|z)?sh\b")),
+    ("skip_hooks", re.compile(r"git\s+(commit|push)\b.*--no-verify\b")),
+    ("wide_permissions", re.compile(r"chmod\s+(-R\s+)?777\b")),
+    ("sql_drop", re.compile(r"(psql|mysql|sqlite3|sqlcmd)\b.*\bdrop\s+(table|database)\b", re.IGNORECASE)),
+]
+SUBCMD_TOOLS = {"git", "npm", "yarn", "pnpm", "docker", "cargo", "go", "pip", "pip3", "kubectl",
+                "gh", "make", "uv", "poetry", "bun"}
+_LEAD_WORDS = ("sudo", "time", "env", "nohup", "command", "exec")
+_RUNNER_RE = re.compile(
+    r"^(?:npx\s+|bunx\s+|uvx\s+|uv\s+run\s+|poetry\s+run\s+|pipenv\s+run\s+|bundle\s+exec\s+"
+    r"|python[\d.]*\s+-m\s+|\./|(?:\S*/)?node_modules/\.bin/)")
+
+
+def _cmd_segments(cmd):
+    """The commands a shell string actually invokes, normalised: the text after a
+    heredoc marker is dropped, then it is split on && || ; and newlines, and
+    leading env assignments, sudo/time/nohup and runners (npx, uv run, python -m) are stripped."""
+    if not isinstance(cmd, str):
+        return []
+    m = re.search(r"<<-?\s*['\"]?\w+['\"]?", cmd)
+    if m:
+        nl = cmd.find("\n", m.end())
+        cmd = cmd[:nl] if nl != -1 else cmd
+    out = []
+    for seg in re.split(r"&&|\|\||;|\n", cmd):
+        seg = seg.strip().lstrip("({").strip()
+        while True:
+            toks = seg.split(None, 1)
+            if toks and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[0]) or toks[0] in _LEAD_WORDS):
+                seg = toks[1] if len(toks) > 1 else ""
+                continue
+            m2 = _RUNNER_RE.match(seg)
+            if m2 and m2.end() < len(seg):
+                seg = seg[m2.end():]
+                continue
+            break
+        if seg:
+            out.append(seg)
+    return out
+
+
+def classify_cmd(cmd) -> str:
+    """'test' | 'lint' | 'build' | 'other' for the commands a shell string invokes."""
+    segs = _cmd_segments(cmd)
+    for kind, rx in CMD_KIND_RES:
+        if any(rx.match(sg) for sg in segs):
+            return kind
+    return "other"
+
+
+def risky_categories(cmd):
+    segs = _cmd_segments(cmd)
+    return [cat for cat, rx in RISKY_CMD_RES if any(rx.match(sg) for sg in segs)]
+
+
+def cmd_family(cmd) -> str:
+    """Short label for what a shell command ran (e.g. 'git push', 'pytest', 'python')."""
+    segs = [sg for sg in _cmd_segments(cmd) if not re.match(r"^cd(\s|$)", sg)]
+    if not segs:
+        return "shell"
+    toks = segs[0].split()
+    first = os.path.basename(toks[0].strip("'\"")) or "shell"
+    if re.match(r"^python[\d.]*$", first):
+        return "python"
+    if first in ("npm", "yarn", "pnpm", "bun") and len(toks) > 2 and toks[1] == "run" \
+            and re.match(r"^[\w:-]+$", toks[2]):
+        return first + " run " + toks[2]
+    if first in SUBCMD_TOOLS and len(toks) > 1 and re.match(r"^[a-z][\w-]*$", toks[1]):
+        return first + " " + toks[1]
+    return first[:24]
+
+
+def _entry_time(entry):
+    try:
+        ts = datetime.fromisoformat((entry.get("timestamp") or "").replace("Z", "+00:00")).astimezone()
+        return ts, ts.strftime("%Y-%m-%d")
+    except Exception:
+        return None, ""
+
+
+def _tool_result_text(block) -> str:
+    c = block.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(b.get("text", "") for b in c if isinstance(b, dict))
+    return ""
+
+
+def _parse_aux_entry(entry, etype, st, min_day, max_day):
+    """System and attachment lines: hooks and (for the health panel) what the log contains."""
+    ts, day = _entry_time(entry)
+    if not day:
+        return
+    if (min_day is not None and day < min_day) or (max_day is not None and day > max_day):
+        return
+    if etype == "system" and entry.get("subtype") == "stop_hook_summary":
+        st.hc["stop_hook_summary"] += 1
+        st.feature_days["hooks"].add(day)
+    elif etype == "attachment":
+        kind = (entry.get("attachment") or {}).get("type")
+        if kind:
+            st.attachment_types[kind] += 1
+
+
 # id, label, short description, how-to-start tip, usefulness weight for the coach
 ADOPTION_FEATURES = [
     ("memory", "Project memory", "A CLAUDE.md that teaches Claude your project",
@@ -147,6 +294,10 @@ ADOPTION_FEATURES = [
      "Say \"use a subagent to research this\" to keep your main conversation clean.", 50),
     ("skills", "Skills", "Reusable workflows Claude can pick up",
      "Package something you repeat weekly as a skill so Claude does it the same way every time.", 45),
+    ("hooks", "Hooks", "Automatic checks that run on Claude Code events",
+     "Add a hook in your settings to run your formatter or tests automatically after Claude edits.", 48),
+    ("tasks", "Task lists", "Claude tracks multi-step work in a checklist",
+     "For a big job, ask Claude to write a task list first and tick items off as it goes.", 38),
     ("mcp", "Connected tools", "MCP servers for GitHub, docs, databases...",
      "Connect a tool you already use with `claude mcp add` so Claude can work with it directly.", 42),
     ("slash", "Slash commands", "Shortcuts like /compact, /clear, /init",
@@ -193,7 +344,7 @@ def _day_stat():
         "cost": 0.0, "loc": 0, "prompts": 0, "prompt_lines": 0,
         "prompt_words": 0, "messages": 0, "human_tokens": 0,
         "reads": 0, "writes": 0, "interruptions": 0, "tool_errors": 0,
-        "late_msgs": 0, "corrections": 0,
+        "late_msgs": 0, "corrections": 0, "cache_savings": 0.0,
     }
 
 
@@ -235,6 +386,25 @@ class Stats:
         self.project_cwd = {}              # project label -> real absolute path (first seen)
         self.last_day = None               # most recent dated entry seen (undated events piggyback on it)
         self.feature_days = defaultdict(set)  # feature id -> days it was used (see ADOPTION_FEATURES)
+        # --- per-event records for the Flow / Quality / Value tabs. Every record
+        # carries its local day, so any window can be sliced out of the full
+        # history without re-parsing (see build_flow / build_quality / build_value).
+        self.turns = []        # {day, sid, secs|None, steps, err, intr, corrected}
+        self.tool_calls = []   # (day, tool, family, secs, ok)
+        self.cmd_runs = []     # (day, sid, kind, ok)  kind in test/build/lint
+        self.episodes = []     # (day, tool, fails, steps_to_recover|None)  closed failure episodes
+        self.edits = []        # (day, sid, path, project)
+        self.safety = []       # (day, category)
+        self.perm_decisions = []   # (day, decision, source)
+        self.thinking = []     # (day, ms)
+        self.efforts = []      # (day, effort)
+        self.pending_tools = {}    # tool_use_id -> info, until its result arrives
+        # --- what the log contains (all-time, for the Data Health tab)
+        self.hc = Counter()
+        self.entry_types = Counter()
+        self.attachment_types = Counter()
+        self.versions = Counter()
+        self.entrypoints = Counter()
 
     # -- merge helpers ------------------------------------------------------
     def touch_session(self, sid, ts, project):
@@ -245,6 +415,9 @@ class Stats:
             "reads": 0, "writes": 0, "loc": 0, "prompts": 0, "output": 0,
             "bash": 0,
             "cost": 0.0, "first_call_cost": 0.0, "api_calls": 0, "cache_resets": 0,
+            "seq": 0, "last_write_seq": -1, "last_verify_seq": -1, "last_cmd_seq": -1,
+            "test_files": 0, "first_edit_s": None, "model_cost": Counter(),
+            "turn": None, "last_turn": None, "open_err": {}, "start_dt": None,
         })
         if ts:
             if not s["start"] or ts < s["start"]:
@@ -255,8 +428,82 @@ class Stats:
         return s
 
 
+def _begin_turn(st, sess, sid, day, ts, is_correction):
+    """A real prompt starts a turn; a prompt that follows an unfinished turn closes it as abandoned."""
+    prev = sess["turn"]
+    if prev is not None:
+        prev["secs"] = None
+        prev.pop("start", None)
+        st.turns.append(prev)
+        sess["last_turn"] = prev
+    last = sess["last_turn"]
+    if is_correction and last is not None:
+        last["corrected"] = True
+    sess["turn"] = {"day": day, "sid": sid, "start": ts, "secs": None, "steps": 0,
+                    "err": False, "intr": False, "corrected": False}
+
+
+def _end_turn(st, sess, ts):
+    turn = sess["turn"]
+    if turn is None or ts is None or turn.get("start") is None:
+        return
+    turn["secs"] = max(0.0, (ts - turn.pop("start")).total_seconds())
+    st.turns.append(turn)
+    sess["last_turn"] = turn
+    sess["turn"] = None
+
+
+def _handle_tool_results(content, st, sess, day, ts, side):
+    """Every tool_result block: error counts (as before), tool timing, test/build/lint
+    outcomes, and failure -> recovery episodes."""
+    for b in content:
+        if not isinstance(b, dict) or b.get("type") != "tool_result":
+            continue
+        is_err = bool(b.get("is_error"))
+        if is_err:
+            st.tool_errors += 1
+            if day:
+                st.days[day]["tool_errors"] += 1
+        st.hc["tool_results"] += 1
+        info = st.pending_tools.pop(b.get("tool_use_id"), None)
+        if not info:
+            continue
+        st.hc["tool_results_matched"] += 1
+        name = info["name"]
+        if day and ts is not None and info["ts"] is not None:
+            st.tool_calls.append((day, name, info["family"],
+                                  max(0.0, (ts - info["ts"]).total_seconds()), not is_err))
+        if is_err and name in CMD_TOOLS and EXIT_RE.search(_tool_result_text(b)):
+            st.hc["exit_code_text"] += 1
+        if day and info["kind"] in ("test", "build", "lint"):
+            st.cmd_runs.append((day, info["sid"], info["kind"], not is_err))
+        if sess is None or info["side"]:
+            continue
+        if sess["turn"] is not None and is_err:
+            sess["turn"]["err"] = True
+        oe = sess["open_err"]
+        for ep in oe.values():
+            ep["steps"] += 1
+        if is_err:
+            ep = oe.get(name)
+            if ep is None:
+                oe[name] = {"fails": 1, "steps": 0, "day": day}
+            else:
+                ep["fails"] += 1
+        else:
+            ep = oe.pop(name, None)
+            if ep:
+                st.episodes.append((ep["day"], name, ep["fails"], ep["steps"]))
+
+
+
 def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None):
     etype = entry.get("type")
+    st.entry_types[etype] += 1
+    if entry.get("version"):
+        st.versions[entry["version"]] += 1
+    if entry.get("entrypoint"):
+        st.entrypoints[entry["entrypoint"]] += 1
 
     # AI-generated session title lines (written by Claude Code itself)
     if etype == "ai-title":
@@ -277,6 +524,10 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         st.permission_modes[entry.get("permissionMode") or "unknown"] += 1
         if entry.get("permissionMode") == "plan" and day:
             st.feature_days["plan"].add(day)
+        return
+
+    if etype in ("system", "attachment"):
+        _parse_aux_entry(entry, etype, st, min_day, max_day)
         return
 
     if etype not in ("user", "assistant"):
@@ -309,6 +560,20 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
     sid = entry.get("sessionId")
     branch = entry.get("gitBranch") or "(none)"
     sess = st.touch_session(sid, ts_raw, project)
+    side = bool(entry.get("isSidechain"))      # subagent work, kept out of turn/verification tracking
+    st.hc["entries"] += 1
+    if day:
+        st.hc["entries_dated"] += 1
+    if side:
+        st.hc["sidechain_entries"] += 1
+        if day:
+            st.feature_days["subagents"].add(day)
+    if sess is not None and ts is not None and (sess["start_dt"] is None or ts < sess["start_dt"]):
+        sess["start_dt"] = ts
+    pdec = entry.get("permissionDecision")
+    if isinstance(pdec, dict) and day:
+        st.hc["permission_decisions"] += 1
+        st.perm_decisions.append((day, str(pdec.get("decision")), str(pdec.get("source"))))
     if day:
         st.days[day]["messages"] += 1
     if hour is not None:
@@ -326,11 +591,7 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
     if etype == "user":
         # failed tool results ride back on user-type entries
         if isinstance(content, list):
-            for b in content:
-                if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("is_error"):
-                    st.tool_errors += 1
-                    if day:
-                        st.days[day]["tool_errors"] += 1
+            _handle_tool_results(content, st, sess, day, ts, side)
         text = None
         if isinstance(content, str):
             text = content
@@ -354,6 +615,8 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
             st.errors += 1
             if day:
                 st.days[day]["interruptions"] += 1
+            if sess is not None and not side and sess["turn"] is not None:
+                sess["turn"]["intr"] = True
             return
         lines = count_lines(text)
         words = len(text.split())
@@ -365,6 +628,8 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
             st.days[day]["prompt_words"] += words
             # ~4 chars per token: estimate of tokens the human typed
             st.days[day]["human_tokens"] += max(1, len(text) // 4)
+        if sess is not None and not side:
+            _begin_turn(st, sess, sid, day, ts, bool(CORRECT_RE.match(text.strip())))
         st.prompt_words += words
         st.prompt_chars += len(text)
         st.projects[project]["prompts"] += 1
@@ -381,7 +646,19 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
     model = msg.get("model") or "unknown"
     mid = msg.get("id") or entry.get("uuid")
     dedup_key = (mid, entry.get("requestId"))
+    st.hc["assistant_lines"] += 1
+    if msg.get("stop_reason"):
+        st.hc["stop_reason"] += 1
+        if msg.get("stop_reason") == "end_turn" and sess is not None and not side:
+            _end_turn(st, sess, ts)
+    td = entry.get("thinkingDurationMs")
+    if isinstance(td, (int, float)) and day and (mid, "think") not in st.seen_msg_ids:
+        st.seen_msg_ids.add((mid, "think"))
+        st.hc["thinking"] += 1
+        st.thinking.append((day, td))
 
+    if usage and dedup_key in st.seen_msg_ids:
+        st.hc["duplicate_lines"] += 1
     if usage and dedup_key not in st.seen_msg_ids:
         st.seen_msg_ids.add(dedup_key)
         i = usage.get("input_tokens", 0) or 0
@@ -390,11 +667,17 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         cr = usage.get("cache_read_input_tokens", 0) or 0
         p = price_for(model)
         cost = (i * p["in"] + o * p["out"] + cw * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1_000_000
+        st.hc["assistant_msgs"] += 1
+        if entry.get("effort") and day:
+            st.hc["effort"] += 1
+            st.efforts.append((day, str(entry["effort"])))
         if day:
             d = st.days[day]
             d["input"] += i; d["output"] += o
             d["cache_read"] += cr; d["cache_write"] += cw
             d["cost"] += cost
+            # what caching saved: reads billed at 10% instead of 100%, minus the 25% write premium
+            d["cache_savings"] += (cr * 0.90 - cw * 0.25) * p["in"] / 1_000_000
         m = st.models[model]
         m["msgs"] += 1; m["input"] += i; m["output"] += o
         m["cache_read"] += cr; m["cache_write"] += cw; m["cost"] += cost
@@ -407,6 +690,7 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         if sess:
             sess["output"] += o
             sess["cost"] += cost
+            sess["model_cost"][model] += cost
             if sess["api_calls"] == 0:
                 sess["first_call_cost"] = cost
             elif cw > cr:
@@ -447,6 +731,37 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
                 inp0 = block.get("input") or {}
                 st.subagents[inp0.get("subagent_type") or "unknown"] += 1
             inp = block.get("input") or {}
+            st.hc["tool_uses"] += 1
+            is_cmd = name in CMD_TOOLS
+            cmd = inp.get("command") if is_cmd else None
+            kind = classify_cmd(cmd) if is_cmd else None
+            if tid:
+                st.pending_tools[tid] = {
+                    "name": name, "ts": ts, "sid": sid, "side": side, "kind": kind,
+                    "family": cmd_family(cmd) if is_cmd else name}
+            fp0 = inp.get("file_path") or inp.get("notebook_path") or ""
+            if day and is_cmd and isinstance(cmd, str):
+                for cat in risky_categories(cmd):
+                    st.safety.append((day, cat))
+            if day and fp0 and (name in WRITE_TOOLS or name == "Read") and SECRET_PATH_RE.search(fp0):
+                st.safety.append((day, "secret_file_touched"))
+            if sess is not None and not side:
+                sess["seq"] += 1
+                if name in WRITE_TOOLS:
+                    sess["last_write_seq"] = sess["seq"]
+                    if sess["first_edit_s"] is None and ts is not None and sess["start_dt"] is not None:
+                        sess["first_edit_s"] = max(0.0, (ts - sess["start_dt"]).total_seconds())
+                    if fp0:
+                        if day:
+                            st.edits.append((day, sid, fp0, project))
+                        if TEST_FILE_RE.search(fp0):
+                            sess["test_files"] += 1
+                elif is_cmd:
+                    sess["last_cmd_seq"] = sess["seq"]
+                    if kind in ("test", "build", "lint"):
+                        sess["last_verify_seq"] = sess["seq"]
+                if sess["turn"] is not None:
+                    sess["turn"]["steps"] += 1
             loc = 0
             if name in CODE_TOOLS_WRITE:
                 loc = count_lines(inp.get("content"))
@@ -1265,6 +1580,601 @@ def active_streak(days_sorted):
 
 
 # ---------------------------------------------------------------------------
+# Flow / Quality / Value engines. Each takes the full-history Stats plus an
+# optional [d0, d1] day window (ISO strings) and returns plain dicts for the UI.
+# Nothing here reads outside the logs; every metric is tagged in METRIC_CATALOG
+# as Observed / Derived / Proxy / Estimated so it is never overstated.
+# ---------------------------------------------------------------------------
+
+def _in(day, d0, d1) -> bool:
+    return bool(day) and (d0 is None or day >= d0) and (d1 is None or day <= d1)
+
+
+def _median(xs):
+    return statistics.median(xs) if xs else None
+
+
+def _p90(xs):
+    if not xs:
+        return None
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, max(0, math.ceil(0.9 * len(xs)) - 1))]
+
+
+def _rate(n, d):
+    return _rnd(100 * n / d) if d else None
+
+
+def _r1(x):
+    return None if x is None else round(x, 1)
+
+
+def _sess_rows(st: Stats, d0=None, d1=None):
+    """(sid, session, local start day) for sessions starting inside the window."""
+    rows = []
+    for sid, s in st.sessions.items():
+        try:
+            a = datetime.fromisoformat(s["start"].replace("Z", "+00:00")).astimezone()
+        except Exception:
+            continue
+        day = a.strftime("%Y-%m-%d")
+        if _in(day, d0, d1):
+            rows.append((sid, s, day))
+    return rows
+
+
+def _sess_minutes(s):
+    try:
+        a = datetime.fromisoformat(s["start"].replace("Z", "+00:00"))
+        b = datetime.fromisoformat(s["end"].replace("Z", "+00:00"))
+        return max(0.0, (b - a).total_seconds()) / 60
+    except Exception:
+        return 0.0
+
+
+def _iso_monday(day: str) -> str:
+    d = date.fromisoformat(day)
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def build_flow(st: Stats, d0=None, d1=None) -> dict:
+    turns = [t for t in st.turns if _in(t["day"], d0, d1)]
+    done = [t for t in turns if t["secs"] is not None]
+    secs = [t["secs"] for t in done]
+    clean = [t for t in done if not t["err"] and not t["intr"] and not t["corrected"]]
+    clean_pct = _rate(len(clean), len(turns))
+
+    by_day = defaultdict(list)
+    for t in turns:
+        by_day[t["day"]].append(t)
+    series = []
+    for day in sorted(by_day):
+        ts_ = by_day[day]
+        dsecs = [t["secs"] for t in ts_ if t["secs"] is not None]
+        series.append({"day": day, "turns": len(ts_), "median": _r1(_median(dsecs)),
+                       "p90": _r1(_p90(dsecs)),
+                       "clean_pct": _rate(sum(1 for t in ts_ if t["secs"] is not None and not t["err"]
+                                              and not t["intr"] and not t["corrected"]), len(ts_))})
+
+    # where tool time goes (sequential tool calls; excludes the model's own time)
+    fam = defaultdict(lambda: {"calls": 0, "secs": [], "fails": 0})
+    for day, _tool, family, sec, ok in st.tool_calls:
+        if _in(day, d0, d1):
+            f = fam[family]
+            f["calls"] += 1
+            f["secs"].append(sec)
+            f["fails"] += 0 if ok else 1
+    total_tool = sum(sum(f["secs"]) for f in fam.values())
+    tools = sorted(({"family": k, "calls": v["calls"], "total_s": round(sum(v["secs"]), 1),
+                     "share_pct": _rate(sum(v["secs"]), total_tool) if total_tool else 0,
+                     "median_s": _r1(_median(v["secs"])), "p90_s": _r1(_p90(v["secs"])),
+                     "max_s": _r1(max(v["secs"])), "fails": v["fails"]}
+                    for k, v in fam.items()), key=lambda x: -x["total_s"])[:10]
+    turn_total = sum(secs)
+    tool_share = min(100, _rate(total_tool, turn_total)) if turn_total and total_tool else None
+
+    # failure -> recovery episodes: the same tool failing, then succeeding later
+    eps = [(day, tool, fails, steps, True) for day, tool, fails, steps in st.episodes if _in(day, d0, d1)]
+    for sid, s, _day in _sess_rows(st, d0, d1):
+        for tool, ep in s["open_err"].items():
+            if _in(ep["day"], d0, d1):
+                eps.append((ep["day"], tool, ep["fails"], None, False))
+    n_eps = len(eps)
+    recovered = [e for e in eps if e[4]]
+    stuck = [e for e in eps if e[2] >= 3]
+    recovery_pct = _rate(len(recovered), n_eps) if n_eps else None
+    fail_tools = Counter(e[1] for e in eps).most_common(5)
+
+    rows = _sess_rows(st, d0, d1)
+    mins = [_sess_minutes(s) for _sid, s, _d in rows]
+    first_edit = [s["first_edit_s"] for _sid, s, _d in rows if s["first_edit_s"] is not None]
+    think = [ms / 1000 for day, ms in st.thinking if _in(day, d0, d1)]
+    effort = Counter(e for day, e in st.efforts if _in(day, d0, d1))
+
+    score = None
+    if len(turns) >= 5:
+        rec = (len(recovered) / n_eps) if n_eps else 1.0
+        stuck_share = (len(stuck) / n_eps) if n_eps else 0.0
+        score = _rnd(100 * (0.5 * (len(clean) / len(turns)) + 0.3 * rec + 0.2 * (1 - stuck_share)))
+    return {
+        "score": score, "ready": len(turns) >= 5, "turns": len(turns), "turns_done": len(done),
+        "abandoned": len(turns) - len(done),
+        "turn_median_s": _r1(_median(secs)), "turn_p90_s": _r1(_p90(secs)),
+        "turn_max_s": _r1(max(secs)) if secs else None,
+        "steps_median": _r1(_median([t["steps"] for t in done])),
+        "clean_pct": clean_pct,
+        "corrected": sum(1 for t in turns if t["corrected"]),
+        "interrupted": sum(1 for t in turns if t["intr"]),
+        "with_errors": sum(1 for t in turns if t["err"]),
+        "series": series, "tools": tools, "tool_share_pct": tool_share,
+        "episodes": n_eps, "recovered": len(recovered), "recovery_pct": recovery_pct,
+        "unrecovered": n_eps - len(recovered), "stuck": len(stuck),
+        "recover_steps_median": _r1(_median([e[3] for e in recovered if e[3] is not None])),
+        "fail_tools": [{"tool": k, "episodes": v} for k, v in fail_tools],
+        "sessions": len(rows), "session_median_min": _r1(_median(mins)),
+        "session_p90_min": _r1(_p90(mins)),
+        "first_edit_median_s": _r1(_median(first_edit)), "first_edit_n": len(first_edit),
+        "thinking_median_s": _r1(_median(think)), "thinking_total_s": round(sum(think), 1) if think else 0,
+        "thinking_share_pct": min(100, _rate(sum(think), turn_total)) if think and turn_total else None,
+        "effort": [{"level": k, "n": v} for k, v in effort.most_common()],
+    }
+
+
+def build_quality(st: Stats, d0=None, d1=None) -> dict:
+    rows = _sess_rows(st, d0, d1)
+    edited = [(sid, s, day) for sid, s, day in rows if s["last_write_seq"] >= 0]
+    verified = [r for r in edited if r[1]["last_verify_seq"] > r[1]["last_write_seq"]]
+    any_cmd = [r for r in edited if r[1]["last_cmd_seq"] > r[1]["last_write_seq"]]
+    with_tests = [r for r in edited if r[1]["test_files"] > 0]
+
+    # test / build / lint runs and how they went
+    runs = [(day, sid, kind, ok) for day, sid, kind, ok in st.cmd_runs if _in(day, d0, d1)]
+    groups = defaultdict(list)
+    for _day, sid, kind, ok in runs:
+        groups[(sid, kind)].append(ok)
+    by_kind = {}
+    for kind in ("test", "build", "lint"):
+        ks = [(k, v) for k, v in groups.items() if k[1] == kind]
+        n_runs = sum(len(v) for _k, v in ks)
+        if not n_runs:
+            continue
+        failing = [v for _k, v in ks if False in v]
+        recovered_g = [v for v in failing if True in v[v.index(False):]]
+        by_kind[kind] = {
+            "kind": kind, "runs": n_runs, "fails": sum(1 for _k, v in ks for ok in v if not ok),
+            "groups": len(ks), "first_pass_pct": _rate(sum(1 for _k, v in ks if v[0]), len(ks)),
+            "fail_groups": len(failing), "recovered_groups": len(recovered_g)}
+    all_groups = list(groups.values())
+    first_run_pass = _rate(sum(1 for v in all_groups if v[0]), len(all_groups)) if all_groups else None
+
+    # rework proxy: the same file edited again and again
+    edits = [(d, sid, path, proj) for d, sid, path, proj in st.edits if _in(d, d0, d1)]
+    per_sess = Counter((sid, path) for _d, sid, path, _p in edits)
+    reedits = sum(c - 1 for c in per_sess.values())
+    reedit_pct = _rate(reedits, len(edits)) if edits else None
+    files = defaultdict(lambda: {"n": 0, "days": set(), "sids": Counter(), "project": ""})
+    for d, sid, path, proj in edits:
+        f = files[path]
+        f["n"] += 1
+        f["days"].add(d)
+        f["sids"][sid] += 1
+        f["project"] = proj
+    hot = []
+    for path, f in files.items():
+        if f["n"] >= 5 and (max(f["sids"].values()) >= 3 or len(f["days"]) >= 3):
+            hot.append({"file": os.path.basename(path), "project": f["project"], "edits": f["n"],
+                        "days": len(f["days"]), "sessions": len(f["sids"])})
+    hot.sort(key=lambda x: -x["edits"])
+
+    days = [d for d in st.days if _in(d, d0, d1)]
+    n_writes = sum(st.days[d]["writes"] for d in days)
+    n_prompts = sum(st.days[d]["prompts"] for d in days)
+    errors = sum(st.days[d]["tool_errors"] for d in days)
+    intr = sum(st.days[d]["interruptions"] for d in days)
+    safety = Counter(c for d, c in st.safety if _in(d, d0, d1))
+    perms = Counter((dec, src) for d, dec, src in st.perm_decisions if _in(d, d0, d1))
+
+    weeks = defaultdict(lambda: [0, 0])
+    for _sid, s, day in edited:
+        w = weeks[_iso_monday(day)]
+        w[0] += 1
+        w[1] += 1 if s["last_verify_seq"] > s["last_write_seq"] else 0
+    weekly = [{"start": k, "edited": v[0], "verified": v[1], "pct": _rate(v[1], v[0])}
+              for k, v in sorted(weeks.items())]
+
+    score = None
+    if len(edited) >= 3:
+        terms = [(0.40, len(verified) / len(edited)), (0.20, len(with_tests) / len(edited)),
+                 (0.20, 1 - min(1.0, (reedit_pct or 0) / 100 / 0.5))]
+        if first_run_pass is not None:
+            terms.append((0.20, first_run_pass / 100))
+        score = _rnd(100 * sum(w * v for w, v in terms) / sum(w for w, _ in terms))
+    return {
+        "score": score, "ready": len(edited) >= 3, "edited_sessions": len(edited),
+        "verified_pct": _rate(len(verified), len(edited)), "verified": len(verified),
+        "any_command_pct": _rate(len(any_cmd), len(edited)),
+        "tests_alongside_pct": _rate(len(with_tests), len(edited)), "with_tests": len(with_tests),
+        "runs": by_kind, "first_run_pass_pct": first_run_pass, "run_groups": len(all_groups),
+        "reedit_pct": reedit_pct, "edits": len(edits), "hotspots": hot[:8],
+        "errors_per_100_edits": _r1(100 * errors / n_writes) if n_writes else None,
+        "tool_errors": errors, "interrupts_per_100_prompts": _r1(100 * intr / n_prompts) if n_prompts else None,
+        "interruptions": intr, "safety": dict(safety),
+        "permissions": [{"decision": k[0], "source": k[1], "n": v} for k, v in perms.most_common()],
+        "weekly": weekly,
+    }
+
+
+def _is_top_tier(model: str) -> bool:
+    return price_for(model)["in"] >= 10
+
+
+def build_value(st: Stats, d0=None, d1=None) -> dict:
+    days = sorted(d for d in st.days if _in(d, d0, d1))
+    cost = sum(st.days[d]["cost"] for d in days)
+    saved = sum(st.days[d]["cache_savings"] for d in days)
+    loc = sum(st.days[d]["loc"] for d in days)
+    rows = _sess_rows(st, d0, d1)
+    sess_costs = [s["cost"] for _sid, s, _d in rows if s["cost"] > 0]
+    edited = [r for r in rows if r[1]["last_write_seq"] >= 0]
+    verified = [r for r in edited if r[1]["last_verify_seq"] > r[1]["last_write_seq"]]
+    ver_cost = sum(r[1]["cost"] for r in verified)
+
+    # cost spikes: days well above this window's own typical day
+    day_costs = [st.days[d]["cost"] for d in days if st.days[d]["cost"] > 0]
+    med = _median(day_costs) or 0
+    spikes = []
+    if len(day_costs) >= 5:
+        for d in days:
+            c = st.days[d]["cost"]
+            if c >= max(2 * med, 0.5):
+                top = max((r for r in rows if r[2] == d), key=lambda r: r[1]["cost"], default=None)
+                spikes.append({"day": d, "cost": round(c, 2), "x_typical": round(c / med, 1) if med else None,
+                               "session": (st.session_titles.get(top[0]) or "Untitled session") if top else None,
+                               "session_cost": round(top[1]["cost"], 2) if top else None})
+        spikes.sort(key=lambda x: -x["cost"])
+
+    first = sum(s.get("first_call_cost", 0.0) for _sid, s, _d in rows)
+    total_sess = sum(s.get("cost", 0.0) for _sid, s, _d in rows)
+    nf = sum(max(0, s["api_calls"] - 1) for _sid, s, _d in rows)
+    resets = sum(s["cache_resets"] for _sid, s, _d in rows if s["api_calls"] > 1)
+
+    mcost = Counter()
+    sess_by_model = Counter()
+    top_tier_cost = top_tier_nocode = 0.0
+    for _sid, s, _d in rows:
+        for m, c in s["model_cost"].items():
+            mcost[m] += c
+        if s["model_cost"]:
+            primary = s["model_cost"].most_common(1)[0][0]
+            sess_by_model[primary] += 1
+            if _is_top_tier(primary):
+                top_tier_cost += s["cost"]
+                if s["last_write_seq"] < 0:
+                    top_tier_nocode += s["cost"]
+    mtotal = sum(mcost.values())
+    models = [{"model": m, "cost": round(c, 2), "share_pct": _rate(c, mtotal),
+               "sessions": sess_by_model.get(m, 0)} for m, c in mcost.most_common(6)]
+
+    weeks = defaultdict(lambda: [0.0, 0])
+    for d in days:
+        w = weeks[_iso_monday(d)]
+        w[0] += st.days[d]["cost"]
+        w[1] += st.days[d]["loc"]
+    weekly = [{"start": k, "cost": round(v[0], 2), "loc": v[1],
+               "per_100_loc": round(v[0] / v[1] * 100, 2) if v[1] else None}
+              for k, v in sorted(weeks.items())]
+    return {
+        "ready": bool(days) and cost > 0, "cost": round(cost, 2), "loc": loc,
+        "per_100_loc": round(cost / loc * 100, 2) if loc else None,
+        "sessions": len(rows), "session_median_cost": round(_median(sess_costs), 2) if sess_costs else None,
+        "verified_sessions": len(verified),
+        "cost_per_verified": round(ver_cost / len(verified), 2) if verified else None,
+        "cache_savings": round(saved, 2),
+        "cache_saved_pct": _rnd(100 * saved / (cost + saved)) if (cost + saved) > 0 and saved > 0 else 0,
+        "cold_start_pct": _r1(100 * first / total_sess) if total_sess else None,
+        "cache_reset_pct": _r1(100 * resets / nf) if nf else None,
+        "daily": [{"day": d, "cost": round(st.days[d]["cost"], 3),
+                   "spike": any(sp["day"] == d for sp in spikes)} for d in days],
+        "spikes": spikes[:5], "median_day_cost": round(med, 2) if med else None,
+        "models": models,
+        "top_tier_nocode_pct": _rate(top_tier_nocode, top_tier_cost) if top_tier_cost else None,
+        "top_tier_cost": round(top_tier_cost, 2), "weekly": weekly,
+    }
+
+
+def _field_status(n, d):
+    if not d:
+        return "missing"
+    r = n / d
+    return "ok" if r >= 0.9 else ("partial" if n else "missing")
+
+
+def build_health(st: Stats) -> dict:
+    """What this machine's logs actually contain, so a metric can say 'not in your logs'
+    instead of showing a misleading zero."""
+    hc = st.hc
+    perms = Counter(dec for _d, dec, _s in st.perm_decisions)
+    caps = [
+        ("tokens", "Tokens and cost", "tokens",
+         _field_status(hc["assistant_msgs"], hc["assistant_msgs"]),
+         "%d responses with token usage (%d duplicate log lines dropped)" % (hc["assistant_msgs"], hc["duplicate_lines"])),
+        ("turns", "Turn timing", "flow",
+         "ok" if len(st.turns) else "missing",
+         "%d turns timed from your prompt to Claude finishing" % len(st.turns)),
+        ("tooltime", "Tool timing", "flow",
+         _field_status(hc["tool_results_matched"], hc["tool_results"]),
+         "%d of %d tool results matched to their call" % (hc["tool_results_matched"], hc["tool_results"])),
+        ("cmdout", "Command outcomes", "quality",
+         "ok" if hc["tool_results"] else "missing",
+         "Pass/fail comes from the error flag; exit-code text seen on %d failed commands" % hc["exit_code_text"]),
+        ("perms", "Permission decisions", "quality",
+         "ok" if hc["permission_decisions"] else "missing",
+         ("Seen: " + ", ".join("%s %d" % (k, v) for k, v in perms.most_common())) if perms
+         else "None in these logs, so accept/reject rates are not shown"),
+        ("thinking", "Thinking time", "flow",
+         "ok" if hc["thinking"] else "missing", "%d responses report thinking time" % hc["thinking"]),
+        ("effort", "Effort level", "flow",
+         "ok" if hc["effort"] else "missing", "%d responses report an effort level" % hc["effort"]),
+        ("subagents", "Subagent activity", "adoption",
+         "ok" if (hc["sidechain_entries"] or sum(st.subagents.values())) else "missing",
+         "%d subagent call%s, %d subagent log lines" % (sum(st.subagents.values()),
+                                                       "" if sum(st.subagents.values()) == 1 else "s", hc["sidechain_entries"])
+         if (hc["sidechain_entries"] or sum(st.subagents.values())) else "No subagent work seen yet"),
+        ("hooks", "Hooks", "adoption",
+         "ok" if hc["stop_hook_summary"] else "missing",
+         "%d hook runs recorded" % hc["stop_hook_summary"] if hc["stop_hook_summary"] else "No hook runs seen"),
+        ("time", "Timestamps", "all",
+         _field_status(hc["entries_dated"], hc["entries"]),
+         "%d of %d entries carry a timestamp" % (hc["entries_dated"], hc["entries"])),
+    ]
+    titled = sum(1 for sid in st.sessions if sid in st.session_titles)
+    caps.append(("titles", "Session titles", "weekly",
+                 _field_status(titled, len(st.sessions)),
+                 "%d of %d sessions have an AI title" % (titled, len(st.sessions))))
+    return {
+        "capabilities": [{"id": i, "label": l, "tab": t, "status": s, "detail": d} for i, l, t, s, d in caps],
+        "entry_types": [{"type": str(k), "n": v} for k, v in st.entry_types.most_common()],
+        "versions": [{"version": k, "n": v} for k, v in st.versions.most_common(6)],
+        "entrypoints": [{"name": k, "n": v} for k, v in st.entrypoints.most_common(6)],
+        "parse_errors": st.parse_errors, "duplicate_lines": hc["duplicate_lines"],
+        "sessions": len(st.sessions),
+        "limits": [
+            "Edits Claude makes through shell commands (sed, python scripts) are not counted as edits or lines of code.",
+            "Turn and tool times include any time spent waiting for you to approve an action.",
+            "The logs do not show which of Claude's output you kept, so there is no true acceptance rate unless permission decisions appear.",
+            "A session is not a task: a long session can hold several tasks, and one task can span sessions.",
+            "Cost is an estimate at public list prices; on a subscription plan your real marginal cost is $0.",
+        ],
+    }
+
+
+# (id, tab, name, confidence, how it is computed, main limitation)
+METRIC_CATALOG = [
+    ("turn_time", "flow", "Turn time", "derived",
+     "Time from your prompt to Claude finishing its answer (stop reason end_turn); median and 90th percentile.",
+     "Includes any time spent waiting for you to approve an action."),
+    ("clean_turns", "flow", "Clean first-pass turns", "derived",
+     "Turns that finished with no tool error, no interruption, and no correction from your next prompt, divided by all turns.",
+     "A correction is detected from wording at the start of your next prompt, so it can miss some."),
+    ("recovery", "flow", "Failure recovery", "derived",
+     "Of the times a tool failed, the share where the same tool later succeeded in that session.",
+     "A different fix that does not retry the same tool counts as unrecovered."),
+    ("stuck", "flow", "Stuck loops", "derived",
+     "Failure episodes where the same tool failed three or more times in a row.", "Three failures is a convention, not a law."),
+    ("first_edit", "flow", "Time to first edit", "derived",
+     "Seconds from a session's first log entry to Claude's first edit, median over sessions that edited.",
+     "Edits made through shell commands are not seen."),
+    ("tool_time", "flow", "Where tool time goes", "observed",
+     "Time between each tool call and its result, grouped by tool or command.",
+     "Excludes the model's own thinking and generation time."),
+    ("session_len", "flow", "Session length", "derived",
+     "Last entry minus first entry in a session (median, 90th percentile).", "Includes idle time."),
+    ("thinking", "flow", "Thinking time", "observed",
+     "thinkingDurationMs reported on Claude's responses.", "Only present when the logs include it."),
+    ("flow_score", "flow", "Flow score", "derived",
+     "50% clean-turn rate + 30% failure-recovery rate + 20% (1 - stuck share); needs 5+ turns.",
+     "A heuristic blend; the trend matters more than the number."),
+    ("verified", "quality", "Verified after last edit", "proxy",
+     "Sessions where a test, build or lint command ran after Claude's last edit, divided by sessions where Claude edited.",
+     "Running a check is not the same as the check passing."),
+    ("first_run", "quality", "First-run pass rate", "derived",
+     "For each session and kind of check (test, build, lint), whether the first run passed.",
+     "Pass/fail comes from the command's error flag."),
+    ("tests_alongside", "quality", "Tests alongside code", "proxy",
+     "Sessions that edited a test file, divided by sessions where Claude edited.",
+     "Detected from file names such as test_*, *.spec.*, tests/."),
+    ("reedit", "quality", "Re-edit share", "proxy",
+     "Edits to a file already edited earlier in the same session, divided by all edits.",
+     "Normal step-by-step work also re-edits files."),
+    ("hotspots", "quality", "Rework hotspots", "proxy",
+     "Files edited 5+ times that were edited 3+ times in one session or on 3+ days.", "Some files are simply central."),
+    ("friction", "quality", "Errors and interruptions", "observed",
+     "Failed tool results per 100 edits, and interruptions per 100 prompts.", "A failed command is often a normal step."),
+    ("safety", "quality", "Safety signals", "proxy",
+     "Counts of risky commands (force-push, hard reset, recursive delete, pipe-to-shell, skipped hooks) and touches of secret-like files.",
+     "Pattern matching on command text; only category counts are stored."),
+    ("perms", "quality", "Permission decisions", "observed",
+     "The decision and source recorded with each tool call, when the logs include it.", "Not present in every setup."),
+    ("quality_score", "quality", "Quality score", "derived",
+     "40% verified + 20% tests alongside + 20% low re-edits + 20% first-run pass (when checks ran); needs 3+ edited sessions.",
+     "A heuristic blend; the trend matters more than the number."),
+    ("cost", "value", "Estimated cost", "estimated",
+     "Token usage priced at the PRICING table in the script.", "List prices; $0 real marginal cost on a subscription."),
+    ("cost_100_loc", "value", "Cost per 100 lines", "estimated",
+     "Estimated cost divided by lines Claude wrote, times 100.", "Lines of code are additions only."),
+    ("cost_verified", "value", "Cost per verified session", "estimated",
+     "Estimated cost of sessions that edited and then ran a check, divided by their count.", "Sessions are not tasks."),
+    ("cache_savings", "value", "Cache savings", "estimated",
+     "Cache reads billed at 10% instead of 100%, minus the 25% premium for cache writes, at list prices.",
+     "Assumes you would otherwise have sent the same tokens uncached."),
+    ("cold_start", "value", "Cold-start tax", "estimated",
+     "Cost of each session's first call as a share of all session cost.", "See METRICS.md."),
+    ("cost_spikes", "value", "Cost spikes", "derived",
+     "Days costing 2x or more your typical day in the window.", "Needs five or more active days."),
+    ("model_mix", "value", "Model mix", "derived",
+     "Each model's share of estimated cost, by session.", "A session's primary model is the one that cost the most."),
+    ("top_tier_nocode", "value", "Top-tier model on no-edit sessions", "proxy",
+     "Share of top-tier-model cost spent in sessions where Claude made no edits.",
+     "Some thinking-heavy sessions legitimately need a top-tier model."),
+    ("adoption_score", "adoption", "Adoption Score", "derived",
+     "25% Habit + 25% Range + 30% Craft + 20% Impact.", "A heuristic blend with hand-picked weights."),
+]
+METRIC_CATALOG_BY_ID = {m[0]: m for m in METRIC_CATALOG}
+
+
+def catalog_payload():
+    return {m[0]: {"tab": m[1], "name": m[2], "confidence": m[3], "how": m[4], "limit": m[5]}
+            for m in METRIC_CATALOG}
+
+
+def build_advisor(st: Stats, adoption: dict) -> dict:
+    """Evidence-based next steps over the same 28-day window as My Adoption. Every
+    recommendation quotes the numbers behind it; none of this uses AI or tokens."""
+    out = {"ready": False, "recs": [], "more": [], "wins": [], "metrics": {}}
+    end_day = adoption.get("end")
+    if not end_day:
+        return out
+    d1 = end_day
+    d0 = (date.fromisoformat(end_day) - timedelta(days=ADOPTION["window_days"] - 1)).isoformat()
+    fl, q, v = build_flow(st, d0, d1), build_quality(st, d0, d1), build_value(st, d0, d1)
+    out.update({"ready": True, "start": d0, "end": d1,
+                "scores": {"flow": fl["score"], "quality": q["score"]}})
+    recs, wins = [], []
+
+    def add(rid, area, sev, title, evidence, action, conf, metric=None, better=None, label=None):
+        rec = {"id": rid, "area": area, "severity": round(sev, 1), "title": title,
+               "evidence": evidence, "action": action, "confidence": conf}
+        if metric:
+            rec["experiment"] = {"metric": metric, "better": better, "label": label}
+        recs.append(rec)
+
+    vp = q["verified_pct"]
+    if q["edited_sessions"] >= 3 and vp is not None:
+        if vp < 60:
+            add("verify", "quality", (100 - vp) * 0.9, "Make Claude check its own work",
+                "A test, build or lint ran after Claude's last edit in %d%% of edit sessions (%d of %d)."
+                % (vp, q["verified"], q["edited_sessions"]),
+                "End prompts with \"then run the tests\", or put your test command in CLAUDE.md so Claude runs it on its own.",
+                "proxy", "verified_pct", "up", "Ask for a test run after every change, for your next 5 edit sessions")
+        elif vp >= 80:
+            wins.append("You check the work: %d%% of edit sessions ended with a test, build or lint." % vp)
+    fp = q["first_run_pass_pct"]
+    if fp is not None and q["run_groups"] >= 5:
+        if fp < 60:
+            add("firstrun", "quality", (100 - fp) * 0.8, "Your first test or build run often fails",
+                "Only %d%% of first runs passed across %d session-and-check pairs." % (fp, q["run_groups"]),
+                "Before new work, have Claude run the suite and fix what is red first; paste the failing output into the prompt.",
+                "derived", "first_run_pass_pct", "up", "Start each session by running the tests, for your next 5 sessions")
+        elif fp >= 85:
+            wins.append("Your tests and builds pass first time: %d%% of first runs." % fp)
+    cp = fl["clean_pct"]
+    if fl["turns"] >= 8 and cp is not None:
+        if cp < 60:
+            add("clean", "flow", (100 - cp) * 0.8, "Sharper first prompts",
+                "%d%% of turns were clean first tries: %d needed a correction, %d were interrupted and %d hit tool errors (of %d turns)."
+                % (cp, fl["corrected"], fl["interrupted"], fl["with_errors"], fl["turns"]),
+                "State the goal, the files involved and what \"done\" looks like in the first prompt. For bigger changes, start in plan mode.",
+                "derived", "clean_pct", "up", "Write the goal, files and a done-check in your first prompt, for 5 sessions")
+        elif cp >= 75:
+            wins.append("Most of your turns land first time: %d%% clean." % cp)
+    if fl["stuck"] >= 2:
+        top = fl["fail_tools"][0]["tool"] if fl["fail_tools"] else "a tool"
+        add("stuck", "flow", min(90, 45 + 10 * fl["stuck"]), "Break out of failure loops sooner",
+            "%d times the same tool failed 3 or more times in a row (most often %s)." % (fl["stuck"], top),
+            "After two failures, stop: restate the problem, change the approach, or switch to plan mode instead of letting Claude retry.",
+            "derived", "stuck", "down", "After two failures, stop and change approach, for your next 5 sessions")
+    if fl["episodes"] >= 5 and fl["recovery_pct"] is not None and fl["recovery_pct"] >= 85:
+        wins.append("Failures get fixed: %d%% of failed tool calls were followed by a success." % fl["recovery_pct"])
+    tools = [t for t in fl["tools"] if t["total_s"] >= 60]
+    if tools and tools[0]["share_pct"] >= 35:
+        t = tools[0]
+        add("slowtool", "flow", 30 + t["share_pct"] * 0.4, "\u2018%s\u2019 dominates your tool time" % t["family"],
+            "%s took %d%% of tool time: %ds over %d calls, slowest %ds." % (t["family"], t["share_pct"], t["total_s"], t["calls"], t["max_s"]),
+            "Run it less often, scope it to the files you changed, or ask Claude to run it once at the end instead of after every edit.",
+            "observed")
+    sp90 = fl["session_p90_min"]
+    if sp90 and fl["sessions"] >= 5 and (sp90 >= 180 or (fl["session_median_min"] or 0) >= 90):
+        add("longsess", "flow", min(70, 30 + sp90 / 6), "Start a fresh session per task",
+            "Median session is %d min and the longest 10%% run %d min."
+            % (fl["session_median_min"] or 0, sp90),
+            "Use /clear between unrelated tasks, and /compact when one long task has to continue.",
+            "derived")
+    cs = v["cold_start_pct"]
+    if cs is not None and cs >= 45 and v["sessions"] >= 8:
+        add("coldstart", "value", min(70, cs * 0.7), "Many short sessions are paying the cache set-up cost",
+            "%.0f%% of session cost went on each session's first call, across %d sessions." % (cs, v["sessions"]),
+            "Batch related small tasks into one session rather than opening a new one for each.",
+            "estimated", "cold_start_pct", "down", "Do related small tasks in one session, for a week")
+    cr = v["cache_reset_pct"]
+    if cr is not None and cr >= 8:
+        add("cachereset", "value", min(65, cr * 3), "The cache is being rebuilt mid-session",
+            "%.0f%% of follow-up calls rebuilt the cache instead of reusing it." % cr,
+            "Avoid long pauses in the middle of a task, and avoid switching tools or models partway through.",
+            "estimated", "cache_reset_pct", "down", "Finish tasks without long pauses, for a week")
+    rp = q["reedit_pct"]
+    if rp is not None and q["edits"] >= 30:
+        if rp >= 35:
+            hot = ('; most reworked: "%s"' % q["hotspots"][0]["file"]) if q["hotspots"] else ""
+            add("rework", "quality", min(75, rp), "Files are being edited again and again",
+                "%d%% of edits were to a file already edited in that session%s." % (rp, hot),
+                "Give Claude the full requirement and the check for \"done\" up front, so it makes one pass instead of many small ones.",
+                "proxy", "reedit_pct", "down", "Describe the full requirement before Claude edits, for 5 sessions")
+        elif rp <= 15:
+            wins.append("You get things done in few passes: only %d%% of edits revisit a file." % rp)
+    ta = q["tests_alongside_pct"]
+    if q["edited_sessions"] >= 5 and ta is not None and ta < 40:
+        add("tests", "quality", (100 - ta) * 0.5, "Ask for tests alongside code",
+            "Claude touched a test file in only %d%% of edit sessions." % ta,
+            "End prompts with \"and add or update the tests for this change\".",
+            "proxy", "tests_alongside_pct", "up", "Ask for tests with every change, for 5 sessions")
+    risky = {k: n for k, n in q["safety"].items() if k != "secret_file_touched"}
+    if risky:
+        n = sum(risky.values())
+        add("risky", "quality", min(85, 40 + 10 * n), "Risky commands ran",
+            "%d risky command%s: %s." % (n, "" if n == 1 else "s", ", ".join("%s x%d" % (k.replace("_", " "), c) for k, c in risky.items())),
+            "Add deny rules in your Claude Code permission settings for the ones you never want to run unattended.",
+            "proxy")
+    if q["safety"].get("secret_file_touched"):
+        n = q["safety"]["secret_file_touched"]
+        add("secrets", "quality", min(90, 55 + 10 * n), "Claude touched secret-like files",
+            "%d read or edit%s of files like .env, keys or credentials." % (n, "" if n == 1 else "s"),
+            "Deny reads of .env and key files in your permission settings, or keep secrets outside the project folder.",
+            "proxy")
+    if v["spikes"]:
+        s = v["spikes"][0]
+        add("spike", "value", min(70, 35 + (s["x_typical"] or 0) * 5), "Cost spiked on %s" % s["day"],
+            "$%.2f was %.1fx a typical day; biggest session: \"%s\" ($%.2f)." % (s["cost"], s["x_typical"] or 0, s["session"], s["session_cost"] or 0),
+            "Check that session for a runaway loop or an oversized context, and split big tasks.",
+            "estimated")
+    tn = v["top_tier_nocode_pct"]
+    if tn is not None and tn >= 50 and v["top_tier_cost"] >= 5:
+        add("model", "value", 35, "Top-tier model on sessions with no edits",
+            "%d%% of top-tier-model spend ($%.2f) went to sessions where Claude changed nothing." % (tn, v["top_tier_cost"]),
+            "For questions and exploration try a lighter model, and keep the top tier for building.",
+            "proxy")
+    for c in adoption.get("coach", []):
+        add("adopt_" + (c.get("feature") or c["area"]), c["area"] if c["area"] != "wellbeing" else "habit",
+            min(80, c.get("severity", 40)), c["title"], c["why"], c["how"], "derived")
+    if (adoption.get("habit") or {}).get("streak", 0) >= 5:
+        wins.append("You're on a %d-day streak." % adoption["habit"]["streak"])
+    if v["cache_saved_pct"] >= 20 and v["cache_savings"] >= 1:
+        wins.append("Caching saved you about %d%% (about $%.2f at list prices)." % (v["cache_saved_pct"], v["cache_savings"]))
+    if q["edits"] >= 20 and not q["safety"]:
+        wins.append("No risky commands or secret-file touches in this window.")
+
+    recs.sort(key=lambda r: -r["severity"])
+    for i, r in enumerate(recs):
+        r["rank"] = i + 1
+    out["recs"], out["more"] = recs[:5], recs[5:12]
+    out["wins"] = wins[:4]
+    out["metrics"] = {
+        "verified_pct": vp, "first_run_pass_pct": fp, "clean_pct": cp, "stuck": fl["stuck"],
+        "reedit_pct": rp, "tests_alongside_pct": ta, "recovery_pct": fl["recovery_pct"],
+        "cold_start_pct": cs, "cache_reset_pct": cr, "per_100_loc": v["per_100_loc"]}
+    return out
+
+
+# ---------------------------------------------------------------------------
 # "My Adoption" -- one developer's adoption story. Four pillars (Habit, Range,
 # Craft, Impact) are each scored 0-100 over a rolling window and blended into
 # one Adoption Score. Pure functions over Stats; formulas in docs/METRICS.md.
@@ -1392,9 +2302,17 @@ def _pillar_scores(st: Stats, w: dict) -> dict:
                    if r["reads"] + r["writes"] + r["bash"] >= cfg["substantial_actions"]]
     sub_share = len(substantial) / len(sess) if sess else 0
     range_ = _rnd(100 * (0.75 * min(1, n_used / cfg["features_full"]) + 0.25 * sub_share))
-    # Craft: the four AI-fluency dimensions, averaged
+    # Craft: the four AI-fluency dimensions, averaged, blended with how smoothly work
+    # flows and how well it is checked (the Flow and Quality tabs) when those have data
     fl = fluency_of(w)
-    craft = _rnd((fl["delegation"] + fl["description"] + fl["discernment"] + fl["diligence"]) / 4)
+    craft_base = _rnd((fl["delegation"] + fl["description"] + fl["discernment"] + fl["diligence"]) / 4)
+    flow_d, qual_d = build_flow(st, w["start"], w["end"]), build_quality(st, w["start"], w["end"])
+    parts = [(0.6, craft_base)]
+    if flow_d["score"] is not None:
+        parts.append((0.2, flow_d["score"]))
+    if qual_d["score"] is not None:
+        parts.append((0.2, qual_d["score"]))
+    craft = _rnd(sum(a * b for a, b in parts) / sum(a for a, _ in parts))
     # Impact: code Claude wrote for you, and how many of your days it did so
     per_day = w["loc"] / w["active_days"] if w["active_days"] else 0
     code_day_share = w["code_days"] / w["active_days"] if w["active_days"] else 0
@@ -1405,20 +2323,47 @@ def _pillar_scores(st: Stats, w: dict) -> dict:
     return {"habit": habit, "range": range_, "craft": craft, "impact": impact,
             "overall": overall, "feats": feats, "n_used": n_used, "covered": covered,
             "buckets": buckets, "sub_share": sub_share, "substantial": len(substantial),
-            "per_day": per_day, "code_day_share": code_day_share, "fluency": fl}
+            "per_day": per_day, "code_day_share": code_day_share, "fluency": fl,
+            "craft_base": craft_base, "flow": flow_d["score"], "quality": qual_d["score"],
+            "flow_d": flow_d, "quality_d": qual_d}
 
 
-def adoption_level(score: int) -> dict:
-    idx = 0
+def adoption_level(score: int, pillars=None, history=None) -> dict:
+    """Level for a score. Pro and Pro Max also need every pillar above a floor, and
+    Pro Max a sustained run of high weekly scores. Without pillars/history only the
+    score is checked (used for quick lookups)."""
+    top = 0
     for i, (floor, _n, _d) in enumerate(ADOPTION_LEVELS):
         if score >= floor:
-            idx = i
+            top = i
+    idx, blocker = top, None
+    weakest = min(pillars, key=lambda k: pillars[k]) if pillars else None
+    while idx > 0:
+        name = ADOPTION_LEVELS[idx][1]
+        gate = LEVEL_GATES.get(name)
+        if not gate or pillars is None:
+            break
+        problem = None
+        if min(pillars.values()) < gate["min_pillar"]:
+            problem = "Lift %s (now %d) to %d to unlock %s." % (
+                weakest.capitalize(), pillars[weakest], gate["min_pillar"], name)
+        elif "sustain_weeks" in gate:
+            recent = [h["score"] for h in (history or [])][-gate["sustain_weeks"]:]
+            if len(recent) < gate["sustain_weeks"] or min(recent) < gate["sustain_score"]:
+                problem = "Hold %d+ for %d weeks in a row to unlock %s." % (
+                    gate["sustain_score"], gate["sustain_weeks"], name)
+        if not problem:
+            break
+        if blocker is None:
+            blocker = problem
+        idx -= 1
     floor, name, desc = ADOPTION_LEVELS[idx]
     nxt = ADOPTION_LEVELS[idx + 1] if idx + 1 < len(ADOPTION_LEVELS) else None
     return {"index": idx, "name": name, "desc": desc, "floor": floor,
             "next_name": nxt[1] if nxt else None,
             "next_floor": nxt[0] if nxt else None,
-            "to_next": (nxt[0] - score) if nxt else 0,
+            "to_next": max(0, nxt[0] - score) if nxt else 0,
+            "blocker": blocker,
             "all": [{"floor": f, "name": n} for f, n, _ in ADOPTION_LEVELS]}
 
 
@@ -1430,7 +2375,7 @@ def _coach(st: Stats, cur: dict, w: dict, wellbeing: dict, ever: dict) -> list:
             continue
         before = ever.get(fid, 0) > 0
         cands.append({
-            "area": "range", "feature": fid, "score": weight + (0 if before else 10),
+            "area": "range", "feature": fid, "severity": weight + (0 if before else 10),
             "title": "Try %s" % label.lower() if fid != "memory" else "Add a CLAUDE.md",
             "why": ("You've used %s before, but not in the last %d days."
                     % (label.lower(), ADOPTION["window_days"]) if before
@@ -1438,7 +2383,7 @@ def _coach(st: Stats, cur: dict, w: dict, wellbeing: dict, ever: dict) -> list:
             "how": tip})
     if cur["habit"] < 70:
         cands.append({
-            "area": "habit", "feature": None, "score": (100 - cur["habit"]) * 0.7,
+            "area": "habit", "feature": None, "severity": (100 - cur["habit"]) * 0.7,
             "title": "Make it a steady habit",
             "why": "You were active on %d of the last %d days."
                    % (w["active_days"], ADOPTION["window_days"]),
@@ -1449,13 +2394,13 @@ def _coach(st: Stats, cur: dict, w: dict, wellbeing: dict, ever: dict) -> list:
     weakest = min(dims, key=lambda d: fl[d[0]])
     if fl[weakest[0]] < 70:
         cands.append({
-            "area": "craft", "feature": None, "score": (100 - fl[weakest[0]]) * 0.75,
+            "area": "craft", "feature": None, "severity": (100 - fl[weakest[0]]) * 0.75,
             "title": weakest[1],
             "why": "%s is your lowest craft score (%d/100)." % (weakest[0].capitalize(), fl[weakest[0]]),
             "how": FLUENCY_TIPS[weakest[0]]})
     if cur["impact"] < 50 and w["active_days"] >= ADOPTION["min_active_days"]:
         cands.append({
-            "area": "impact", "feature": None, "score": (100 - cur["impact"]) * 0.45,
+            "area": "impact", "feature": None, "severity": (100 - cur["impact"]) * 0.45,
             "title": "Aim Claude at real changes",
             "why": "Claude wrote code on %d%% of your active days."
                    % _rnd(100 * cur["code_day_share"]),
@@ -1463,11 +2408,11 @@ def _coach(st: Stats, cur: dict, w: dict, wellbeing: dict, ever: dict) -> list:
     if wellbeing["late_pct"] > 20:
         cands.append({
             "area": "wellbeing", "feature": None,
-            "score": min(90, 40 + wellbeing["late_pct"]),   # outranks "try a feature" tips
+            "severity": min(90, 40 + wellbeing["late_pct"]),   # outranks "try a feature" tips
             "title": "Protect your evenings",
             "why": "%d%% of your activity happened between 11pm and 6am." % wellbeing["late_pct"],
             "how": "Claude will still be there tomorrow. Try a firm stop time for a week."})
-    cands.sort(key=lambda c: -c["score"])
+    cands.sort(key=lambda c: -c["severity"])
     picked, feats = [], 0
     for c in cands:
         if c["feature"]:
@@ -1477,9 +2422,62 @@ def _coach(st: Stats, cur: dict, w: dict, wellbeing: dict, ever: dict) -> list:
         picked.append(c)
         if len(picked) == 3:
             break
-    for c in picked:
-        c.pop("score", None)
     return picked
+
+
+def _highlights(cur, prev, w, pw, feature_rows, alldays, level) -> list:
+    """Up to four plain-language lines about what moved since the previous window."""
+    out = []
+    names = {"habit": "Habit", "range": "Range", "craft": "Craft", "impact": "Impact"}
+    if prev:
+        moves = sorted(((cur[k] - prev[k], k) for k in names), key=lambda x: -abs(x[0]))
+        for delta, k in moves[:2]:
+            if abs(delta) < 5:
+                continue
+            extra = ""
+            if k == "habit":
+                extra = " (active on %d days, was %d)" % (w["active_days"], pw["active_days"])
+            elif k == "range":
+                extra = " (%d features in use, was %d)" % (cur["n_used"], prev["n_used"])
+            elif k == "impact":
+                extra = " (%s lines, was %s)" % (w["loc"], pw["loc"])
+            out.append({"kind": "up" if delta > 0 else "down",
+                        "text": "%s %s %d points%s" % (names[k], "rose" if delta > 0 else "fell", abs(delta), extra)})
+        prev_level = adoption_level(prev["overall"])
+        if prev_level["index"] != level["index"]:
+            out.append({"kind": "level", "text": "Level change: %s \u2192 %s" % (prev_level["name"], level["name"])})
+    for f in feature_rows:
+        if f["first"] and alldays and f["first"] > alldays[0] and w["start"] <= f["first"] <= w["end"]:
+            out.append({"kind": "new", "text": "First time using %s (%s)" % (f["label"].lower(), f["first"])})
+    if not out:
+        out.append({"kind": "flat", "text": "A steady stretch: no pillar moved by 5 points or more."})
+    return out[:4]
+
+
+def _funnel(st: Stats, alldays, cur, w) -> list:
+    """Four stages of personal adoption, each with the evidence for it."""
+    per_week = Counter(_iso_monday(d) for d in alldays)
+    m, last = date.fromisoformat(_iso_monday(alldays[0])), date.fromisoformat(_iso_monday(alldays[-1]))
+    run, rec_date = 0, None
+    while m <= last:
+        run = run + 1 if per_week.get(m.isoformat(), 0) >= 2 else 0
+        if run >= 3 and rec_date is None:
+            rec_date = (m + timedelta(days=6)).isoformat()
+        m += timedelta(days=7)
+    qd = cur["quality_d"]
+    outcome = qd["edited_sessions"] >= 3 and (qd["verified_pct"] or 0) >= 50
+    return [
+        {"id": "started", "label": "Started", "achieved": True,
+         "detail": "First active day: %s" % alldays[0]},
+        {"id": "recurring", "label": "Recurring", "achieved": rec_date is not None,
+         "detail": ("2+ active days a week for 3 weeks in a row (reached %s)" % rec_date) if rec_date
+         else "Reach 2+ active days a week for 3 weeks in a row"},
+        {"id": "integrated", "label": "Integrated", "achieved": cur["n_used"] >= 4,
+         "detail": "%d features used in the last %d days (need 4)" % (cur["n_used"], ADOPTION["window_days"])},
+        {"id": "outcome", "label": "Verified outcomes", "achieved": outcome,
+         "detail": ("%d%% of edit sessions ended with a test, build or lint (need 50%%)" % qd["verified_pct"])
+         if qd["edited_sessions"] >= 3 else "Needs 3+ sessions where Claude edited files"},
+    ]
 
 
 def build_adoption(st: Stats) -> dict:
@@ -1559,6 +2557,19 @@ def build_adoption(st: Stats) -> dict:
     ]
     craft = [{"id": k, "label": lab, "score": fl[k], "prev": pfl[k] if pfl else None,
               "detail": det, "tip": FLUENCY_TIPS[k]} for k, lab, det in dims]
+    fd, qd = cur["flow_d"], cur["quality_d"]
+    if fd["score"] is not None:
+        craft.append({"id": "flow", "label": "Flow", "score": fd["score"],
+                      "prev": prev["flow"] if prev else None, "link": "flow",
+                      "detail": "%s%% of turns were clean first tries; %d stuck loop%s"
+                                % (fd["clean_pct"], fd["stuck"], "" if fd["stuck"] == 1 else "s"),
+                      "tip": "Open the Flow tab to see what slows you down."})
+    if qd["score"] is not None:
+        craft.append({"id": "quality", "label": "Quality", "score": qd["score"],
+                      "prev": prev["quality"] if prev else None, "link": "quality",
+                      "detail": "%s%% of edit sessions verified; %s%% of edits revisit a file"
+                                % (qd["verified_pct"], qd["reedit_pct"] if qd["reedit_pct"] is not None else 0),
+                      "tip": "Open the Quality tab to see how your work gets checked."})
 
     # --- impact --------------------------------------------------------------
     mix = Counter(r["type"] for r in w["sessions"])
@@ -1594,7 +2605,10 @@ def build_adoption(st: Stats) -> dict:
         else:
             cells.append(len(st.day_buckets.get(d.isoformat(), ())) * 10)
 
-    level = adoption_level(cur["overall"])
+    level = adoption_level(cur["overall"], {k: cur[k] for k in ("habit", "range", "craft", "impact")},
+                           history)
+    highlights = _highlights(cur, prev, w, pw, feature_rows, alldays, level)
+    funnel = _funnel(st, alldays, cur, w)
     pillars = []
     for pid, label, blurb in (
             ("habit", "Habit", "How regularly you show up"),
@@ -1617,6 +2631,7 @@ def build_adoption(st: Stats) -> dict:
         "craft": craft, "impact": impact, "wellbeing": wellbeing,
         "weekly": weekly, "calendar": {"start": cal_start.isoformat(), "cells": cells},
         "coach": _coach(st, cur, w, wellbeing, ever),
+        "highlights": highlights, "funnel": funnel,
     })
     return out
 
@@ -2233,7 +3248,7 @@ filter:drop-shadow(0 4px 10px var(--acc-line))}
 .ad-chg{display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-size:.6875rem;
 font-weight:600;padding:4px 10px;border-radius:var(--r-pill);background:var(--fill-3);color:var(--txt-2)}
 .ad-chg.up{color:var(--emerald)}.ad-chg.down{color:var(--rose)}
-.ad-ladder{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:20px}
+.ad-ladder{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;margin-top:20px}
 .ad-ladder .st{font-size:.625rem;color:var(--txt-3);letter-spacing:.02em;text-align:left}
 .ad-ladder .st i{display:block;height:6px;border-radius:99px;background:var(--fill-4);margin-bottom:6px;overflow:hidden}
 .ad-ladder .st i b{display:block;height:100%;border-radius:99px;
@@ -2322,6 +3337,71 @@ border-bottom:2px solid var(--txt-3);transform:rotate(45deg);transition:transfor
 .ad-how .it b{display:block;color:var(--txt);font-size:.8125rem;margin-bottom:2px}
 .ad-prog{height:9px;margin:14px 0 10px}
 
+/* ── Engineering insight tabs ── */
+.navgrp{font-size:.625rem;font-weight:680;letter-spacing:.08em;text-transform:uppercase;
+color:var(--txt-3);padding:14px 11px 4px}
+.cb{display:inline-block;font-size:.5625rem;font-weight:680;letter-spacing:.05em;text-transform:uppercase;
+padding:2px 7px;border-radius:var(--r-pill);cursor:help;white-space:nowrap;line-height:1.4}
+.cb.observed{background:color-mix(in srgb,var(--emerald) 14%,transparent);color:var(--emerald)}
+.cb.derived{background:color-mix(in srgb,var(--sky) 14%,transparent);color:var(--sky)}
+.cb.proxy{background:color-mix(in srgb,var(--amber) 16%,transparent);color:var(--amber)}
+.cb.estimated{background:color-mix(in srgb,var(--violet) 14%,transparent);color:var(--violet)}
+.ins-hero{display:grid;grid-template-columns:minmax(0,420px) minmax(0,1fr);gap:26px;align-items:center;
+background:radial-gradient(480px 240px at 0% 0%,var(--acc-soft),transparent 70%),var(--fill)}
+.ins-left{display:flex;align-items:center;gap:20px}
+.ins-left h2{font-size:1.35rem;letter-spacing:-.025em;line-height:1.15;margin-top:3px}
+.ins-left .d{color:var(--txt-2);font-size:.78125rem;line-height:1.55;margin-top:6px}
+.ins-left .cb{margin-top:9px}
+.ad-ring.sm{width:124px;height:124px}
+.ad-ring.sm .big{font-size:2.15rem}
+.ins-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.ins-tiles .kpi{padding-bottom:13px}
+.ins-tiles .khead{margin-bottom:9px}
+.ins-empty{color:var(--txt-2);font-size:.8125rem;line-height:1.6}
+.ins-empty b{color:var(--txt)}
+.cap{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.cap .it{display:flex;gap:11px;align-items:flex-start;padding:12px;border:1px solid var(--hair);
+border-radius:12px;background:var(--fill-2)}
+.cap .dot{width:9px;height:9px;border-radius:50%;margin-top:5px;flex:none;background:var(--slate)}
+.cap .it.ok .dot{background:var(--emerald)}.cap .it.partial .dot{background:var(--amber)}
+.cap .it.missing .dot{background:var(--slate)}
+.cap b{display:block;font-size:.8125rem;font-weight:620}
+.cap span{display:block;font-size:.6875rem;color:var(--txt-3);line-height:1.5;margin-top:2px}
+.lim{list-style:none;display:flex;flex-direction:column;gap:9px}
+.lim li{font-size:.78125rem;color:var(--txt-2);line-height:1.55;padding-left:16px;position:relative}
+.lim li::before{content:"";position:absolute;left:0;top:.55em;width:6px;height:6px;border-radius:50%;background:var(--slate)}
+.lim.good li::before{background:var(--emerald)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip2{font-size:.6875rem;padding:4px 10px;border-radius:var(--r-pill);background:var(--fill-3);color:var(--txt-2)}
+.chip2 b{color:var(--txt);font-weight:640}
+.chip2.warn{background:color-mix(in srgb,var(--rose) 12%,transparent);color:var(--rose)}
+.mbar{display:flex;height:10px;border-radius:99px;overflow:hidden;background:var(--fill-4);margin:8px 0 10px}
+.mbar i{display:block;height:100%}
+.exp-card{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.exp-card .big{font-size:1.5rem;font-weight:660;letter-spacing:-.025em}
+.ad-step .acts{display:flex;gap:8px;margin-top:4px}
+.ad-step .meta{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.ad-block{font-size:.6875rem;color:var(--amber);margin-top:6px;line-height:1.5;font-weight:560}
+.lnk{color:var(--acc);cursor:pointer;font-size:.6875rem;font-weight:620}
+.lnk:hover{text-decoration:underline}
+.ad-hl{list-style:none;display:flex;flex-direction:column;gap:11px}
+.ad-hl li{display:flex;gap:11px;align-items:flex-start;font-size:.8125rem;color:var(--txt-2);line-height:1.5}
+.ad-hl .dt{width:9px;height:9px;border-radius:50%;flex:none;margin-top:6px;background:var(--slate)}
+.ad-hl .up .dt{background:var(--emerald)}.ad-hl .down .dt{background:var(--rose)}
+.ad-hl .new .dt{background:var(--sky)}.ad-hl .level .dt{background:var(--violet)}
+.ad-funnel{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.ad-funnel .fs{position:relative;padding:12px;border:1px solid var(--hair);border-radius:12px;background:var(--fill-2)}
+.ad-funnel .fs .n{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:.6875rem;
+font-weight:700;background:var(--fill-4);color:var(--txt-3);margin-bottom:8px}
+.ad-funnel .fs.on{border-color:color-mix(in srgb,var(--emerald) 40%,transparent);
+background:color-mix(in srgb,var(--emerald) 7%,var(--fill))}
+.ad-funnel .fs.on .n{background:var(--emerald);color:#fff}
+.ad-funnel b{display:block;font-size:.8125rem;font-weight:630}
+.ad-funnel span{display:block;font-size:.6875rem;color:var(--txt-3);line-height:1.5;margin-top:3px}
+.tbl td.wrapc{white-space:normal;max-width:260px}
+.sel{background:var(--fill-2);border:1px solid var(--hair);color:var(--txt);border-radius:8px;padding:6px 9px;font:inherit;font-size:.75rem}
+.privrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+
 /* ═══════════════════════════ Sheet (project deep-dive) ═══════════════════════════ */
 #scrim{position:fixed;inset:0;z-index:90;display:none;
 background:rgba(10,11,14,.42);
@@ -2366,10 +3446,12 @@ overflow-x:auto;scrollbar-width:none}
 .themebtn{width:auto}.themebtn span{display:none}
 .barin,.content{padding-left:20px;padding-right:20px}
 }
-@media (max-width:1180px){.ad-hero{grid-template-columns:1fr}}
+@media (max-width:1180px){.ad-hero,.ins-hero{grid-template-columns:1fr}}
 @media (max-width:760px){
 .ad-top{flex-direction:column;align-items:flex-start}
-.ad-pills{grid-template-columns:1fr}
+.ad-pills,.ins-tiles{grid-template-columns:1fr}
+.ad-funnel{grid-template-columns:1fr 1fr}
+.ins-left{flex-direction:column;align-items:flex-start}
 .row,.row.half{grid-template-columns:1fr}
 .flgrid{grid-template-columns:1fr}
 .flchart{height:236px}
@@ -2416,6 +3498,12 @@ background:var(--fill)}
     <button data-s="projects"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg>Projects</button>
     <button data-s="weekly"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2.5"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>Weekly Report</button>
     <button data-s="adoption"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.5 13.5 17 22l-5-3-5 3 1.5-8.5"/></svg>My Adoption</button>
+    <div class="navgrp">Engineering insight</div>
+    <button data-s="flow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>Flow</button>
+    <button data-s="quality"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>Quality</button>
+    <button data-s="value"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>Value</button>
+    <button data-s="advisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1 1.5 1 2.5h6c0-1 .2-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg>Advisor</button>
+    <button data-s="health"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>Data Health</button>
   </nav>
 
   <div class="sidefoot">
@@ -2614,6 +3702,12 @@ background:var(--fill)}
   <div class="card" id="adoEmpty" hidden style="--i:0"></div>
   <div class="stack" id="adoFull">
     <div class="card ad-hero" id="adoHero" style="--i:0"></div>
+    <div class="row" style="--i:1">
+      <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg></span><h3>What changed lately</h3><span class="hint">vs the 4 weeks before</span></div>
+        <ul class="ad-hl" id="adoHl"></ul></div>
+      <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 9v6M9 6h4a5 5 0 0 1 5 5"/></svg></span><h3>Your adoption journey</h3><span class="hint">four stages, each with its evidence</span></div>
+        <div class="ad-funnel" id="adoFunnel"></div></div>
+    </div>
     <div class="card" style="--i:1"><div class="chead">
       <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></span><h3>Your next 3 moves</h3><span class="hint">picked from your own data</span></div>
       <div class="ad-coach" id="adoCoach"></div></div>
@@ -2652,6 +3746,116 @@ background:var(--fill)}
     <details class="card ad-how" style="--i:5"><summary><span class="gl" style="width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:var(--acc-soft);color:var(--acc)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg></span>How your score is worked out</summary>
       <div class="body" id="adoHow"></div></details>
   </div>
+</section>
+
+<!-- ══════════════ Flow ══════════════ -->
+<section id="s-flow" class="stack" hidden>
+  <div class="card ins-hero" id="flowHero" style="--i:0"></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span><h3>Turn time</h3><span class="hint">prompt to finished answer, per day</span></div>
+      <div class="cvs short"><canvas id="cFlowTurn"></canvas></div>
+      <div class="note">Includes any time spent waiting for you to approve an action. <span id="cbTurn"></span></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><h3>Clean first-pass turns</h3><span class="hint">no error, interruption or correction</span></div>
+      <div class="cvs short"><canvas id="cFlowClean"></canvas></div>
+      <div class="note"><span id="cbClean"></span></div></div>
+  </div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0 5 5l-10 10a2.8 2.8 0 0 1-4-4z"/></svg></span><h3>Where tool time goes</h3><span class="hint">share of time between a tool call and its result</span></div>
+      <div class="cvs mini"><canvas id="cFlowTools"></canvas></div>
+      <div class="note" id="flowToolNote"></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Slowest tools and commands</h3><span id="cbTool"></span></div>
+      <div class="scrollx"><table class="tbl" id="tFlowTools"><thead><tr><th>Tool or command</th><th class="num">Calls</th><th class="num">Median</th><th class="num">90th pct</th><th class="num">Slowest</th><th class="num">Share</th></tr></thead><tbody></tbody></table></div></div>
+  </div>
+  <div class="row" style="--i:3">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>Failures and recovery</h3><span id="cbRec" class="hint"></span></div>
+      <div class="ad-facts" id="flowRecFacts"></div><div class="chips" id="flowFailTools"></div>
+      <div class="note">An episode is the same tool failing; it counts as recovered when that tool later succeeds in the same session. Three failures in a row is a stuck loop.</div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 9v6M9 6h4a5 5 0 0 1 5 5"/></svg></span><h3>Session shape</h3><span class="hint">how your sessions run</span></div>
+      <div class="ad-facts" id="flowShapeFacts"></div>
+      <div class="eyebrow" style="margin:6px 0 4px">Effort level of Claude's responses</div>
+      <div class="mbar" id="flowEffortBar"></div><div class="chips" id="flowEffortChips"></div></div>
+  </div>
+</section>
+
+<!-- ══════════════ Quality ══════════════ -->
+<section id="s-quality" class="stack" hidden>
+  <div class="card ins-hero" id="qualHero" style="--i:0"></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><h3>Verification loop</h3><span class="hint">tests, builds and lint after edits</span></div>
+      <div class="scrollx"><table class="tbl" id="tQRuns"><thead><tr><th>Check</th><th class="num">Runs</th><th class="num">Failed</th><th class="num">First run passed</th><th class="num">Fail → fixed</th></tr></thead><tbody></tbody></table></div>
+      <div class="eyebrow" style="margin:16px 0 8px">Edit sessions that ended with a check, by week</div>
+      <div class="cvs" style="height:140px"><canvas id="cQVerified"></canvas></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><h3>Rework hotspots</h3><span id="cbHot" class="hint"></span></div>
+      <div class="ad-facts" id="qualReFacts"></div>
+      <div class="scrollx"><table class="tbl" id="tQHot"><thead><tr><th>File</th><th class="num">Edits</th><th class="num">Days</th><th class="num">Sessions</th></tr></thead><tbody></tbody></table></div><div class="note" id="qualHotNote"></div></div>
+  </div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>Friction</h3><span id="cbFric" class="hint"></span></div>
+      <div class="ad-facts" id="qualFricFacts"></div>
+      <div class="note">A failed command is often a normal step, so look at the trend rather than the number.</div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg></span><h3>Safety signals</h3><span id="cbSafe" class="hint"></span></div>
+      <div id="qualSafety"></div>
+      <div class="eyebrow" style="margin:16px 0 8px">How actions were permitted</div>
+      <div class="chips" id="qualPerms"></div></div>
+  </div>
+</section>
+
+<!-- ══════════════ Value ══════════════ -->
+<section id="s-value" class="stack" hidden>
+  <div class="card ins-hero" id="valHero" style="--i:0"></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span><h3>Daily cost</h3><span class="hint">estimated at list prices; spikes in red</span></div>
+      <div class="cvs short"><canvas id="cValDaily"></canvas></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/></svg></span><h3>Cost per 100 lines</h3><span class="hint">by week; lower is better</span></div>
+      <div class="cvs short"><canvas id="cValWeekly"></canvas></div></div>
+  </div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span><h3>Caching</h3><span id="cbCache" class="hint"></span></div>
+      <div class="ad-facts" id="valCacheFacts"></div>
+      <div class="note">Savings assume you would otherwise have sent the same tokens uncached, at list prices.</div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Model mix</h3><span id="cbMix" class="hint"></span></div>
+      <div class="scrollx"><table class="tbl" id="tValModels"><thead><tr><th>Model</th><th class="num">Cost</th><th class="num">Share</th><th class="num">Sessions</th></tr></thead><tbody></tbody></table></div><div class="note" id="valMixNote"></div></div>
+  </div>
+  <div class="card" id="valSpikeCard" style="--i:3"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>Cost spikes</h3><span id="cbSpike" class="hint"></span></div>
+    <ul class="plist" id="valSpikes"></ul></div>
+  <div class="note" style="margin-top:-8px">No score on this tab by design: a dollar figure has no universal "good". Each number is compared with your own previous period.</div>
+</section>
+
+<!-- ══════════════ Advisor ══════════════ -->
+<section id="s-advisor" class="stack" hidden>
+  <div class="card" style="--i:0"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1 1.5 1 2.5h6c0-1 .2-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg></span><h3>Your top moves</h3><span class="hint" id="advWindow"></span></div>
+    <div class="ad-coach" id="advRecs"></div></div>
+  <div class="card" id="advExpCard" style="--i:1"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg></span><h3>Your experiment</h3><span class="hint">try one change, check it next week</span></div>
+    <div id="advExp"></div></div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><h3>What is going well</h3></div><ul class="lim good" id="advWins"></ul></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Also noticed</h3><span class="hint">lower priority</span></div><div id="advMore"></div></div>
+  </div>
+  <div class="note">Everything here is rule-based and computed locally from your logs, with the numbers shown. No AI is called and no tokens are used.</div>
+</section>
+
+<!-- ══════════════ Data Health ══════════════ -->
+<section id="s-health" class="stack" hidden>
+  <div class="card" style="--i:0"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span><h3>What your logs let us measure</h3><span class="hint">green = available, amber = partial, grey = not in your logs</span></div>
+    <div class="cap" id="healthCaps"></div></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><h3>Log inventory</h3></div>
+      <div class="chips" id="healthMeta" style="margin-bottom:14px"></div>
+      <div class="scrollx"><table class="tbl" id="tHealth"><thead><tr><th>Log entry type</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>What these logs cannot tell us</h3></div>
+      <ul class="lim" id="healthLimits"></ul>
+      <div class="chead" style="margin:22px 0 12px"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><h3>Privacy</h3></div>
+      <div class="privrow"><button class="btn" id="privBtn"></button>
+        <span class="note" style="margin:0">Hides session titles, prompt previews and file names on screen. Everything stays on your machine either way. This dashboard is for your own reflection, not for ranking people or performance reviews.</span></div></div>
+  </div>
+  <div class="card" style="--i:2"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Metric catalog</h3>
+    <select class="sel" id="catTab" style="margin-left:auto"><option value="">All tabs</option></select></div>
+    <div class="chips" style="margin-bottom:12px">
+      <span class="cb observed">Observed</span><span class="chip2" style="background:none;padding:0">read straight from the log</span>
+      <span class="cb derived">Derived</span><span class="chip2" style="background:none;padding:0">computed with a stated formula</span>
+      <span class="cb proxy">Proxy</span><span class="chip2" style="background:none;padding:0">an indirect signal</span>
+      <span class="cb estimated">Estimated</span><span class="chip2" style="background:none;padding:0">depends on list prices or a model</span></div>
+    <div class="scrollx"><table class="tbl" id="tCat"><thead><tr><th>Metric</th><th>Tab</th><th>Confidence</th><th>How it is computed</th><th>Limitation</th></tr></thead><tbody></tbody></table></div></div>
 </section>
 
 <footer>100% local &middot; reads Claude Code logs from <code id="root">~/.claude/projects</code> &middot; auto-refreshes every 15s.<br>
@@ -2854,7 +4058,13 @@ const META={
   tools:['Tools &amp; Models','Which models answered and which tools they reached for.'],
   projects:['Projects','Where the work landed — by repo, branch and file.'],
   weekly:['Weekly Report','Always full history — the range filter does not apply here.'],
-  adoption:['My Adoption','How you use Claude Code day to day — last 4 weeks vs the 4 before. The range filter does not apply here.']};
+  adoption:['My Adoption','How you use Claude Code day to day — last 4 weeks vs the 4 before. The range filter does not apply here.'],
+  flow:['Flow','How smoothly work moves: turn time, first-pass success and recovery.'],
+  quality:['Quality','Whether speed comes with checking: tests, builds, rework and safety.'],
+  value:['Value','What the usage costs and what you get back, at list prices with no guesses.'],
+  advisor:['Advisor','Concrete next steps picked from your own data. The range filter does not apply here.'],
+  health:['Data Health','What your logs let us measure, and what they cannot. The range filter does not apply here.']};
+const NORANGE=['weekly','adoption','advisor','health'];
 
 $('nav').addEventListener('click',e=>{
   const b=e.target.closest('button[data-s]');if(!b)return;setSection(b.dataset.s);});
@@ -2865,16 +4075,16 @@ function setSection(s){
     const on=b.dataset.s===s;b.classList.toggle('on',on);
     b.setAttribute('aria-current',on?'page':'false');
     if(on)navInd.move(b);});
-  ['overview','focus','tools','projects','weekly','adoption'].forEach(k=>{
+  ['overview','focus','tools','projects','weekly','adoption','flow','quality','value','advisor','health'].forEach(k=>{
     const el=$('s-'+k);el.hidden=k!==s;
     if(k===s){el.classList.remove('enter');void el.offsetWidth;el.classList.add('enter');
       setTimeout(()=>el.classList.remove('enter'),900);}});
-  $('actsData').style.display=(s==='weekly'||s==='adoption')?'none':'flex';
+  $('actsData').style.display=NORANGE.indexOf(s)>=0?'none':'flex';
   $('actsWeek').style.display=s==='weekly'?'flex':'none';
   if(s==='adoption')adoAnim=true;
   updateChrome();
   if(D)render();
-  if(s!=='weekly'&&s!=='adoption')requestAnimationFrame(()=>rangeInd.move($('range').querySelector('.on'),true));
+  if(NORANGE.indexOf(s)<0)requestAnimationFrame(()=>rangeInd.move($('range').querySelector('.on'),true));
 }
 function rangeText(){
   if(customFrom||customTo)return (customFrom||'the start')+' → '+(customTo||'today');
@@ -2882,7 +4092,7 @@ function rangeText(){
 function updateChrome(){
   const m=META[section];$('secTitle').innerHTML=m[0];
   let sub=m[1];
-  if(section==='adoption'){}
+  if(NORANGE.indexOf(section)>=0&&section!=='weekly'){}
   else if(section!=='weekly')sub=rangeText()+' · '+sub;
   else if(D&&D.weeks&&D.weeks.length&&wIdx!==null&&D.weeks[wIdx])
     sub='Week of '+fmtD(D.weeks[wIdx].start)+' – '+fmtD(D.weeks[wIdx].end)+' · '+sub;
@@ -2987,7 +4197,8 @@ async function load(){
 }
 function render(){
   ({overview:renderOverview,focus:renderFocus,tools:renderTools,
-    projects:renderProjects,weekly:renderWeek,adoption:renderAdoption}[section])();}
+    projects:renderProjects,weekly:renderWeek,adoption:renderAdoption,
+    flow:renderFlow,quality:renderQuality,value:renderValue,advisor:renderAdvisor,health:renderHealth}[section])();}
 
 function delta(cur,prev){
   if(prev==null||prev===0||!isFinite(cur/prev))return'';
@@ -3201,13 +4412,218 @@ function renderProjects(){
     fmt(b.output)+'</td><td class="num">'+fmt(b.loc)+'</td></tr>').join('')
     :'<tr><td colspan="4" class="empty">No branch data in this range.</td></tr>';
   document.querySelector('#tFiles tbody').innerHTML=d.top_files.length?d.top_files.map(f=>
-    '<tr><td>'+esc(f[0])+'</td><td class="num">'+fmt(f[1])+'</td></tr>').join('')
+    '<tr><td>'+esc(pv(f[0]))+'</td><td class="num">'+fmt(f[1])+'</td></tr>').join('')
     :'<tr><td colspan="2" class="empty">No files edited in this range.</td></tr>';
   $('lPrompts').innerHTML=d.longest_prompts.length?d.longest_prompts.map(p=>
-    '<li>'+esc(p.preview)+'…<div class="mt"><b>'+p.lines+' lines</b> · '+p.words+
+    '<li>'+esc(pv(p.preview))+'…<div class="mt"><b>'+p.lines+' lines</b> · '+p.words+
     ' words · '+p.day+'</div></li>').join('')
     :'<li class="empty">No prompts in this range.</li>';
 }
+
+/* ─────────────────────── Engineering insight tabs ─────────────────────── */
+let PRIV=false;
+try{PRIV=localStorage.getItem('dtd_priv')==='1';}catch(e){}
+const pv=s=>PRIV?'•••':s;
+function setPriv(v){PRIV=v;try{localStorage.setItem('dtd_priv',v?'1':'0');}catch(e){}
+  if(D)render();paintPriv();}
+function paintPriv(){const b=$('privBtn');if(b)b.textContent=PRIV?'Privacy mode: on':'Privacy mode: off';}
+
+const fmtS=s=>s==null?'–':s<10?s.toFixed(1)+'s':s<60?Math.round(s)+'s':s<3600?Math.floor(s/60)+'m '+Math.round(s%60)+'s':Math.floor(s/3600)+'h '+Math.round(s%3600/60)+'m';
+const CONF={observed:'Observed',derived:'Derived',proxy:'Proxy',estimated:'Estimated'};
+function cb(id){const m=D&&D.catalog&&D.catalog[id];if(!m)return'';
+  return '<span class="cb '+m.confidence+'" title="'+esc(m.name+' · '+CONF[m.confidence]+'. '+m.how+' Limit: '+m.limit)+'">'+CONF[m.confidence]+'</span>';}
+function insDelta(cur,prev,lowerBetter,f){
+  if(cur==null||prev==null)return'';
+  const d=cur-prev;if(Math.abs(d)<1e-9)return'<span class="flat-d">same as previous period</span>';
+  const good=lowerBetter?d<0:d>0;
+  return '<span class="'+(good?'up':'down')+'">'+(d>0?'▲ ':'▼ ')+(f?f(Math.abs(d)):Math.abs(Math.round(d*10)/10))+' vs previous period</span>';}
+function tile(label,val,sub,color,cid,dl){
+  return '<div class="kpi plain" style="--kc:'+color+';--kbg:'+hexa(color,.13)+'"><div class="khead"><span class="eyebrow">'+label+'</span>'+(cid?cb(cid):'')+
+    '</div><div class="num-lg">'+val+'</div>'+(dl?'<div class="kd">'+dl+'</div>':'')+'<div class="s">'+sub+'</div></div>';}
+function ringHtml(score,gid){
+  const R=52,CIRC=2*Math.PI*R,off=CIRC*(1-score/100);
+  return '<div class="ad-ring sm" style="--circ:'+CIRC.toFixed(1)+'"><svg viewBox="0 0 120 120"><defs><linearGradient id="'+gid+'" x1="0" y1="0" x2="1" y2="1">'+
+    '<stop offset="0" style="stop-color:var(--acc)"/><stop offset="1" style="stop-color:var(--acc-2)"/></linearGradient></defs>'+
+    '<circle class="trk" cx="60" cy="60" r="'+R+'"/><circle class="val" cx="60" cy="60" r="'+R+'" stroke="url(#'+gid+')" stroke-dasharray="'+CIRC.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'"/></svg>'+
+    '<div class="mid"><div class="big">'+score+'</div><div class="of">out of 100</div></div></div>';}
+function insHero(el,gid,eyebrow,cid,score,words,sentence,tiles,emptyMsg){
+  if(score==null){
+    el.innerHTML='<div class="ins-left"><div><div class="eyebrow">'+eyebrow+'</div><h2>Not enough data yet</h2><div class="ins-empty" style="margin-top:6px">'+emptyMsg+'</div></div></div><div class="ins-tiles">'+tiles+'</div>';return;}
+  el.innerHTML='<div class="ins-left">'+ringHtml(score,gid)+'<div><div class="eyebrow">'+eyebrow+'</div><h2>'+words+'</h2><div class="d">'+sentence+'</div>'+cb(cid)+'</div></div><div class="ins-tiles">'+tiles+'</div>';}
+const band=(sc,w)=>sc>=80?w[0]:sc>=60?w[1]:sc>=40?w[2]:w[3];
+const P=(n)=>n==null?'–':n+'%';
+const dpts=v=>Math.round(v)+' pts';
+
+function renderFlow(){
+  const f=D.flow,pr=(D.prev_insight||{}).flow||{};
+  const tiles=
+    tile('Median turn',fmtS(f.turn_median_s),'slowest 10%: '+fmtS(f.turn_p90_s),C.sky,'turn_time',insDelta(f.turn_median_s,pr.turn_median_s,true,fmtS))+
+    tile('Clean first-pass turns',P(f.clean_pct),f.corrected+' corrected · '+f.interrupted+' interrupted · '+f.with_errors+' with errors',C.emerald,'clean_turns',insDelta(f.clean_pct,pr.clean_pct,false,dpts))+
+    tile('Failures fixed',P(f.recovery_pct),f.episodes?f.recovered+' of '+f.episodes+' failures recovered · '+f.stuck+' stuck loop'+(f.stuck===1?'':'s'):'no failures in this range',C.amber,'recovery',insDelta(f.recovery_pct,pr.recovery_pct,false,dpts))+
+    tile('Time to first edit',fmtS(f.first_edit_median_s),f.first_edit_n+' session'+(f.first_edit_n===1?'':'s')+' with edits',C.violet,'first_edit',insDelta(f.first_edit_median_s,pr.first_edit_median_s,true,fmtS));
+  insHero($('flowHero'),'flowGrad','Flow score','flow_score',f.score,band(f.score||0,['Strong flow','Mostly smooth','Bumpy','Rough going']),
+    f.clean_pct+'% of your turns landed first time, and '+(f.recovery_pct==null?'no failures needed fixing':f.recovery_pct+'% of failures got fixed')+'.',
+    tiles,'Needs 5 timed turns in this range; you have '+f.turns+'. Pick a longer range or keep working.');
+  const lb=f.series.map(x=>x.day.slice(5));
+  mk('cFlowTurn',{type:'line',data:{labels:lb,datasets:[
+    {label:'Median',data:f.series.map(x=>x.median),borderColor:C.sky,backgroundColor:areaFill(C.sky),fill:true},
+    {label:'Slowest 10%',data:f.series.map(x=>x.p90),borderColor:C.slate,borderDash:[4,4],fill:false}]},
+    options:{scales:{x:XGRID,y:{...GRID,ticks:{padding:8,callback:v=>fmtS(v)}}},plugins:{legend:{position:'bottom'},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmtS(c.parsed.y)}}},interaction:{mode:'index',intersect:false}}});
+  mk('cFlowClean',{type:'bar',data:{labels:lb,datasets:[{label:'Clean turns %',data:f.series.map(x=>x.clean_pct),backgroundColor:C.emerald}]},
+    options:{scales:{x:XGRID,y:{min:0,max:100,...GRID}},plugins:{legend:{display:false}}}});
+  $('cbTurn').innerHTML=cb('turn_time');$('cbClean').innerHTML=cb('clean_turns')+' A correction is read from the start of your next prompt.';
+  $('cbTool').innerHTML=cb('tool_time');$('cbRec').innerHTML=cb('recovery');
+  $('flowToolNote').textContent=f.tool_share_pct==null?'':'Tools account for about '+f.tool_share_pct+'% of your turn time. The rest is Claude thinking and writing, plus any wait for your approval.';
+  const tl=f.tools.slice(0,8);
+  mk('cFlowTools',{type:'bar',data:{labels:tl.map(t=>t.family),datasets:[{label:'Share of tool time %',data:tl.map(t=>t.share_pct),backgroundColor:C.coral}]},
+    options:{indexAxis:'y',scales:{x:{...GRID,ticks:{padding:6,callback:v=>v+'%'}},y:{grid:{display:false},border:{display:false}}},plugins:{legend:{display:false}}}});
+  document.querySelector('#tFlowTools tbody').innerHTML=f.tools.length?f.tools.map(t=>
+    '<tr><td><b>'+esc(t.family)+'</b></td><td class="num">'+t.calls+'</td><td class="num">'+fmtS(t.median_s)+'</td><td class="num">'+fmtS(t.p90_s)+'</td><td class="num">'+fmtS(t.max_s)+'</td><td class="num">'+t.share_pct+'%</td></tr>').join('')
+    :'<tr><td colspan="6" class="empty">No timed tool calls in this range.</td></tr>';
+  $('flowRecFacts').innerHTML=
+    '<div><div class="num-lg">'+f.episodes+'</div><div class="fl">failure episodes</div></div>'+
+    '<div><div class="num-lg">'+f.recovered+'</div><div class="fl">recovered</div></div>'+
+    '<div><div class="num-lg">'+(f.recover_steps_median==null?'–':f.recover_steps_median)+'</div><div class="fl">steps to recover (median)</div></div>'+
+    '<div><div class="num-lg">'+f.stuck+'</div><div class="fl">stuck loops (3+ in a row)</div></div>';
+  $('flowFailTools').innerHTML=f.fail_tools.length?'<span class="chip2">Fails most:</span>'+f.fail_tools.map(x=>'<span class="chip2"><b>'+esc(x.tool)+'</b> ×'+x.episodes+'</span>').join(''):'';
+  $('flowShapeFacts').innerHTML=
+    '<div><div class="num-lg">'+(f.session_median_min==null?'–':fmtMin(Math.round(f.session_median_min)))+'</div><div class="fl">typical session '+cb('session_len')+'</div></div>'+
+    '<div><div class="num-lg">'+(f.session_p90_min==null?'–':fmtMin(Math.round(f.session_p90_min)))+'</div><div class="fl">longest 10% of sessions</div></div>'+
+    '<div><div class="num-lg">'+fmtS(f.thinking_median_s)+'</div><div class="fl">median thinking time '+cb('thinking')+'</div></div>'+
+    '<div><div class="num-lg">'+(f.tool_share_pct==null?'–':f.tool_share_pct+'%')+'</div><div class="fl">of turn time in tools</div></div>';
+  const tot=f.effort.reduce((a,x)=>a+x.n,0),ec=[C.coral,C.sky,C.violet,C.teal];
+  $('flowEffortBar').innerHTML=tot?f.effort.map((x,i)=>'<i style="width:'+(x.n/tot*100)+'%;background:'+ec[i%4]+'" title="'+esc(x.level)+'"></i>').join(''):'';
+  $('flowEffortChips').innerHTML=tot?f.effort.map((x,i)=>'<span class="chip2"><b style="color:'+ec[i%4]+'">●</b> '+esc(x.level)+' <b>'+Math.round(x.n/tot*100)+'%</b></span>').join(''):'<span class="chip2">Effort level is not in your logs.</span>';
+}
+
+function renderQuality(){
+  const q=D.quality,pr=(D.prev_insight||{}).quality||{};
+  const tiles=
+    tile('Verified after last edit',P(q.verified_pct),q.verified+' of '+q.edited_sessions+' edit sessions ended with a check',C.emerald,'verified',insDelta(q.verified_pct,pr.verified_pct,false,dpts))+
+    tile('First-run pass rate',P(q.first_run_pass_pct),q.run_groups?q.run_groups+' session-and-check pairs':'no test, build or lint runs',C.sky,'first_run',insDelta(q.first_run_pass_pct,pr.first_run_pass_pct,false,dpts))+
+    tile('Tests alongside code',P(q.tests_alongside_pct),q.with_tests+' of '+q.edited_sessions+' edit sessions touched a test file',C.violet,'tests_alongside',insDelta(q.tests_alongside_pct,pr.tests_alongside_pct,false,dpts))+
+    tile('Re-edit share',P(q.reedit_pct),'of '+q.edits+' edits revisit a file edited earlier in the session',C.amber,'reedit',insDelta(q.reedit_pct,pr.reedit_pct,true,dpts));
+  insHero($('qualHero'),'qualGrad','Quality score','quality_score',q.score,band(q.score||0,['Well checked','Reasonably checked','Lightly checked','Rarely checked']),
+    q.verified_pct+'% of edit sessions ended with a test, build or lint, and '+q.tests_alongside_pct+'% touched a test file.',
+    tiles,'Needs 3 sessions where Claude edited files in this range; you have '+q.edited_sessions+'.');
+  const rk=Object.values(q.runs),KL={test:'Tests',build:'Builds',lint:'Lint and type checks'};
+  document.querySelector('#tQRuns tbody').innerHTML=rk.length?rk.map(r=>
+    '<tr><td><b>'+KL[r.kind]+'</b></td><td class="num">'+r.runs+'</td><td class="num">'+r.fails+'</td><td class="num">'+P(r.first_pass_pct)+'</td><td class="num">'+(r.fail_groups?r.recovered_groups+' of '+r.fail_groups:'–')+'</td></tr>').join('')
+    :'<tr><td colspan="5" class="empty">No test, build or lint commands detected in this range.</td></tr>';
+  mk('cQVerified',{type:'bar',data:{labels:q.weekly.map(w=>fmtD(w.start)),datasets:[{label:'Verified %',data:q.weekly.map(w=>w.pct),backgroundColor:C.emerald}]},
+    options:{scales:{x:XGRID,y:{min:0,max:100,...GRID}},plugins:{legend:{display:false},tooltip:{callbacks:{afterBody:i=>{const w=q.weekly[i[0].dataIndex];return w.verified+' of '+w.edited+' edit sessions';}}}}}});
+  $('cbHot').innerHTML=cb('hotspots');
+  $('qualReFacts').innerHTML='<div><div class="num-lg">'+P(q.reedit_pct)+'</div><div class="fl">of edits are re-edits '+cb('reedit')+'</div></div><div><div class="num-lg">'+q.hotspots.length+'</div><div class="fl">hotspot files</div></div>';
+  document.querySelector('#tQHot tbody').innerHTML=q.hotspots.length?q.hotspots.map(h=>
+    '<tr><td><b>'+esc(pv(h.file))+'</b><div class="mt" style="font-size:.6875rem;color:var(--txt-3)">'+esc(h.project)+'</div></td><td class="num">'+h.edits+'</td><td class="num">'+h.days+'</td><td class="num">'+h.sessions+'</td></tr>').join('')
+    :'<tr><td colspan="4" class="empty">No file was edited over and over in this range.</td></tr>';
+  $('qualHotNote').textContent='A hotspot is a file edited 5+ times that was edited 3+ times in one session or on 3+ days. Some files are simply central to your work.';
+  $('cbFric').innerHTML=cb('friction');
+  $('qualFricFacts').innerHTML=
+    '<div><div class="num-lg">'+(q.errors_per_100_edits==null?'–':q.errors_per_100_edits)+'</div><div class="fl">failed tool results per 100 edits</div></div>'+
+    '<div><div class="num-lg">'+(q.interrupts_per_100_prompts==null?'–':q.interrupts_per_100_prompts)+'</div><div class="fl">interruptions per 100 prompts</div></div>'+
+    '<div><div class="num-lg">'+q.tool_errors+'</div><div class="fl">failed tool results</div></div>'+
+    '<div><div class="num-lg">'+q.interruptions+'</div><div class="fl">interruptions</div></div>';
+  $('cbSafe').innerHTML=cb('safety');
+  const SL={force_push:'Force-pushes',hard_reset:'Hard resets',git_clean:'git clean -f',recursive_delete:'Recursive deletes',pipe_to_shell:'Downloads piped into a shell',skip_hooks:'Skipped git hooks',wide_permissions:'chmod 777',sql_drop:'SQL drops',secret_file_touched:'Secret-like files read or edited'};
+  const sk=Object.keys(q.safety);
+  $('qualSafety').innerHTML=sk.length?'<ul class="lim">'+sk.map(k=>'<li><b>'+(SL[k]||k)+'</b> ×'+q.safety[k]+'</li>').join('')+'</ul>'
+    :'<div class="ad-allgood">'+ic('check').replace('<svg','<svg width="18" height="18" style="color:var(--emerald);flex:none"')+'No risky commands or secret-file touches detected in this range.</div>';
+  $('qualPerms').innerHTML=q.permissions.length?q.permissions.map(p=>'<span class="chip2"><b>'+esc(p.decision)+'</b> · '+esc(p.source)+' ×'+p.n+'</span>').join('')
+    :'<span class="chip2">Permission decisions are not in your logs.</span>';
+}
+
+function renderValue(){
+  const v=D.value,pr=(D.prev_insight||{}).value||{};
+  const money=x=>'$'+(Math.round(x*100)/100).toFixed(2);
+  const tiles=
+    tile('Estimated cost',v.ready?money(v.cost):'–','at list prices; $0 on a subscription',C.amber,'cost',insDelta(v.cost,pr.cost,false,money))+
+    tile('Per 100 lines',v.per_100_loc==null?'–':money(v.per_100_loc),fmt(v.loc)+' lines written',C.violet,'cost_100_loc',insDelta(v.per_100_loc,pr.per_100_loc,true,money))+
+    tile('Per verified session',v.cost_per_verified==null?'–':money(v.cost_per_verified),v.verified_sessions+' edit session'+(v.verified_sessions===1?'':'s')+' ended with a check',C.emerald,'cost_verified',insDelta(v.cost_per_verified,pr.cost_per_verified,true,money))+
+    tile('Caching saved',v.ready?money(v.cache_savings):'–',v.cache_saved_pct+'% of what uncached would cost',C.teal,'cache_savings',insDelta(v.cache_savings,pr.cache_savings,false,money));
+  const el=$('valHero');
+  el.innerHTML='<div class="ins-left"><div><div class="eyebrow">What it costs, and what you get back</div><h2>'+(v.ready?money(v.cost)+' estimated':'No cost data yet')+'</h2><div class="d">'+
+    (v.ready?'Median session '+(v.session_median_cost==null?'–':money(v.session_median_cost))+' · '+v.sessions+' sessions. On a subscription plan your real marginal cost is $0; this shows the value you are getting.':'Nothing was recorded in this range.')+'</div></div></div><div class="ins-tiles">'+tiles+'</div>';
+  mk('cValDaily',{type:'bar',data:{labels:v.daily.map(x=>x.day.slice(5)),datasets:[{label:'Estimated cost $',data:v.daily.map(x=>x.cost),backgroundColor:v.daily.map(x=>x.spike?C.rose:C.amber)}]},
+    options:{scales:{x:XGRID,y:{...GRID,ticks:{padding:8,callback:x=>'$'+Math.round(x*100)/100}}},plugins:{legend:{display:false}}}});
+  mk('cValWeekly',{type:'line',data:{labels:v.weekly.map(w=>fmtD(w.start)),datasets:[{label:'$ per 100 lines',data:v.weekly.map(w=>w.per_100_loc),borderColor:C.violet,backgroundColor:areaFill(C.violet),fill:true,spanGaps:true,pointRadius:3}]},
+    options:{scales:{x:XGRID,y:{...GRID,ticks:{padding:8,callback:x=>'$'+Math.round(x*100)/100}}},plugins:{legend:{display:false}}}});
+  $('cbCache').innerHTML=cb('cache_savings');
+  $('valCacheFacts').innerHTML=
+    '<div><div class="num-lg">'+(v.ready?money(v.cache_savings):'–')+'</div><div class="fl">saved by caching</div></div>'+
+    '<div><div class="num-lg">'+(v.cold_start_pct==null?'–':v.cold_start_pct+'%')+'</div><div class="fl">cold-start tax '+cb('cold_start')+'</div></div>'+
+    '<div><div class="num-lg">'+(v.cache_reset_pct==null?'–':v.cache_reset_pct+'%')+'</div><div class="fl">calls that rebuilt the cache</div></div>';
+  $('cbMix').innerHTML=cb('model_mix');
+  document.querySelector('#tValModels tbody').innerHTML=v.models.length?v.models.map(m=>
+    '<tr><td><b>'+esc(m.model)+'</b></td><td class="num">'+money(m.cost)+'</td><td class="num">'+m.share_pct+'%</td><td class="num">'+m.sessions+'</td></tr>').join('')
+    :'<tr><td colspan="4" class="empty">No model usage in this range.</td></tr>';
+  $('valMixNote').innerHTML=v.top_tier_nocode_pct!=null?'<b>'+v.top_tier_nocode_pct+'%</b> of top-tier-model cost went to sessions where Claude made no edits '+cb('top_tier_nocode')+'.':'';
+  $('cbSpike').innerHTML=cb('cost_spikes');
+  $('valSpikeCard').style.display=v.spikes.length?'':'none';
+  $('valSpikes').innerHTML=v.spikes.map(s=>'<li><b>'+fmtD(s.day)+' · '+money(s.cost)+'</b> ('+(s.x_typical||'?')+'× a typical day)<div class="mt">Biggest session: '+esc(pv(s.session||''))+' ('+money(s.session_cost||0)+')</div></li>').join('');
+}
+
+/* Advisor: rule-based recommendations, plus one experiment kept in this browser */
+const EXP_KEY='dtd_experiment';
+const getExp=()=>{try{return JSON.parse(localStorage.getItem(EXP_KEY)||'null');}catch(e){return null;}};
+const putExp=v=>{try{if(v)localStorage.setItem(EXP_KEY,JSON.stringify(v));else localStorage.removeItem(EXP_KEY);}catch(e){}};
+const MLABEL={verified_pct:'Edit sessions verified',first_run_pass_pct:'First-run pass rate',clean_pct:'Clean first-pass turns',stuck:'Stuck loops',reedit_pct:'Re-edit share',tests_alongside_pct:'Tests alongside code',recovery_pct:'Failures fixed',cold_start_pct:'Cold-start tax',cache_reset_pct:'Cache rebuilds',per_100_loc:'Cost per 100 lines'};
+const AREAC=()=>({quality:C.emerald,flow:C.sky,value:C.amber,habit:C.emerald,range:C.sky,craft:C.violet,impact:C.amber});
+function maskQuoted(t){return PRIV?String(t).replace(/"[^"]*"/g,'"•••"'):t;}
+
+function renderAdvisor(){
+  const A=D.advisor,ac=AREAC();
+  if(!A||!A.ready){$('advRecs').innerHTML='<div class="ins-empty">Not enough activity yet. Keep using Claude Code and this page fills in on its own.</div>';
+    $('advWins').innerHTML='';$('advMore').innerHTML='';$('advExp').innerHTML='';return;}
+  $('advWindow').textContent=fmtD(A.start)+' – '+fmtD(A.end);
+  const exp=getExp();
+  $('advRecs').innerHTML=A.recs.length?A.recs.map(r=>{
+    const k=ac[r.area]||C.coral,active=exp&&exp.id===r.id;
+    return '<div class="ad-step" style="--kc:'+k+';--kbg:'+hexa(k,.13)+'"><div class="meta"><span class="nb">'+r.rank+'</span><span class="cb '+r.confidence+'">'+CONF[r.confidence]+'</span></div>'+
+      '<h4>'+esc(r.title)+'</h4><div class="why">'+esc(maskQuoted(r.evidence))+'</div><div class="how">'+esc(r.action)+'</div>'+
+      (r.experiment?'<div class="acts"><button class="btn'+(active?'':' accent')+'" data-exp="'+esc(r.id)+'"'+(active?' disabled':'')+'>'+(active?'Experiment running':'Try it as an experiment')+'</button></div>':'')+'</div>';}).join('')
+    :'<div class="ad-allgood">'+ic('check').replace('<svg','<svg width="18" height="18" style="color:var(--emerald);flex:none"')+'Nothing stands out. Your data looks healthy in this window.</div>';
+  const recById={};A.recs.concat(A.more).forEach(r=>recById[r.id]=r);
+  if(exp){
+    const cur=A.metrics[exp.metric],base=exp.baseline,better=exp.better;
+    const d=(cur!=null&&base!=null)?cur-base:null,good=d==null?null:(better==='down'?d<0:d>0);
+    const days=Math.max(0,Math.round((Date.now()-new Date(exp.started).getTime())/864e5));
+    $('advExp').innerHTML='<div class="exp-card"><div style="flex:1;min-width:240px"><div class="eyebrow">Running · day '+days+'</div><h4 style="font-size:.9375rem;margin:4px 0 6px">'+esc(exp.label)+'</h4>'+
+      '<div class="ad-block" style="color:var(--txt-3);font-weight:500">Tracking: '+esc(MLABEL[exp.metric]||exp.metric)+'. The figure uses a rolling 4-week window, so it moves slowly; give it a week or two.</div></div>'+
+      '<div><div class="eyebrow">Before</div><div class="big">'+(base==null?'–':base)+'</div></div><div><div class="eyebrow">Now</div><div class="big">'+(cur==null?'–':cur)+'</div></div>'+
+      '<div><div class="eyebrow">Change</div><div class="big '+(good==null?'':good?'up':'down')+'">'+(d==null?'–':(d>0?'+':'')+Math.round(d*10)/10)+'</div></div>'+
+      '<button class="btn" id="expStop">Stop experiment</button></div>';
+    $('expStop').onclick=()=>{putExp(null);renderAdvisor();};
+  }else $('advExp').innerHTML='<div class="ins-empty">No experiment running. Pick <b>Try it as an experiment</b> on any recommendation above. The dashboard records where that number is now, and shows how it moves.</div>';
+  document.querySelectorAll('[data-exp]').forEach(b=>b.onclick=()=>{
+    const r=recById[b.dataset.exp];if(!r||!r.experiment)return;
+    putExp({id:r.id,label:r.experiment.label,metric:r.experiment.metric,better:r.experiment.better,
+      baseline:A.metrics[r.experiment.metric],started:new Date().toISOString()});renderAdvisor();});
+  $('advWins').innerHTML=A.wins.length?A.wins.map(w=>'<li>'+esc(w)+'</li>').join(''):'<li>Wins show up here as your numbers improve.</li>';
+  $('advMore').innerHTML=A.more.length?'<ul class="lim">'+A.more.map(r=>'<li><b>'+esc(r.title)+'</b>: '+esc(maskQuoted(r.evidence))+'</li>').join('')+'</ul>':'<div class="ins-empty">Nothing else of note.</div>';
+}
+
+function renderHealth(){
+  const H=D.health;
+  $('healthCaps').innerHTML=H.capabilities.map(c=>'<div class="it '+c.status+'"><span class="dot"></span><div><b>'+esc(c.label)+'</b><span>'+esc(c.detail)+'</span></div></div>').join('');
+  $('healthMeta').innerHTML=
+    '<span class="chip2">Sessions <b>'+H.sessions+'</b></span>'+
+    (H.versions.length?'<span class="chip2">Claude Code '+H.versions.map(v=>'<b>'+esc(v.version)+'</b>').join(', ')+'</span>':'')+
+    (H.entrypoints.length?'<span class="chip2">Via '+H.entrypoints.map(v=>'<b>'+esc(v.name)+'</b>').join(', ')+'</span>':'')+
+    '<span class="chip2'+(H.parse_errors?' warn':'')+'">Unparsed lines <b>'+H.parse_errors+'</b></span>'+
+    '<span class="chip2">Duplicate lines dropped <b>'+H.duplicate_lines+'</b></span>';
+  document.querySelector('#tHealth tbody').innerHTML=H.entry_types.map(t=>'<tr><td><code>'+esc(t.type)+'</code></td><td class="num">'+t.n.toLocaleString()+'</td></tr>').join('');
+  $('healthLimits').innerHTML=H.limits.map(l=>'<li>'+esc(l)+'</li>').join('');
+  const sel=$('catTab'),tabs=[...new Set(Object.values(D.catalog).map(m=>m.tab))];
+  if(sel.options.length===1)tabs.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t.charAt(0).toUpperCase()+t.slice(1);sel.appendChild(o);});
+  const f=sel.value;
+  document.querySelector('#tCat tbody').innerHTML=Object.values(D.catalog).filter(m=>!f||m.tab===f).map(m=>
+    '<tr><td><b>'+esc(m.name)+'</b></td><td>'+esc(m.tab)+'</td><td><span class="cb '+m.confidence+'">'+CONF[m.confidence]+'</span></td><td class="wrapc">'+esc(m.how)+'</td><td class="wrapc">'+esc(m.limit)+'</td></tr>').join('');
+  paintPriv();
+}
+$('catTab').onchange=()=>{if(D)renderHealth();};
+$('privBtn').onclick=()=>setPriv(!PRIV);
+document.addEventListener('click',e=>{const a=e.target.closest('[data-go]');if(a)setSection(a.dataset.go);});
 
 /* ─────────────────────────── My Adoption ─────────────────────────── */
 const AD_COL=()=>({habit:C.emerald,range:C.sky,craft:C.violet,impact:C.amber});
@@ -3259,10 +4675,13 @@ function renderAdoption(){
       '<circle class="val" cx="60" cy="60" r="'+R+'" stroke="url(#adGrad)" stroke-dasharray="'+CIRC.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'"/></svg>'+
       '<div class="mid"><div class="big">'+A.score+'</div><div class="of">out of 100</div></div></div>'+
       '<div class="ad-lvl"><div class="eyebrow">Your level</div><h2>'+L.name+'</h2><div class="d">'+L.desc+'</div>'+chg+'</div></div>'+
-      '<div class="ad-ladder">'+steps+'</div><div class="ad-next">'+nxt+'</div></div>'+
+      '<div class="ad-ladder">'+steps+'</div><div class="ad-next">'+nxt+'</div>'+(L.blocker?'<div class="ad-block">'+esc(L.blocker)+'</div>':'')+'</div>'+
     '<div class="ad-pills">'+tiles+'</div>'+
     '<div class="ad-sum">'+summary+'</div>';
   adoAnim=false;
+
+  $('adoHl').innerHTML=A.highlights.map(h=>'<li class="'+h.kind+'"><span class="dt"></span><span>'+esc(h.text)+'</span></li>').join('');
+  $('adoFunnel').innerHTML=A.funnel.map((x,i)=>'<div class="fs'+(x.achieved?' on':'')+'"><div class="n">'+(x.achieved?'✓':i+1)+'</div><b>'+esc(x.label)+'</b><span>'+esc(x.detail)+'</span></div>').join('');
 
   /* coach */
   const AREA={habit:'habit',range:'range',craft:'craft',impact:'impact',wellbeing:'habit'};
@@ -3308,7 +4727,7 @@ function renderAdoption(){
     '<div class="flrow"><span class="fln">'+d.label+'</span>'+
     '<span class="flb"><span class="bar"><i style="width:'+d.score+'%"></i></span></span>'+
     '<span class="fls">'+d.score+(d.prev!=null&&d.prev!==d.score?'<small class="'+(d.score>d.prev?'up':'down')+'">'+(d.score>d.prev?'▲':'▼')+Math.abs(d.score-d.prev)+'</small>':'')+'</span>'+
-    '<span class="flt">'+esc(d.detail)+'<br>'+(d.score<70?esc(d.tip):'Looking good.')+'</span></div>').join('');
+    '<span class="flt">'+esc(d.detail)+'<br>'+(d.link?(d.score>=70?'Looking good. ':'')+'<a class="lnk" data-go="'+d.link+'">Open the '+d.label+' tab →</a>':(d.score<70?esc(d.tip):'Looking good.'))+'</span></div>').join('');
 
   /* impact */
   $('adoImpactFacts').innerHTML=
@@ -3322,12 +4741,13 @@ function renderAdoption(){
       afterBody:i=>{const w=A.weekly[i[0].dataIndex];return w.active_days+' active day'+(w.active_days===1?'':'s')+' · '+w.sessions+' session'+(w.sessions===1?'':'s');}}}}}});
 
   /* trend */
-  const names={0:'',25:'Practitioner',50:'Power user',75:'Orchestrator'};
+  const names={};L.all.forEach(x=>{names[x.floor]=x.floor?x.name:'';});
+  const stops=L.all.map(x=>x.floor);
   mk('cAdoTrend',{type:'line',data:{labels:A.history.map(h=>fmtD(h.end)),datasets:[{label:'Adoption Score',
     data:A.history.map(h=>h.score),borderColor:C.coral,backgroundColor:areaFill(C.coral),fill:true,
     pointRadius:3,pointBackgroundColor:C.coral,pointBorderColor:C.fill,pointBorderWidth:2}]},
-    options:{scales:{x:XGRID,y:{min:0,max:100,...GRID,ticks:{stepSize:25,padding:8,
-      callback:v=>names[v]!==undefined?names[v]:v}}},plugins:{legend:{display:false}}}});
+    options:{scales:{x:XGRID,y:{min:0,max:100,...GRID,afterBuildTicks:sc=>{sc.ticks=stops.map(v=>({value:v}));},
+      ticks:{padding:8,callback:v=>names[v]!==undefined?names[v]:v}}},plugins:{legend:{display:false}}}});
 
   /* wellbeing */
   const W=A.wellbeing;
@@ -3345,9 +4765,9 @@ function renderAdoption(){
   $('adoHow').innerHTML=[
     ['Habit · '+Math.round(wt.habit*100)+'% of your score','Counts how many days you used Claude Code (full marks at '+T.target_days+' of the last '+A.window_days+', about 3 a week) and how evenly they spread across the 4 weeks.'],
     ['Range · '+Math.round(wt.range*100)+'%','Counts which Claude Code features you actually used (full marks at '+T.features_full+' of '+Rg.total+'), plus how many sessions were substantial ('+T.substantial_actions+'+ tool actions).'],
-    ['Craft · '+Math.round(wt.craft*100)+'%','The average of your four AI-fluency skills: Delegation, Description, Discernment and Diligence, the same ones as in the Weekly Report.'],
+    ['Craft · '+Math.round(wt.craft*100)+'%','Mostly your four AI-fluency skills (Delegation, Description, Discernment, Diligence, as in the Weekly Report). When there is enough data, 20% each from your Flow and Quality scores are blended in.'],
     ['Impact · '+Math.round(wt.impact*100)+'%','How many lines Claude wrote per active day (full marks at '+T.loc_target+') and on how many of your active days it shipped code.'],
-    ['Levels','Explorer 0–24 · Practitioner 25–49 · Power user 50–74 · Orchestrator 75–100. Scores compare you with your own past, never with other people.'],
+    ['Levels','Explorer 0–19 · Practitioner 20–39 · Power user 40–59 · Expert 60–74 · Pro 75–89 · Pro Max 90+. Pro also needs every pillar at 50+; Pro Max needs every pillar at 70+ and weekly scores of 85+ for 4 weeks running. Scores compare you with your own past, never with other people.'],
     ['Good to know','All heuristics, computed locally from your Claude Code logs. Trends matter more than the exact number. Formulas and thresholds live in docs/METRICS.md and the ADOPTION table in the script.']
   ].map(x=>'<div class="it"><b>'+x[0]+'</b>'+x[1]+'</div>').join('');
 }
@@ -3438,7 +4858,7 @@ function renderWeek(){
   const keys=Object.keys(g);
   $('wWork').innerHTML=keys.length?keys.map(p=>
     '<div class="grp"><h4>'+esc(p)+'</h4><ul>'+g[p].map(s=>
-      '<li>'+esc(s.title)+'<div class="meta">'+fmtD(s.day)+' · '+s.min+' min · '+
+      '<li>'+esc(pv(s.title))+'<div class="meta">'+fmtD(s.day)+' · '+s.min+' min · '+
       fmt(s.loc)+' LoC · '+s.prompts+' prompts</div></li>').join('')+'</ul></div>').join('')
     :'<div class="empty">No sessions logged this week.</div>';
   mk('cSplit',{type:'doughnut',data:{labels:['Building (file edits)','Exploration (reads/searches)'],
@@ -3575,11 +4995,11 @@ function openProject(p){
       plugins:{legend:{position:'bottom'}}}});
   const sess=(D.sessions_list||[]).filter(s=>s.project===p.name);
   $('sSess').innerHTML=sess.length?sess.map(s=>
-    '<li><b>'+esc(s.title)+'</b><div class="mt">'+s.day+' · '+s.min+' min · '+fmt(s.loc)+
+    '<li><b>'+esc(pv(s.title))+'</b><div class="mt">'+s.day+' · '+s.min+' min · '+fmt(s.loc)+
     ' LoC · '+s.prompts+' prompts · '+fmt(s.output)+' tokens out</div></li>').join('')
     :'<li class="empty">No session details available.</li>';
   document.querySelector('#sFiles tbody').innerHTML=(p.files||[]).length?(p.files||[]).map(f=>
-    '<tr><td>'+esc(f[0])+'</td><td class="num">'+fmt(f[1])+'</td></tr>').join('')
+    '<tr><td>'+esc(pv(f[0]))+'</td><td class="num">'+fmt(f[1])+'</td></tr>').join('')
     :'<tr><td colspan="2" class="empty">No files recorded.</td></tr>';
 }
 
@@ -3676,6 +5096,26 @@ class Handler(BaseHTTPRequestHandler):
             data = stats_to_json(ranged, None)
             data["weeks"] = build_weeks(full)
             data["adoption"] = build_adoption(full)
+            # Flow / Quality / Value follow the selected range, sliced from full history
+            if frm or to:
+                b0, b1 = frm or None, to or None
+            elif days > 0 and cur:
+                b0, b1 = cur[0], cur[-1]
+            else:
+                b0 = b1 = None
+            data["flow"] = build_flow(full, b0, b1)
+            data["quality"] = build_quality(full, b0, b1)
+            data["value"] = build_value(full, b0, b1)
+            if prev:
+                keep = {"flow": ("turn_median_s", "clean_pct", "recovery_pct", "first_edit_median_s", "score"),
+                        "quality": ("verified_pct", "first_run_pass_pct", "tests_alongside_pct", "reedit_pct", "score"),
+                        "value": ("cost", "per_100_loc", "cost_per_verified", "cache_savings")}
+                pf = {"flow": build_flow(full, prev[0], prev[-1]), "quality": build_quality(full, prev[0], prev[-1]),
+                      "value": build_value(full, prev[0], prev[-1])}
+                data["prev_insight"] = {k: {m: pf[k][m] for m in ms} for k, ms in keep.items()}
+            data["advisor"] = build_advisor(full, data["adoption"])
+            data["health"] = build_health(full)
+            data["catalog"] = catalog_payload()
             data["root"] = self.root
 
             def sd(dl, k):

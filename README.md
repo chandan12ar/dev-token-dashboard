@@ -28,18 +28,34 @@ Claude Code has been used (it reads `~/.claude/projects/`).
 
 Full instructions, auto-start at logon, and troubleshooting: **[SETUP.md](SETUP.md)**
 
+## What's new (v1.4) — the "Engineering insight" update
+
+Five new tabs, all from the same local logs. No Jira, GitHub or CI needed.
+
+- **Flow** — turn time, clean first-pass turns, failure recovery, where tool time goes
+- **Quality** — was the work checked (tests, builds, lint after the last edit), rework hotspots, safety signals
+- **Value** — cost per 100 lines and per verified session, cache savings, cost spikes, model mix
+- **Advisor** — your top moves, each quoting its evidence, with one-click experiments
+- **Data Health** — what your logs can and cannot measure, the metric catalog, and a privacy mode
+- **My Adoption** now has six levels (Explorer → Practitioner → Power user → Expert → Pro → Pro Max, with gates at the top), "what changed lately" and an adoption journey
+- Every number carries an **Observed / Derived / Proxy / Estimated** badge so a rough signal is never shown as a fact
+
+![Flow tab](docs/screenshots/flow.png)
+
+Formulas in [docs/METRICS.md](docs/METRICS.md#13-flow-tab-v14).
+
 ## What's new (v1.3) — the "My Adoption" tab
 
 A personal scorecard for *you*: how deeply you use Claude Code and whether
 you are getting better at it. Compared only with your own past, 100 % local.
 
-- **Adoption Score (0-100) and level** — Explorer → Practitioner → Power user → Orchestrator
+- **Adoption Score (0-100) and level** — six levels, Explorer → Practitioner → Power user → Expert → Pro → Pro Max
 - **Four pillars** — Habit, Range, Craft, Impact, each with a trend vs the previous 4 weeks
 - **Your next 3 moves** — concrete, rule-based suggestions from your own data
 - **Habit calendar, feature checklist, craft bars, impact chart, 12-week trend**
 - **Healthy habits** — focus time, late-night and weekend share
 
-Formulas in [docs/METRICS.md](docs/METRICS.md#12-my-adoption-v13).
+Formulas in [docs/METRICS.md](docs/METRICS.md#12-my-adoption-v13-extended-in-v14).
 
 ![My Adoption tab](docs/screenshots/my-adoption.png)
 
