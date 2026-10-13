@@ -24,7 +24,7 @@ import threading
 import time
 import webbrowser
 from collections import defaultdict, Counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -51,6 +51,28 @@ GOALS = {
     "daily_tokens": 0,       # output-token budget / day (e.g. 1_000_000)
     "weekly_tokens": 0,      # output-token budget / week (e.g. 5_000_000)
 }
+
+# ---------------------------------------------------------------------------
+# "My Adoption" tab: how the 0-100 Adoption Score is built. Everything is
+# measured over the last `window_days` calendar days (ending on your most
+# recent active day) and compared with the window before it. Tweak the
+# targets to match your own working rhythm; formulas are in docs/METRICS.md.
+# ---------------------------------------------------------------------------
+ADOPTION = {
+    "window_days": 28,
+    "min_active_days": 3,       # fewer active days than this -> "building your baseline"
+    "target_days": 12,          # active days per window for full Habit marks (3 a week)
+    "features_full": 6,         # distinct features used for full Range marks
+    "substantial_actions": 10,  # tool actions that make a session "substantial"
+    "loc_target": 300,          # lines Claude wrote per active day for full Impact marks
+    "weights": {"habit": 0.25, "range": 0.25, "craft": 0.30, "impact": 0.20},
+}
+ADOPTION_LEVELS = [
+    (0, "Explorer", "You're getting to know Claude Code."),
+    (25, "Practitioner", "Claude Code is part of your regular workflow."),
+    (50, "Power user", "You hand over real work and check the results."),
+    (75, "Orchestrator", "You run Claude Code like a team: plans, helpers and checks."),
+]
 
 # ---------------------------------------------------------------------------
 # Live token-usage pop-up notifications for whatever Claude Code session is
@@ -105,6 +127,33 @@ READ_TOOLS = {"Read", "Grep", "Glob", "LS", "WebFetch", "WebSearch",
               "NotebookRead", "TodoRead", "ToolSearch"}
 WRITE_TOOLS = CODE_TOOLS_WRITE | CODE_TOOLS_EDIT | {"MultiEdit", "NotebookEdit"}
 CMD_TOOLS = {"Bash", "PowerShell"}   # command runs — the verification proxy for diligence
+
+# Claude Code features tracked on the "My Adoption" tab. tool name -> feature id;
+# MCP tools are matched by their "mcp__" prefix, slash commands / plan-mode
+# snapshots / CLAUDE.md are detected separately (see parse_entry, build_adoption).
+TOOL_FEATURES = {"EnterPlanMode": "plan", "ExitPlanMode": "plan",
+                 "Agent": "subagents", "Task": "subagents",
+                 "WebSearch": "web", "WebFetch": "web", "Skill": "skills",
+                 "Bash": "verify", "PowerShell": "verify"}
+# id, label, short description, how-to-start tip, usefulness weight for the coach
+ADOPTION_FEATURES = [
+    ("memory", "Project memory", "A CLAUDE.md that teaches Claude your project",
+     "Run /init in a project so Claude learns your conventions once, instead of every session.", 58),
+    ("verify", "Run & verify", "Claude runs commands, tests and builds",
+     "Ask Claude to run your tests or build after it edits, so it can check its own work.", 60),
+    ("plan", "Plan mode", "Agree on an approach before any edits",
+     "Press Shift+Tab to switch to plan mode and let Claude propose an approach before it touches files.", 55),
+    ("subagents", "Subagents", "Helpers that research or review in parallel",
+     "Say \"use a subagent to research this\" to keep your main conversation clean.", 50),
+    ("skills", "Skills", "Reusable workflows Claude can pick up",
+     "Package something you repeat weekly as a skill so Claude does it the same way every time.", 45),
+    ("mcp", "Connected tools", "MCP servers for GitHub, docs, databases...",
+     "Connect a tool you already use with `claude mcp add` so Claude can work with it directly.", 42),
+    ("slash", "Slash commands", "Shortcuts like /compact, /clear, /init",
+     "Type / to see the shortcuts. /compact and /clear keep long sessions fast and focused.", 40),
+    ("web", "Web research", "Looking up docs and errors online",
+     "Ask Claude to look up the docs or an error message instead of pasting it in yourself.", 35),
+]
 
 # Quiet hours for the wellness panel (24h clock, wraps midnight): messages with
 # a timestamp >= QUIET_START or < QUIET_END count as late-night activity.
@@ -185,6 +234,7 @@ class Stats:
         self.subagents = Counter()         # Agent tool calls, by subagent_type
         self.project_cwd = {}              # project label -> real absolute path (first seen)
         self.last_day = None               # most recent dated entry seen (undated events piggyback on it)
+        self.feature_days = defaultdict(set)  # feature id -> days it was used (see ADOPTION_FEATURES)
 
     # -- merge helpers ------------------------------------------------------
     def touch_session(self, sid, ts, project):
@@ -225,6 +275,8 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         if max_day is not None and (not day or day > max_day):
             return
         st.permission_modes[entry.get("permissionMode") or "unknown"] += 1
+        if entry.get("permissionMode") == "plan" and day:
+            st.feature_days["plan"].add(day)
         return
 
     if etype not in ("user", "assistant"):
@@ -293,6 +345,8 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         cmd = CMD_RE.search(text)
         if cmd:
             st.slash[cmd.group(1)] += 1
+            if day:
+                st.feature_days["slash"].add(day)
             return  # command invocations aren't hand-typed prompts
         if text.startswith("<local-command") or text.startswith("<command-"):
             return
@@ -373,6 +427,9 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
                 st.seen_tool_ids.add(tid)
             name = block.get("name", "?")
             st.tools[name] += 1
+            feat = "mcp" if name.startswith("mcp__") else TOOL_FEATURES.get(name)
+            if feat and day:
+                st.feature_days[feat].add(day)
             if name in READ_TOOLS:
                 if day:
                     st.days[day]["reads"] += 1
@@ -1207,6 +1264,363 @@ def active_streak(days_sorted):
     return cur, best
 
 
+# ---------------------------------------------------------------------------
+# "My Adoption" -- one developer's adoption story. Four pillars (Habit, Range,
+# Craft, Impact) are each scored 0-100 over a rolling window and blended into
+# one Adoption Score. Pure functions over Stats; formulas in docs/METRICS.md.
+# ---------------------------------------------------------------------------
+
+def _rnd(x) -> int:
+    """Round half up (matches the front end's Math.round, unlike banker's round)."""
+    return int(x + 0.5)
+
+
+def fluency_of(w) -> dict:
+    """Python twin of the front end's fluencyOf(): the four 0-100 AI-fluency
+    dimensions for one aggregate `w` (a week or an adoption window)."""
+    sess = w["sessions"]
+    code = [s for s in sess if s["loc"] > 0]
+    prompts = w["prompts"]
+    lev = w["output"] / w["human_tokens"] if w["human_tokens"] else 0
+    code_share = len(code) / len(sess) if sess else 0
+    delegation = _rnd(100 * (0.5 * code_share + 0.5 * min(1, lev / 50)))
+    avg_w = w["prompt_words"] / prompts if prompts else 0
+    pushback = w["corrections"] + w["interruptions"]
+    one_shot = max(0, 1 - pushback / prompts) if prompts else 0
+    if avg_w <= 0:
+        sweet = 0
+    elif avg_w < 8:
+        sweet = avg_w / 8
+    elif avg_w <= 150:
+        sweet = 1
+    else:
+        sweet = max(0, 1 - (avg_w - 150) / 300)
+    description = _rnd(100 * (0.65 * one_shot + 0.35 * sweet))
+    engaged = min(1, pushback / max(1, prompts * 0.05))
+    err_ctl = max(0, 1 - w["tool_errors"] / max(1, w["writes"] or 1))
+    discernment = _rnd(100 * (0.5 * engaged + 0.5 * err_ctl))
+    verified = (len([s for s in code if s["bash"] > 0]) / len(code)) if code else 0
+    diligence = _rnd(100 * verified) if code else 0
+    return {"delegation": delegation, "description": description,
+            "discernment": discernment, "diligence": diligence,
+            "lev": lev, "code_share": code_share, "avg_words": avg_w,
+            "one_shot": one_shot, "engaged": engaged, "verified": verified,
+            "ncode": len(code), "pushback": pushback}
+
+
+FLUENCY_TIPS = {
+    "delegation": "Try handing Claude whole tasks (build it and check it), not just questions.",
+    "description": "Put the constraints, file paths and expected behavior in your first prompt.",
+    "discernment": "Review diffs and say so when output misses. Pushing back is a good sign.",
+    "diligence": "Ask Claude to run the tests or build after edits, so work gets verified.",
+}
+
+
+def _adoption_sessions(st: Stats):
+    """Per-session rows with a local start day, for window slicing."""
+    rows = []
+    for sid, s in st.sessions.items():
+        try:
+            a = datetime.fromisoformat(s["start"].replace("Z", "+00:00")).astimezone()
+            b = datetime.fromisoformat(s["end"].replace("Z", "+00:00")).astimezone()
+        except Exception:
+            continue
+        title = st.session_titles.get(sid) or ""
+        rows.append({
+            "day": a.strftime("%Y-%m-%d"), "min": max(0.0, (b - a).total_seconds()) / 60,
+            "loc": s["loc"], "reads": s["reads"], "writes": s["writes"],
+            "bash": s["bash"], "prompts": s["prompts"], "project": s["project"],
+            "type": classify_session(title, s["reads"], s["writes"], s["loc"]),
+        })
+    return rows
+
+
+def _window_agg(st: Stats, sess_rows, start: date, end: date) -> dict:
+    """Everything one adoption window needs, summed over [start, end]."""
+    s0, s1 = start.isoformat(), end.isoformat()
+    days = sorted(d for d in st.days if s0 <= d <= s1 and st.days[d]["messages"] > 0)
+    w = {"start": s0, "end": s1, "days": days, "sessions": [],
+         "active_days": len(days)}
+    for k in ("input", "output", "loc", "prompts", "reads", "writes", "interruptions",
+              "tool_errors", "human_tokens", "prompt_words", "corrections",
+              "late_msgs", "messages"):
+        w[k] = sum(st.days[d][k] for d in days)
+    w["sessions"] = [r for r in sess_rows if s0 <= r["day"] <= s1]
+    w["active_min"] = sum(len(st.day_buckets.get(d, ())) * 10 for d in days)
+    w["code_days"] = sum(1 for d in days if st.days[d]["loc"] > 0)
+    return w
+
+
+def _feature_status(st: Stats, w: dict) -> dict:
+    """feature id -> days used inside the window (memory is project-based)."""
+    used = {}
+    for fid, *_ in ADOPTION_FEATURES:
+        if fid == "memory":
+            projs = {r["project"] for r in w["sessions"]}
+            n = 0
+            for p in projs:
+                cwd = st.project_cwd.get(p)
+                if cwd and (os.path.isfile(os.path.join(cwd, "CLAUDE.md")) or
+                            os.path.isfile(os.path.join(cwd, "AGENTS.md"))):
+                    n += 1
+            used[fid] = n
+        else:
+            used[fid] = sum(1 for d in st.feature_days.get(fid, ())
+                            if w["start"] <= d <= w["end"])
+    return used
+
+
+def _pillar_scores(st: Stats, w: dict) -> dict:
+    cfg = ADOPTION
+    span = (date.fromisoformat(w["end"]) - date.fromisoformat(w["start"])).days + 1
+    # Habit: how often, and how evenly across the weeks in the window
+    target = cfg["target_days"] * span / cfg["window_days"]
+    buckets = max(1, span // 7)
+    start = date.fromisoformat(w["start"])
+    covered = 0
+    for i in range(buckets):
+        lo = (start + timedelta(days=7 * i)).isoformat()
+        hi = (start + timedelta(days=7 * i + 6)).isoformat()
+        if sum(1 for d in w["days"] if lo <= d <= hi) >= 2:
+            covered += 1
+    habit = _rnd(100 * (0.6 * min(1, w["active_days"] / target) + 0.4 * covered / buckets))
+    # Range: how much of Claude Code you actually use, and how deep sessions go
+    feats = _feature_status(st, w)
+    n_used = sum(1 for v in feats.values() if v > 0)
+    sess = w["sessions"]
+    substantial = [r for r in sess
+                   if r["reads"] + r["writes"] + r["bash"] >= cfg["substantial_actions"]]
+    sub_share = len(substantial) / len(sess) if sess else 0
+    range_ = _rnd(100 * (0.75 * min(1, n_used / cfg["features_full"]) + 0.25 * sub_share))
+    # Craft: the four AI-fluency dimensions, averaged
+    fl = fluency_of(w)
+    craft = _rnd((fl["delegation"] + fl["description"] + fl["discernment"] + fl["diligence"]) / 4)
+    # Impact: code Claude wrote for you, and how many of your days it did so
+    per_day = w["loc"] / w["active_days"] if w["active_days"] else 0
+    code_day_share = w["code_days"] / w["active_days"] if w["active_days"] else 0
+    impact = _rnd(100 * (0.5 * min(1, per_day / cfg["loc_target"]) + 0.5 * code_day_share))
+    wt = cfg["weights"]
+    overall = _rnd(wt["habit"] * habit + wt["range"] * range_ + wt["craft"] * craft
+                   + wt["impact"] * impact)
+    return {"habit": habit, "range": range_, "craft": craft, "impact": impact,
+            "overall": overall, "feats": feats, "n_used": n_used, "covered": covered,
+            "buckets": buckets, "sub_share": sub_share, "substantial": len(substantial),
+            "per_day": per_day, "code_day_share": code_day_share, "fluency": fl}
+
+
+def adoption_level(score: int) -> dict:
+    idx = 0
+    for i, (floor, _n, _d) in enumerate(ADOPTION_LEVELS):
+        if score >= floor:
+            idx = i
+    floor, name, desc = ADOPTION_LEVELS[idx]
+    nxt = ADOPTION_LEVELS[idx + 1] if idx + 1 < len(ADOPTION_LEVELS) else None
+    return {"index": idx, "name": name, "desc": desc, "floor": floor,
+            "next_name": nxt[1] if nxt else None,
+            "next_floor": nxt[0] if nxt else None,
+            "to_next": (nxt[0] - score) if nxt else 0,
+            "all": [{"floor": f, "name": n} for f, n, _ in ADOPTION_LEVELS]}
+
+
+def _coach(st: Stats, cur: dict, w: dict, wellbeing: dict, ever: dict) -> list:
+    """Up to three concrete next steps, ranked by how much they should help."""
+    cands = []
+    for fid, label, _desc, tip, weight in ADOPTION_FEATURES:
+        if cur["feats"][fid] > 0:
+            continue
+        before = ever.get(fid, 0) > 0
+        cands.append({
+            "area": "range", "feature": fid, "score": weight + (0 if before else 10),
+            "title": "Try %s" % label.lower() if fid != "memory" else "Add a CLAUDE.md",
+            "why": ("You've used %s before, but not in the last %d days."
+                    % (label.lower(), ADOPTION["window_days"]) if before
+                    else "You haven't tried %s yet." % label.lower()),
+            "how": tip})
+    if cur["habit"] < 70:
+        cands.append({
+            "area": "habit", "feature": None, "score": (100 - cur["habit"]) * 0.7,
+            "title": "Make it a steady habit",
+            "why": "You were active on %d of the last %d days."
+                   % (w["active_days"], ADOPTION["window_days"]),
+            "how": "Pick one small task a day (a bug, a test, a commit message) and give it to Claude."})
+    fl = cur["fluency"]
+    dims = [("delegation", "Delegate bigger tasks"), ("description", "Write sharper first prompts"),
+            ("discernment", "Review and steer more"), ("diligence", "Verify the work")]
+    weakest = min(dims, key=lambda d: fl[d[0]])
+    if fl[weakest[0]] < 70:
+        cands.append({
+            "area": "craft", "feature": None, "score": (100 - fl[weakest[0]]) * 0.75,
+            "title": weakest[1],
+            "why": "%s is your lowest craft score (%d/100)." % (weakest[0].capitalize(), fl[weakest[0]]),
+            "how": FLUENCY_TIPS[weakest[0]]})
+    if cur["impact"] < 50 and w["active_days"] >= ADOPTION["min_active_days"]:
+        cands.append({
+            "area": "impact", "feature": None, "score": (100 - cur["impact"]) * 0.45,
+            "title": "Aim Claude at real changes",
+            "why": "Claude wrote code on %d%% of your active days."
+                   % _rnd(100 * cur["code_day_share"]),
+            "how": "Start the day by handing Claude one concrete change (a fix, a refactor, a test) to ship."})
+    if wellbeing["late_pct"] > 20:
+        cands.append({
+            "area": "wellbeing", "feature": None,
+            "score": min(90, 40 + wellbeing["late_pct"]),   # outranks "try a feature" tips
+            "title": "Protect your evenings",
+            "why": "%d%% of your activity happened between 11pm and 6am." % wellbeing["late_pct"],
+            "how": "Claude will still be there tomorrow. Try a firm stop time for a week."})
+    cands.sort(key=lambda c: -c["score"])
+    picked, feats = [], 0
+    for c in cands:
+        if c["feature"]:
+            if feats >= 2:
+                continue
+            feats += 1
+        picked.append(c)
+        if len(picked) == 3:
+            break
+    for c in picked:
+        c.pop("score", None)
+    return picked
+
+
+def build_adoption(st: Stats) -> dict:
+    """Payload for the My Adoption tab. Always full history (like the weekly report)."""
+    alldays = [d for d in sorted(st.days) if st.days[d]["messages"] > 0]
+    cfg = ADOPTION
+    out = {"ready": False, "min_days": cfg["min_active_days"], "window_days": cfg["window_days"],
+           "active_days": 0, "targets": {k: cfg[k] for k in
+                                         ("target_days", "features_full", "substantial_actions", "loc_target")},
+           "weights": cfg["weights"]}
+    if not alldays:
+        return out
+    try:
+        end = date.fromisoformat(alldays[-1])
+    except ValueError:
+        return out
+    span = cfg["window_days"]
+    rows = _adoption_sessions(st)
+
+    def window(end_d):
+        return _window_agg(st, rows, end_d - timedelta(days=span - 1), end_d)
+
+    w = window(end)
+    out["active_days"] = w["active_days"]
+    out["end"] = end.isoformat()
+    out["start"] = w["start"]
+    if w["active_days"] < cfg["min_active_days"]:
+        return out
+    cur = _pillar_scores(st, w)
+    pw = window(end - timedelta(days=span))
+    prev = _pillar_scores(st, pw) if pw["active_days"] >= cfg["min_active_days"] else None
+
+    # --- history: the score as of each of the last 12 week-ends --------------
+    history = []
+    for i in range(11, -1, -1):
+        e = end - timedelta(days=7 * i)
+        hw = window(e)
+        if hw["active_days"] >= cfg["min_active_days"]:
+            history.append({"end": e.isoformat(), "score": _pillar_scores(st, hw)["overall"]})
+
+    # --- wellbeing -----------------------------------------------------------
+    wk_msgs = sum(st.days[d]["messages"] for d in w["days"]
+                  if date.fromisoformat(d).weekday() >= 5)
+    wellbeing = {
+        "late_pct": _rnd(100 * w["late_msgs"] / w["messages"]) if w["messages"] else 0,
+        "weekend_pct": _rnd(100 * wk_msgs / w["messages"]) if w["messages"] else 0,
+        "avg_active_min": _rnd(w["active_min"] / w["active_days"]) if w["active_days"] else 0,
+        "longest_focus_min": max((longest_focus(st.day_buckets.get(d, ())) for d in w["days"]), default=0),
+    }
+
+    # --- range: feature checklist -------------------------------------------
+    ever = {}
+    for fid, *_ in ADOPTION_FEATURES:
+        ever[fid] = len(st.feature_days.get(fid, ()))
+    ever["memory"] = 1 if cur["feats"]["memory"] > 0 else 0
+    feature_rows = []
+    for fid, label, desc, tip, _wt in ADOPTION_FEATURES:
+        fd = st.feature_days.get(fid, ())
+        feature_rows.append({
+            "id": fid, "label": label, "desc": desc, "tip": tip,
+            "recent": cur["feats"][fid], "ever": ever[fid] > 0,
+            "first": min(fd) if fd else None})
+
+    # --- craft ---------------------------------------------------------------
+    fl, pfl = cur["fluency"], (prev["fluency"] if prev else None)
+    dims = [
+        ("delegation", "Delegation",
+         "%d%% of sessions shipped code; %.1f× leverage" % (_rnd(100 * fl["code_share"]), fl["lev"])),
+        ("description", "Description",
+         "%d%% of prompts needed no correction; %d words on average"
+         % (_rnd(100 * fl["one_shot"]), _rnd(fl["avg_words"]))),
+        ("discernment", "Discernment",
+         "%d corrections and interruptions; %d tool errors" % (fl["pushback"], w["tool_errors"])),
+        ("diligence", "Diligence",
+         "%d%% of %d code session%s ran commands afterwards"
+         % (_rnd(100 * fl["verified"]), fl["ncode"], "" if fl["ncode"] == 1 else "s")),
+    ]
+    craft = [{"id": k, "label": lab, "score": fl[k], "prev": pfl[k] if pfl else None,
+              "detail": det, "tip": FLUENCY_TIPS[k]} for k, lab, det in dims]
+
+    # --- impact --------------------------------------------------------------
+    mix = Counter(r["type"] for r in w["sessions"])
+    impact = {
+        "loc": w["loc"], "per_day": _rnd(cur["per_day"]),
+        "code_day_pct": _rnd(100 * cur["code_day_share"]),
+        "leverage": round(fl["lev"], 1), "sessions": len(w["sessions"]),
+        "verified_pct": _rnd(100 * fl["verified"]), "task_mix": dict(mix),
+        "prev_loc": pw["loc"] if prev else None,
+    }
+
+    # --- habit ---------------------------------------------------------------
+    streak, best = active_streak(alldays)
+    habit = {"active_days": w["active_days"], "weeks_covered": cur["covered"],
+             "weeks": cur["buckets"], "streak": streak, "best_streak": best,
+             "all_time_days": len(alldays),
+             "prev_active_days": pw["active_days"] if prev else None}
+
+    # --- weekly series (last 12 Mon-Sun weeks) + calendar --------------------
+    monday = end - timedelta(days=end.weekday())
+    weekly = []
+    for i in range(11, -1, -1):
+        m = monday - timedelta(days=7 * i)
+        ww = _window_agg(st, rows, m, m + timedelta(days=6))
+        weekly.append({"start": m.isoformat(), "active_days": ww["active_days"],
+                       "loc": ww["loc"], "sessions": len(ww["sessions"])})
+    cal_start = monday - timedelta(days=7 * 16)
+    cells = []
+    for i in range(17 * 7):
+        d = cal_start + timedelta(days=i)
+        if d > end:
+            cells.append(-1)
+        else:
+            cells.append(len(st.day_buckets.get(d.isoformat(), ())) * 10)
+
+    level = adoption_level(cur["overall"])
+    pillars = []
+    for pid, label, blurb in (
+            ("habit", "Habit", "How regularly you show up"),
+            ("range", "Range", "How much of Claude Code you use"),
+            ("craft", "Craft", "How well you work with Claude"),
+            ("impact", "Impact", "What Claude gets done for you")):
+        pillars.append({"id": pid, "label": label, "blurb": blurb, "score": cur[pid],
+                        "prev": prev[pid] if prev else None})
+    best_p = max(pillars, key=lambda p: p["score"])
+    low_p = min(pillars, key=lambda p: p["score"])
+    out.update({
+        "ready": True, "score": cur["overall"],
+        "prev_score": prev["overall"] if prev else None,
+        "level": level, "pillars": pillars,
+        "strength": best_p["id"], "growth": low_p["id"],
+        "history": history, "habit": habit,
+        "range": {"features": feature_rows, "used": cur["n_used"],
+                  "total": len(ADOPTION_FEATURES), "substantial_pct": _rnd(100 * cur["sub_share"]),
+                  "sessions": len(w["sessions"])},
+        "craft": craft, "impact": impact, "wellbeing": wellbeing,
+        "weekly": weekly, "calendar": {"start": cal_start.isoformat(), "cells": cells},
+        "coach": _coach(st, cur, w, wellbeing, ever),
+    })
+    return out
+
+
 def stats_to_json(st: Stats, days_filter=None) -> dict:
     all_days = sorted(st.days.keys())
     if days_filter:
@@ -1799,6 +2213,115 @@ letter-spacing:.002em}
 .wknav{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .wknav h2{min-width:210px}
 
+/* ── My Adoption ── */
+.ad-hero{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:30px;align-items:center;
+background:radial-gradient(520px 260px at 0% 0%,var(--acc-soft),transparent 70%),var(--fill)}
+.ad-top{display:flex;align-items:center;gap:24px}
+.ad-ring{position:relative;width:156px;height:156px;flex:none}
+.ad-ring svg{width:100%;height:100%;transform:rotate(-90deg);overflow:visible}
+.ad-ring .trk{fill:none;stroke:var(--fill-4);stroke-width:11}
+.ad-ring .val{fill:none;stroke-width:11;stroke-linecap:round;
+filter:drop-shadow(0 4px 10px var(--acc-line))}
+.ad-ring.anim .val{animation:adring 1.1s cubic-bezier(.2,.7,.2,1) backwards}
+@keyframes adring{from{stroke-dashoffset:var(--circ)}}
+.ad-ring .mid{position:absolute;inset:0;display:grid;place-content:center;text-align:center}
+.ad-ring .big{font-size:2.9rem;line-height:1;letter-spacing:-.045em;font-weight:680}
+.ad-ring .of{font-size:.6875rem;color:var(--txt-3);margin-top:5px;letter-spacing:.02em}
+.ad-lvl .eyebrow{margin-bottom:5px}
+.ad-lvl h2{font-size:1.65rem;letter-spacing:-.03em;line-height:1.1}
+.ad-lvl .d{color:var(--txt-2);font-size:.8125rem;margin-top:6px;line-height:1.5}
+.ad-chg{display:inline-flex;align-items:center;gap:6px;margin-top:10px;font-size:.6875rem;
+font-weight:600;padding:4px 10px;border-radius:var(--r-pill);background:var(--fill-3);color:var(--txt-2)}
+.ad-chg.up{color:var(--emerald)}.ad-chg.down{color:var(--rose)}
+.ad-ladder{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:20px}
+.ad-ladder .st{font-size:.625rem;color:var(--txt-3);letter-spacing:.02em;text-align:left}
+.ad-ladder .st i{display:block;height:6px;border-radius:99px;background:var(--fill-4);margin-bottom:6px;overflow:hidden}
+.ad-ladder .st i b{display:block;height:100%;border-radius:99px;
+background:linear-gradient(90deg,var(--acc),var(--acc-2));transition:width .6s cubic-bezier(.2,.7,.2,1)}
+.ad-ladder .st.on{color:var(--txt);font-weight:640}
+.ad-next{font-size:.6875rem;color:var(--txt-3);margin-top:10px}
+.ad-next b{color:var(--txt-2);font-weight:620}
+.ad-sum{grid-column:1/-1;font-size:.8125rem;color:var(--txt-2);line-height:1.6;
+padding-top:16px;border-top:1px solid var(--hair)}
+.ad-sum b{color:var(--txt);font-weight:620}
+.ad-pills{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.ad-pill{position:relative;background:var(--fill);border:1px solid var(--hair);border-radius:14px;
+padding:14px;box-shadow:var(--sh-1);
+transition:transform .18s cubic-bezier(.2,.7,.2,1),border-color .18s ease,box-shadow .18s ease}
+.ad-pill:hover{transform:translateY(-2px);border-color:var(--hair-2);box-shadow:var(--sh-2)}
+.ad-pill .khead{margin-bottom:9px}
+.ad-pill .ic{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;
+background:var(--kbg);color:var(--kc)}
+.ad-pill .ic svg{width:14px;height:14px}
+.ad-pill .sc{display:flex;align-items:baseline;gap:6px}
+.ad-pill .sc small{font-size:.6875rem;color:var(--txt-3);font-weight:520}
+.ad-pill .bar{margin:10px 0 9px;height:6px}
+.ad-pill .bar>i{background:var(--kc)}
+.ad-pill .bl{font-size:.6875rem;color:var(--txt-3);line-height:1.45}
+.ad-pill .dl{font-size:.6875rem;font-weight:600;margin-top:6px}
+.ad-tag{font-size:.5625rem;font-weight:680;letter-spacing:.06em;text-transform:uppercase;
+padding:2px 7px;border-radius:var(--r-pill);background:var(--kbg);color:var(--kc)}
+.ad-tag.grow{background:var(--fill-3);color:var(--txt-3)}
+
+.ad-coach{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
+.ad-step{position:relative;background:var(--fill-2);border:1px solid var(--hair);border-radius:14px;
+padding:15px 15px 14px;display:flex;flex-direction:column;gap:7px;
+border-top:3px solid var(--kc,var(--acc))}
+.ad-step .nb{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;
+font-size:.6875rem;font-weight:700;background:var(--kbg,var(--acc-soft));color:var(--kc,var(--acc))}
+.ad-step .top{display:flex;align-items:center;gap:9px}
+.ad-step h4{font-size:.875rem;letter-spacing:-.01em;font-weight:640;line-height:1.3}
+.ad-step .why{font-size:.75rem;color:var(--txt-3);line-height:1.5}
+.ad-step .how{font-size:.78125rem;color:var(--txt-2);line-height:1.55;background:var(--fill);
+border:1px solid var(--hair);border-radius:10px;padding:9px 11px;margin-top:2px}
+.ad-allgood{display:flex;align-items:center;gap:12px;color:var(--txt-2);font-size:.8125rem}
+
+.ad-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:14px 22px;margin-bottom:16px}
+.ad-facts .fl{font-size:.6875rem;color:var(--txt-3);margin-top:3px}
+.ad-facts .fd{font-size:.6875rem;margin-top:3px;font-weight:560}
+.ad-cal{max-width:100%}
+.ad-calm,.ad-calg{display:grid;grid-template-columns:repeat(17,minmax(0,1fr));gap:3px}
+.ad-calm{font-size:.5625rem;color:var(--txt-3);margin-bottom:5px;height:12px}
+.ad-calm span{white-space:nowrap;overflow:visible}
+.ad-calg{grid-template-rows:repeat(7,auto);grid-auto-flow:column}
+.ad-calb{display:grid;grid-template-columns:26px minmax(0,1fr);gap:6px}
+.ad-calw{display:grid;grid-template-rows:repeat(7,1fr);font-size:.5625rem;color:var(--txt-3)}
+.ad-calw span{display:flex;align-items:center}
+.ad-c{aspect-ratio:1;border-radius:4px;background:var(--fill-3);outline:1.5px solid transparent;
+outline-offset:1px;transition:outline-color .12s ease,transform .12s cubic-bezier(.2,.7,.2,1)}
+.ad-c:hover{outline-color:var(--acc);transform:scale(1.2)}
+.ad-c.fut{visibility:hidden}
+
+.ad-feats{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.ad-feat{display:flex;gap:11px;align-items:flex-start;padding:12px;border-radius:12px;
+border:1px solid var(--hair);background:var(--fill-2)}
+.ad-feat .fi{width:24px;height:24px;border-radius:50%;flex:none;display:grid;place-items:center;
+background:var(--fill-4);color:var(--txt-3)}
+.ad-feat .fi svg{width:13px;height:13px}
+.ad-feat.on{border-color:color-mix(in srgb,var(--sky) 38%,transparent);
+background:color-mix(in srgb,var(--sky) 7%,var(--fill))}
+.ad-feat.on .fi{background:var(--sky);color:#fff}
+.ad-feat.off{border-style:dashed}
+.ad-feat b{display:block;font-size:.8125rem;font-weight:620;letter-spacing:-.008em}
+.ad-feat span{display:block;font-size:.6875rem;color:var(--txt-3);line-height:1.45;margin-top:2px}
+.ad-feat em{display:block;font-style:normal;font-size:.6875rem;font-weight:600;margin-top:6px;color:var(--sky)}
+.ad-feat.off em{color:var(--txt-2)}
+.ad-feat.lapsed em{color:var(--amber)}
+.ad-feat .tipl{margin-top:5px;color:var(--txt-2)}
+.ad-craft .flrow .flb .bar{display:block}
+.ad-craft .flrow .bar>i{background:var(--violet)}
+.ad-craft .flrow .fls small{display:block;font-size:.5625rem;font-weight:600;letter-spacing:0;margin-top:1px}
+.ad-how summary{cursor:pointer;font-weight:620;font-size:.8125rem;list-style:none;display:flex;
+align-items:center;gap:9px}
+.ad-how summary::-webkit-details-marker{display:none}
+.ad-how summary::after{content:"";margin-left:auto;width:8px;height:8px;border-right:2px solid var(--txt-3);
+border-bottom:2px solid var(--txt-3);transform:rotate(45deg);transition:transform .2s ease}
+.ad-how[open] summary::after{transform:rotate(-135deg)}
+.ad-how .body{margin-top:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.ad-how .it{font-size:.75rem;color:var(--txt-3);line-height:1.6}
+.ad-how .it b{display:block;color:var(--txt);font-size:.8125rem;margin-bottom:2px}
+.ad-prog{height:9px;margin:14px 0 10px}
+
 /* ═══════════════════════════ Sheet (project deep-dive) ═══════════════════════════ */
 #scrim{position:fixed;inset:0;z-index:90;display:none;
 background:rgba(10,11,14,.42);
@@ -1843,7 +2366,10 @@ overflow-x:auto;scrollbar-width:none}
 .themebtn{width:auto}.themebtn span{display:none}
 .barin,.content{padding-left:20px;padding-right:20px}
 }
+@media (max-width:1180px){.ad-hero{grid-template-columns:1fr}}
 @media (max-width:760px){
+.ad-top{flex-direction:column;align-items:flex-start}
+.ad-pills{grid-template-columns:1fr}
 .row,.row.half{grid-template-columns:1fr}
 .flgrid{grid-template-columns:1fr}
 .flchart{height:236px}
@@ -1889,6 +2415,7 @@ background:var(--fill)}
     <button data-s="tools"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0 5 5l-10 10a2.8 2.8 0 0 1-4-4z"/><path d="m17 3 4 4"/></svg>Tools &amp; Models</button>
     <button data-s="projects"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg>Projects</button>
     <button data-s="weekly"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2.5"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>Weekly Report</button>
+    <button data-s="adoption"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.5 13.5 17 22l-5-3-5 3 1.5-8.5"/></svg>My Adoption</button>
   </nav>
 
   <div class="sidefoot">
@@ -2082,6 +2609,51 @@ background:var(--fill)}
     <div class="note">Generated locally via <code>claude -p</code> &mdash; the only dashboard feature that consumes tokens, and only when you press the button.</div></div>
 </section>
 
+<!-- ══════════════ My Adoption ══════════════ -->
+<section id="s-adoption" class="stack" hidden>
+  <div class="card" id="adoEmpty" hidden style="--i:0"></div>
+  <div class="stack" id="adoFull">
+    <div class="card ad-hero" id="adoHero" style="--i:0"></div>
+    <div class="card" style="--i:1"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></span><h3>Your next 3 moves</h3><span class="hint">picked from your own data</span></div>
+      <div class="ad-coach" id="adoCoach"></div></div>
+    <div class="row" style="--i:2">
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2.5"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></span><h3>Habit</h3><span class="hint">how regularly you show up</span></div>
+        <div class="ad-facts" id="adoHabitFacts"></div>
+        <div class="ad-cal" id="adoCal"></div>
+        <div class="hleg" style="justify-content:flex-start;margin-top:12px">Less<i id="adg1"></i><i id="adg2"></i><i id="adg3"></i><i id="adg4"></i>More active time</div>
+        <div class="eyebrow" style="margin:18px 0 8px">Active days per week</div>
+        <div class="cvs" style="height:120px"><canvas id="cAdoWeeks"></canvas></div></div>
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Range</h3><span class="hint" id="adoRangeHint">features you use</span></div>
+        <div class="ad-feats" id="adoFeats"></div></div>
+    </div>
+    <div class="row" style="--i:3">
+      <div class="card ad-craft"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg></span><h3>Craft</h3><span class="hint">how well you work with Claude</span></div>
+        <div id="adoCraft"></div>
+        <div class="note">The same four AI-fluency skills as the Weekly Report, measured over the last 4 weeks.</div></div>
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg></span><h3>Impact</h3><span class="hint">what Claude gets done for you</span></div>
+        <div class="ad-facts" id="adoImpactFacts"></div>
+        <div class="cvs short"><canvas id="cAdoLoc"></canvas></div>
+        <div class="note">Lines Claude wrote for you each week, over the last 12 weeks.</div></div>
+    </div>
+    <div class="row" style="--i:4">
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/></svg></span><h3>Your adoption over time</h3><span class="hint">score as of each week, 4-week window</span></div>
+        <div class="cvs short"><canvas id="cAdoTrend"></canvas></div></div>
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/></svg></span><h3>Healthy habits</h3><span class="hint">sustainable beats intense</span></div>
+        <div class="ad-facts" id="adoWell"></div>
+        <div class="ad-allgood" id="adoWellNote"></div></div>
+    </div>
+    <details class="card ad-how" style="--i:5"><summary><span class="gl" style="width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:var(--acc-soft);color:var(--acc)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg></span>How your score is worked out</summary>
+      <div class="body" id="adoHow"></div></details>
+  </div>
+</section>
+
 <footer>100% local &middot; reads Claude Code logs from <code id="root">~/.claude/projects</code> &middot; auto-refreshes every 15s.<br>
 Costs are estimates at public API pricing (incl. cache read/write rates) &mdash; on a subscription plan the real marginal cost is $0. Edit the <code>PRICING</code> table in the script to tune.</footer>
 </div>
@@ -2120,7 +2692,7 @@ const hexa=(h,a)=>{const n=parseInt(h.replace('#',''),16);
 return 'rgba('+(n>>16&255)+','+(n>>8&255)+','+(n&255)+','+a+')';};
 const RM=matchMedia('(prefers-reduced-motion: reduce)');
 
-let days=30,charts={},D=null,wIdx=null,section='overview',customFrom='',customTo='',booted=false;
+let days=30,charts={},D=null,wIdx=null,adoAnim=false,section='overview',customFrom='',customTo='',booted=false;
 
 /* ─────────────────────────── Spring ───────────────────────────
    Apple's two designer parameters: damping ratio and response (seconds).
@@ -2267,7 +2839,12 @@ user:'<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7
 lever:'<path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/>',
 flame:'<path d="M12 2s5 4.5 5 9a5 5 0 0 1-10 0c0-1.2.4-2.3.4-2.3S5 10 5 13a7 7 0 0 0 14 0c0-5.5-7-11-7-11z"/>',
 cal:'<rect x="3" y="4" width="18" height="18" rx="2.5"/><path d="M16 2v4M8 2v4M3 10h18"/>',
-fix:'<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'};
+fix:'<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
+layers:'<path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/>',
+target:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+check:'<path d="M20 6 9 17l-5-5"/>',
+plus:'<path d="M12 5v14M5 12h14"/>',
+spark:'<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>'};
 const ic=k=>'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+IC[k]+'</svg>';
 
 /* ─────────────────────────── Navigation ─────────────────────────── */
@@ -2276,7 +2853,8 @@ const META={
   focus:['Time &amp; Focus','When you work, how long, and what it costs you.'],
   tools:['Tools &amp; Models','Which models answered and which tools they reached for.'],
   projects:['Projects','Where the work landed — by repo, branch and file.'],
-  weekly:['Weekly Report','Always full history — the range filter does not apply here.']};
+  weekly:['Weekly Report','Always full history — the range filter does not apply here.'],
+  adoption:['My Adoption','How you use Claude Code day to day — last 4 weeks vs the 4 before. The range filter does not apply here.']};
 
 $('nav').addEventListener('click',e=>{
   const b=e.target.closest('button[data-s]');if(!b)return;setSection(b.dataset.s);});
@@ -2287,15 +2865,16 @@ function setSection(s){
     const on=b.dataset.s===s;b.classList.toggle('on',on);
     b.setAttribute('aria-current',on?'page':'false');
     if(on)navInd.move(b);});
-  ['overview','focus','tools','projects','weekly'].forEach(k=>{
+  ['overview','focus','tools','projects','weekly','adoption'].forEach(k=>{
     const el=$('s-'+k);el.hidden=k!==s;
     if(k===s){el.classList.remove('enter');void el.offsetWidth;el.classList.add('enter');
       setTimeout(()=>el.classList.remove('enter'),900);}});
-  $('actsData').style.display=s==='weekly'?'none':'flex';
+  $('actsData').style.display=(s==='weekly'||s==='adoption')?'none':'flex';
   $('actsWeek').style.display=s==='weekly'?'flex':'none';
+  if(s==='adoption')adoAnim=true;
   updateChrome();
   if(D)render();
-  if(s!=='weekly')requestAnimationFrame(()=>rangeInd.move($('range').querySelector('.on'),true));
+  if(s!=='weekly'&&s!=='adoption')requestAnimationFrame(()=>rangeInd.move($('range').querySelector('.on'),true));
 }
 function rangeText(){
   if(customFrom||customTo)return (customFrom||'the start')+' → '+(customTo||'today');
@@ -2303,7 +2882,8 @@ function rangeText(){
 function updateChrome(){
   const m=META[section];$('secTitle').innerHTML=m[0];
   let sub=m[1];
-  if(section!=='weekly')sub=rangeText()+' · '+sub;
+  if(section==='adoption'){}
+  else if(section!=='weekly')sub=rangeText()+' · '+sub;
   else if(D&&D.weeks&&D.weeks.length&&wIdx!==null&&D.weeks[wIdx])
     sub='Week of '+fmtD(D.weeks[wIdx].start)+' – '+fmtD(D.weeks[wIdx].end)+' · '+sub;
   $('secSub').innerHTML=sub;}
@@ -2407,7 +2987,7 @@ async function load(){
 }
 function render(){
   ({overview:renderOverview,focus:renderFocus,tools:renderTools,
-    projects:renderProjects,weekly:renderWeek}[section])();}
+    projects:renderProjects,weekly:renderWeek,adoption:renderAdoption}[section])();}
 
 function delta(cur,prev){
   if(prev==null||prev===0||!isFinite(cur/prev))return'';
@@ -2627,6 +3207,149 @@ function renderProjects(){
     '<li>'+esc(p.preview)+'…<div class="mt"><b>'+p.lines+' lines</b> · '+p.words+
     ' words · '+p.day+'</div></li>').join('')
     :'<li class="empty">No prompts in this range.</li>';
+}
+
+/* ─────────────────────────── My Adoption ─────────────────────────── */
+const AD_COL=()=>({habit:C.emerald,range:C.sky,craft:C.violet,impact:C.amber});
+const AD_ICON={habit:'cal',range:'layers',craft:'target',impact:'lever'};
+const adDelta=(cur,prev,unit)=>{
+  if(prev==null)return'';
+  const d=cur-prev;
+  if(d===0)return'<span class="flat-d">same as the 4 weeks before</span>';
+  return '<span class="'+(d>0?'up':'down')+'">'+(d>0?'▲ ':'▼ ')+Math.abs(d)+(unit||'')+' vs the 4 weeks before</span>';};
+
+function renderAdoption(){
+  const A=D.adoption,empty=!A||!A.ready;
+  $('adoEmpty').hidden=!empty;$('adoFull').hidden=empty;
+  if(empty){
+    const n=A?A.active_days:0,need=A?A.min_days:3;
+    $('adoEmpty').innerHTML='<div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'+IC.spark+'</svg></span><h3>Building your baseline</h3></div>'+
+      '<div style="font-size:.9375rem;color:var(--txt);line-height:1.6;max-width:560px">Your Adoption Score needs at least <b>'+need+' active days</b> in the last 4 weeks to be fair to you. You have <b>'+n+'</b> so far — keep using Claude Code and this page fills in on its own.</div>'+
+      '<div class="bar ad-prog" style="max-width:420px"><i style="width:'+Math.min(100,Math.round(n/need*100))+'%"></i></div>'+
+      '<div class="note" style="margin-top:0">Nothing is sent anywhere. This is computed from the logs on your machine.</div>';
+    return;}
+  const col=AD_COL(),L=A.level,pl={};A.pillars.forEach(p=>pl[p.id]=p);
+  const R=52,CIRC=2*Math.PI*R,off=CIRC*(1-A.score/100);
+  /* ladder: each step fills as the score climbs through it */
+  const steps=L.all.map((s,i)=>{
+    const hi=i+1<L.all.length?L.all[i+1].floor:100;
+    const fill=Math.max(0,Math.min(100,(A.score-s.floor)/(hi-s.floor)*100));
+    return '<div class="st'+(i===L.index?' on':'')+'"><i><b style="width:'+Math.round(fill)+'%"></b></i>'+s.name+'</div>';}).join('');
+  let chg='';
+  if(A.prev_score!=null){const d=A.score-A.prev_score;
+    chg='<span class="ad-chg '+(d>0?'up':d<0?'down':'')+'">'+(d>0?'▲ +'+d:d<0?'▼ '+d:'No change')+' vs the 4 weeks before</span>';}
+  else chg='<span class="ad-chg">First full window — nothing to compare with yet</span>';
+  const nxt=L.next_name?'<b>'+L.to_next+' point'+(L.to_next===1?'':'s')+'</b> to reach '+L.next_name:'You’ve reached the top level — keep it steady';
+  const H=A.habit,Rg=A.range,I=A.impact;
+  const summary='In the last '+A.window_days+' days you were active on <b>'+H.active_days+'</b> days, used <b>'+Rg.used+' of '+Rg.total+'</b> Claude Code features, and Claude wrote <b>'+fmt(I.loc)+'</b> lines for you. '+
+    'Strongest pillar: <b>'+pl[A.strength].label+'</b>. Most room to grow: <b>'+pl[A.growth].label+'</b>.';
+  const tiles=A.pillars.map(p=>{
+    const c=col[p.id],tag=p.id===A.strength?'<span class="ad-tag">Strongest</span>':(p.id===A.growth?'<span class="ad-tag grow">Room to grow</span>':'');
+    return '<div class="ad-pill" style="--kc:'+c+';--kbg:'+hexa(c,.13)+'">'+
+      '<div class="khead"><span class="eyebrow">'+p.label+'</span><span class="ic">'+ic(AD_ICON[p.id])+'</span></div>'+
+      '<div class="sc"><span class="num-lg">'+p.score+'</span><small>/ 100</small>'+(tag?'<span style="margin-left:auto">'+tag+'</span>':'')+'</div>'+
+      '<div class="bar"><i style="width:'+p.score+'%"></i></div>'+
+      '<div class="bl">'+p.blurb+'</div>'+
+      (p.prev!=null?'<div class="dl">'+adDelta(p.score,p.prev)+'</div>':'')+'</div>';}).join('');
+  $('adoHero').innerHTML=
+    '<div><div class="ad-top"><div class="ad-ring'+(adoAnim?' anim':'')+'" style="--circ:'+CIRC.toFixed(1)+'">'+
+      '<svg viewBox="0 0 120 120"><defs><linearGradient id="adGrad" x1="0" y1="0" x2="1" y2="1">'+
+      '<stop offset="0" style="stop-color:var(--acc)"/><stop offset="1" style="stop-color:var(--acc-2)"/></linearGradient></defs>'+
+      '<circle class="trk" cx="60" cy="60" r="'+R+'"/>'+
+      '<circle class="val" cx="60" cy="60" r="'+R+'" stroke="url(#adGrad)" stroke-dasharray="'+CIRC.toFixed(1)+'" stroke-dashoffset="'+off.toFixed(1)+'"/></svg>'+
+      '<div class="mid"><div class="big">'+A.score+'</div><div class="of">out of 100</div></div></div>'+
+      '<div class="ad-lvl"><div class="eyebrow">Your level</div><h2>'+L.name+'</h2><div class="d">'+L.desc+'</div>'+chg+'</div></div>'+
+      '<div class="ad-ladder">'+steps+'</div><div class="ad-next">'+nxt+'</div></div>'+
+    '<div class="ad-pills">'+tiles+'</div>'+
+    '<div class="ad-sum">'+summary+'</div>';
+  adoAnim=false;
+
+  /* coach */
+  const AREA={habit:'habit',range:'range',craft:'craft',impact:'impact',wellbeing:'habit'};
+  $('adoCoach').innerHTML=A.coach.length?A.coach.map((c,i)=>{
+    const k=col[AREA[c.area]]||C.coral;
+    return '<div class="ad-step" style="--kc:'+k+';--kbg:'+hexa(k,.13)+'"><div class="top"><span class="nb">'+(i+1)+'</span><h4>'+esc(c.title)+'</h4></div>'+
+      '<div class="why">'+esc(c.why)+'</div><div class="how">'+esc(c.how)+'</div></div>';}).join('')
+    :'<div class="ad-allgood">'+ic('check').replace('<svg','<svg width="18" height="18"')+'You’re covering the bases — nothing to fix right now. Keep going.</div>';
+
+  /* habit */
+  $('adoHabitFacts').innerHTML=
+    '<div><div class="num-lg">'+H.active_days+'<span style="font-size:.8125rem;color:var(--txt-3);font-weight:520"> / '+A.window_days+'</span></div><div class="fl">active days</div><div class="fd">'+adDelta(H.active_days,H.prev_active_days)+'</div></div>'+
+    '<div><div class="num-lg">'+H.weeks_covered+'<span style="font-size:.8125rem;color:var(--txt-3);font-weight:520"> / '+H.weeks+'</span></div><div class="fl">weeks with 2+ active days</div></div>'+
+    '<div><div class="num-lg">'+H.streak+'</div><div class="fl">day streak · best '+H.best_streak+'</div></div>';
+  const cal=A.calendar,cs=cal.start.split('-').map(Number),mx=[];
+  let mh='',ch='';
+  for(let c=0;c<17;c++){
+    const d0=new Date(cs[0],cs[1]-1,cs[2]+c*7);
+    mh+='<span>'+((c===0||d0.getDate()<=7)?MON[d0.getMonth()]:'')+'</span>';}
+  cal.cells.forEach((m,i)=>{
+    if(m<0){ch+='<div class="ad-c fut"></div>';return;}
+    const d=new Date(cs[0],cs[1]-1,cs[2]+i),a=m===0?0:m<40?.24:m<90?.46:m<180?.72:.95;
+    ch+='<div class="ad-c" style="'+(a?'background:'+hexa(C.emerald,a):'')+'" title="'+MON[d.getMonth()]+' '+d.getDate()+' · '+(m?fmtMin(m)+' active':'no activity')+'"></div>';});
+  $('adoCal').innerHTML='<div class="ad-calm" style="margin-left:32px">'+mh+'</div><div class="ad-calb"><div class="ad-calw"><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span><span></span></div><div class="ad-calg">'+ch+'</div></div>';
+  [['adg1',.24],['adg2',.46],['adg3',.72],['adg4',.95]].forEach(x=>{const e=$(x[0]);if(e)e.style.background=hexa(C.emerald,x[1]);});
+
+  mk('cAdoWeeks',{type:'bar',data:{labels:A.weekly.map(w=>fmtD(w.start)),datasets:[
+    {label:'Active days',data:A.weekly.map(w=>w.active_days),backgroundColor:C.emerald}]},
+    options:{scales:{x:XGRID,y:{min:0,max:7,...GRID,ticks:{stepSize:1,padding:6}}},plugins:{legend:{display:false}}}});
+
+  /* range */
+  $('adoRangeHint').textContent=Rg.used+' of '+Rg.total+' in the last '+A.window_days+' days';
+  $('adoFeats').innerHTML=Rg.features.map(f=>{
+    const on=f.recent>0,lapsed=!on&&f.ever,cls=on?'on':(lapsed?'off lapsed':'off');
+    let st;
+    if(f.id==='memory')st=on?'CLAUDE.md found in '+f.recent+' active project'+(f.recent===1?'':'s'):'No CLAUDE.md in your active projects';
+    else st=on?'Used on '+f.recent+' of the last '+A.window_days+' days':(lapsed?'Used before · not in the last '+A.window_days+' days':'Not tried yet');
+    return '<div class="ad-feat '+cls+'"><span class="fi"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">'+(on?IC.check:IC.plus)+'</svg></span>'+
+      '<div><b>'+esc(f.label)+'</b><span>'+esc(f.desc)+'</span><em>'+st+'</em>'+(on?'':'<span class="tipl">'+esc(f.tip)+'</span>')+'</div></div>';}).join('');
+
+  /* craft */
+  $('adoCraft').innerHTML=A.craft.map(d=>
+    '<div class="flrow"><span class="fln">'+d.label+'</span>'+
+    '<span class="flb"><span class="bar"><i style="width:'+d.score+'%"></i></span></span>'+
+    '<span class="fls">'+d.score+(d.prev!=null&&d.prev!==d.score?'<small class="'+(d.score>d.prev?'up':'down')+'">'+(d.score>d.prev?'▲':'▼')+Math.abs(d.score-d.prev)+'</small>':'')+'</span>'+
+    '<span class="flt">'+esc(d.detail)+'<br>'+(d.score<70?esc(d.tip):'Looking good.')+'</span></div>').join('');
+
+  /* impact */
+  $('adoImpactFacts').innerHTML=
+    '<div><div class="num-lg">'+fmt(I.loc)+'</div><div class="fl">lines Claude wrote</div><div class="fd">'+(I.prev_loc!=null?delta(I.loc,I.prev_loc).replace('vs last period','vs 4 weeks before'):'')+'</div></div>'+
+    '<div><div class="num-lg">'+I.code_day_pct+'%</div><div class="fl">of active days shipped code</div></div>'+
+    '<div><div class="num-lg">'+I.leverage+'×</div><div class="fl">leverage</div></div>'+
+    '<div><div class="num-lg">'+I.verified_pct+'%</div><div class="fl">of code sessions verified</div></div>';
+  mk('cAdoLoc',{type:'bar',data:{labels:A.weekly.map(w=>fmtD(w.start)),datasets:[
+    {label:'Lines of code',data:A.weekly.map(w=>w.loc),backgroundColor:C.amber}]},
+    options:{scales:{x:XGRID,y:GRID},plugins:{legend:{display:false},tooltip:{callbacks:{
+      afterBody:i=>{const w=A.weekly[i[0].dataIndex];return w.active_days+' active day'+(w.active_days===1?'':'s')+' · '+w.sessions+' session'+(w.sessions===1?'':'s');}}}}}});
+
+  /* trend */
+  const names={0:'',25:'Practitioner',50:'Power user',75:'Orchestrator'};
+  mk('cAdoTrend',{type:'line',data:{labels:A.history.map(h=>fmtD(h.end)),datasets:[{label:'Adoption Score',
+    data:A.history.map(h=>h.score),borderColor:C.coral,backgroundColor:areaFill(C.coral),fill:true,
+    pointRadius:3,pointBackgroundColor:C.coral,pointBorderColor:C.fill,pointBorderWidth:2}]},
+    options:{scales:{x:XGRID,y:{min:0,max:100,...GRID,ticks:{stepSize:25,padding:8,
+      callback:v=>names[v]!==undefined?names[v]:v}}},plugins:{legend:{display:false}}}});
+
+  /* wellbeing */
+  const W=A.wellbeing;
+  $('adoWell').innerHTML=
+    '<div><div class="num-lg">'+fmtMin(W.avg_active_min)+'</div><div class="fl">active per active day</div></div>'+
+    '<div><div class="num-lg">'+fmtMin(W.longest_focus_min)+'</div><div class="fl">longest focus block</div></div>'+
+    '<div><div class="num-lg">'+W.late_pct+'%</div><div class="fl">late-night (11pm–6am)</div></div>'+
+    '<div><div class="num-lg">'+W.weekend_pct+'%</div><div class="fl">on weekends</div></div>';
+  $('adoWellNote').innerHTML=W.late_pct>20?ic('alert').replace('<svg','<svg width="18" height="18" style="color:var(--amber);flex:none"')+'A lot of your activity is late at night. Claude will still be there tomorrow.'
+    :(W.weekend_pct>35?ic('alert').replace('<svg','<svg width="18" height="18" style="color:var(--amber);flex:none"')+'A third of your activity lands on weekends. Make sure you’re getting real breaks.'
+    :ic('check').replace('<svg','<svg width="18" height="18" style="color:var(--emerald);flex:none"')+'Your rhythm looks sustainable. Steady daytime use beats late-night bursts.');
+
+  /* how it works */
+  const wt=A.weights,T=A.targets;
+  $('adoHow').innerHTML=[
+    ['Habit · '+Math.round(wt.habit*100)+'% of your score','Counts how many days you used Claude Code (full marks at '+T.target_days+' of the last '+A.window_days+', about 3 a week) and how evenly they spread across the 4 weeks.'],
+    ['Range · '+Math.round(wt.range*100)+'%','Counts which Claude Code features you actually used (full marks at '+T.features_full+' of '+Rg.total+'), plus how many sessions were substantial ('+T.substantial_actions+'+ tool actions).'],
+    ['Craft · '+Math.round(wt.craft*100)+'%','The average of your four AI-fluency skills: Delegation, Description, Discernment and Diligence, the same ones as in the Weekly Report.'],
+    ['Impact · '+Math.round(wt.impact*100)+'%','How many lines Claude wrote per active day (full marks at '+T.loc_target+') and on how many of your active days it shipped code.'],
+    ['Levels','Explorer 0–24 · Practitioner 25–49 · Power user 50–74 · Orchestrator 75–100. Scores compare you with your own past, never with other people.'],
+    ['Good to know','All heuristics, computed locally from your Claude Code logs. Trends matter more than the exact number. Formulas and thresholds live in docs/METRICS.md and the ADOPTION table in the script.']
+  ].map(x=>'<div class="it"><b>'+x[0]+'</b>'+x[1]+'</div>').join('');
 }
 
 /* ─────────────────────────── Weekly report ─────────────────────────── */
@@ -2952,6 +3675,7 @@ class Handler(BaseHTTPRequestHandler):
                 ranged = full
             data = stats_to_json(ranged, None)
             data["weeks"] = build_weeks(full)
+            data["adoption"] = build_adoption(full)
             data["root"] = self.root
 
             def sd(dl, k):

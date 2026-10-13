@@ -295,6 +295,52 @@ in the entire dashboard that consume tokens — and only when pressed.
 
 ---
 
+# Tab 3: My Adoption *(v1.3)*
+
+A personal scorecard: **how deeply are you using Claude Code, and are you
+getting better at it?** It is for you, not for a manager. It only ever
+compares you with your own past, and it never leaves your machine. Like the
+Weekly Report it always uses full history, so the range filter is hidden.
+
+## Your score and level
+
+One number from 0 to 100 and a level: **Explorer → Practitioner → Power user →
+Orchestrator**. The ring and the ladder under it show how far you are
+and how many points you need for the next level. A short sentence underneath
+sums up the last 28 days in plain words, and a ▲/▼ shows the change versus the
+28 days before.
+
+## Four pillars
+
+| Pillar | Plain-English meaning |
+|---|---|
+| **Habit** | Do you show up regularly? Days used and how evenly they spread across the weeks |
+| **Range** | Do you use what Claude Code offers? Plan mode, subagents, skills, connected tools, CLAUDE.md... |
+| **Craft** | Do you work with Claude well? The four AI-fluency skills from the Weekly Report |
+| **Impact** | What does Claude get done for you? Lines written per active day and how often it ships code |
+
+Each tile has a bar, a ▲/▼ versus the previous 4 weeks, and a tag for your
+strongest pillar and the one with most room to grow.
+
+## Your next 3 moves
+
+Up to three concrete suggestions picked from your own data, such as "You haven't
+tried plan mode yet" with a one-line how-to. It is rule-based (no AI, no tokens).
+
+## The detail cards
+
+- **Habit** — a GitHub-style calendar of the last 17 weeks, plus active days per week
+- **Range** — a checklist of eight features; used ones show how often, unused ones show how to start
+- **Craft** — the four fluency skills with a bar, trend arrow and tip
+- **Impact** — lines Claude wrote, share of active days that shipped code, leverage, and a weekly chart
+- **Your adoption over time** — the score at the end of each of the last 12 weeks
+- **Healthy habits** — active time, longest focus block, late-night and weekend share
+- **How your score is worked out** — a collapsible plain-language summary of the weights
+
+Exact formulas: [METRICS.md §12](METRICS.md#12-my-adoption-v13).
+
+---
+
 # FAQ — questions your team will ask
 
 **"Is this sending our code anywhere?"**
@@ -315,6 +361,12 @@ one.
 It counts lines actually written by Claude's editing tools — real
 content, but additions only (no credit for deletions; rewritten lines
 count again). Treat it as an activity indicator, not a productivity KPI.
+
+**"Why is my Adoption Score lower than I expected?"**
+It is a self-comparison tool with deliberately demanding targets (about three
+active days a week, six features in use, 300 lines per active day for full
+marks). Look at the four pillars and "Your next 3 moves", and watch the trend.
+A rising score matters more than the number.
 
 **"Are the fluency scores real measurements?"**
 No — honest heuristics, documented formula-by-formula in

@@ -372,7 +372,78 @@ stats through `claude -p` (token-costing, button-only, like AI summary).
 
 ---
 
-## 12. Known approximations (honest accounting)
+## 12. My Adoption (v1.3)
+
+A personal scorecard on its own tab. Everything is measured over a rolling
+**28-day window ending on your most recent active day**, compared with the 28
+days before it, and always uses full history (the range filter does not apply).
+It compares you with *your own past* only. It never ranks you against anyone.
+Targets and weights live in the `ADOPTION` table at the top of the script.
+
+Fewer than 3 active days in the window → the tab shows "Building your
+baseline" instead of a score.
+
+### The four pillars (each 0-100)
+
+| Pillar | Question | Formula |
+|---|---|---|
+| **Habit** | Do you show up regularly? | `60 × min(1, active_days ÷ 12) + 40 × (weeks with ≥ 2 active days ÷ 4)`: 12 active days is about 3 a week |
+| **Range** | Do you use what Claude Code offers? | `75 × min(1, features_used ÷ 6) + 25 × substantial-session share` |
+| **Craft** | Do you work with Claude well? | the mean of the four AI-fluency dimensions in §11, computed over the window |
+| **Impact** | What does Claude get done for you? | `50 × min(1, LoC per active day ÷ 300) + 50 × (active days where Claude wrote code ÷ active days)` |
+
+*Features* are eight things you can switch on, detected from the logs. Each
+counts if you used it at least once in the window:
+
+| Feature | Detected from |
+|---|---|
+| Project memory | a `CLAUDE.md` or `AGENTS.md` in the working folder of a project you were active in |
+| Run & verify | `Bash` / `PowerShell` tool calls |
+| Plan mode | `EnterPlanMode` / `ExitPlanMode` tool calls, or a `plan` permission-mode snapshot |
+| Subagents | `Agent` / `Task` tool calls |
+| Skills | `Skill` tool calls |
+| Connected tools | any `mcp__*` tool call |
+| Slash commands | slash-command invocations |
+| Web research | `WebSearch` / `WebFetch` tool calls |
+
+A session is **substantial** when it has ≥ 10 tool actions (reads + edits + commands).
+
+### Adoption Score and levels
+
+```
+score = 0.25 × Habit + 0.25 × Range + 0.30 × Craft + 0.20 × Impact
+```
+
+| Score | Level |
+|---|---|
+| 0-24 | Explorer |
+| 25-49 | Practitioner |
+| 50-74 | Power user |
+| 75-100 | Orchestrator |
+
+The trend chart recomputes the score as of each of the last 12 week-ends
+(same 28-day window), skipping weeks with fewer than 3 active days.
+
+### "Your next 3 moves" (coach)
+
+Rule-based, no AI and no tokens. Candidates are ranked and the top three
+shown (at most two "try a feature" tips):
+
+- an unused feature → ranked by its usefulness weight (+10 if you have never used it)
+- Habit below 70 → "make it a steady habit"
+- your weakest fluency dimension, if it is below 70
+- Impact below 50 → "aim Claude at real changes"
+- more than 20 % of activity between 11pm and 6am → "protect your evenings" (ranked high on purpose)
+
+### Healthy habits
+
+Average active minutes per active day, longest single-day focus block, share
+of messages in quiet hours (`QUIET_START`-`QUIET_END`), and share on weekends,
+all over the window.
+
+---
+
+## 13. Known approximations (honest accounting)
 
 | Metric | Approximation |
 |---|---|
@@ -388,6 +459,9 @@ stats through `claude -p` (token-costing, button-only, like AI summary).
 | Corrections | only catches corrections at the *start* of a prompt |
 | Task mix / day chart | built from the 300 most recent sessions; very old days in long ranges may undercount |
 | Cold-start tax / cache-reset rate | per-session, like reads/writes/LoC — if a custom date range starts mid-session, that session's *visible* first call is treated as its cold start even if the real first call happened earlier, outside the range |
+| Adoption Score | a heuristic blend with hand-picked weights and targets; the levels are motivational labels, not a standard. Watch your trend rather than the exact number |
+| Feature detection | inferred from tool names in the logs; a feature you used without a tool call (for example a CLAUDE.md you wrote but no session has run in) is only seen if the project folder still exists |
+| Window | the last 28 calendar days ending on your most recent active day, so a long break does not make the score collapse |
 
 Everything else — token totals, cache numbers, tool counts, per-model and
 per-project splits — is exact arithmetic over deduplicated log entries.

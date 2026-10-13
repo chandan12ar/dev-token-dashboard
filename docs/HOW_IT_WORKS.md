@@ -100,6 +100,17 @@ needed.
   when you press it. (Note: the `claude -p` run itself gets logged as a
   tiny new session, so it will appear in your stats.)
 
+## My Adoption tab
+
+A third tab built for the developer themselves: an Adoption Score (0-100, with
+levels), four pillars (Habit, Range, Craft, Impact), a calendar, a feature
+checklist and a "next 3 moves" coach. It reads the same parsed stats as the other
+tabs. The parser additionally records the days each Claude Code feature was used
+(plan mode, subagents, skills, MCP tools, slash commands, web research, commands run), and
+`build_adoption()` turns that into the payload under `adoption` in `/api/stats`.
+It is always computed over full history, never the selected range. Formulas:
+[METRICS.md §12](METRICS.md#12-my-adoption-v13).
+
 ## Other developer features
 
 - **Exploration vs building per day** — stacked chart of read vs write

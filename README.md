@@ -28,6 +28,21 @@ Claude Code has been used (it reads `~/.claude/projects/`).
 
 Full instructions, auto-start at logon, and troubleshooting: **[SETUP.md](SETUP.md)**
 
+## What's new (v1.3) — the "My Adoption" tab
+
+A personal scorecard for *you*: how deeply you use Claude Code and whether
+you are getting better at it. Compared only with your own past, 100 % local.
+
+- **Adoption Score (0-100) and level** — Explorer → Practitioner → Power user → Orchestrator
+- **Four pillars** — Habit, Range, Craft, Impact, each with a trend vs the previous 4 weeks
+- **Your next 3 moves** — concrete, rule-based suggestions from your own data
+- **Habit calendar, feature checklist, craft bars, impact chart, 12-week trend**
+- **Healthy habits** — focus time, late-night and weekend share
+
+Formulas in [docs/METRICS.md](docs/METRICS.md#12-my-adoption-v13).
+
+![My Adoption tab](docs/screenshots/my-adoption.png)
+
 ## What's new (v1.2) — the "Reflect" update
 
 Inspired by Anthropic's [Reflect with Claude](https://www.anthropic.com/news/reflect-with-claude)
@@ -96,6 +111,9 @@ Full formula reference for every metric: **[docs/METRICS.md](docs/METRICS.md)**
 - **Time ranges** — 7 / 30 / 90 days / all time / custom from–to dates;
   everything on the page follows the selection
 - **Exports** — copy summary, CSV of daily stats, full JSON payload
+
+### My Adoption tab
+See *What's new (v1.3)* above and [docs/DASHBOARD_GUIDE.md](docs/DASHBOARD_GUIDE.md#tab-3-my-adoption-v13).
 
 ### Weekly Report tab
 Built for standups. For any week it shows **what you worked on** (session
