@@ -34,6 +34,10 @@ how much, how well, and what to try next.**
 
 - **100 % local.** One Python file, standard library only. It never calls an
   API, uses no tokens, and sends nothing anywhere. It works offline.
+- **One place instead of many.** Claude Code shows usage through about ten
+  separate commands and screens, most of them one-session snapshots. This puts
+  usage, cost, habits, quality and history in a single dashboard with one date
+  range and one set of definitions ([section 2](#2-the-problem)).
 - **Zero setup cost.** `python dev_token_dashboard.py` and open
   `http://localhost:8787`. No installs, no accounts, no admin rights.
 - **Built for the developer first.** It compares a person only with their own
@@ -68,32 +72,181 @@ get very different results:
 Both show up as "a Claude Code user". Nothing in their day tells either of
 them which one they are.
 
-### 2.2 What is missing
+The obvious reply is: *"Claude Code already has commands that show usage."* It
+does, and they are useful. The problem is what happens when you try to answer a
+real question with them.
 
-| Gap | What it looks like in practice |
-|---|---|
-| **No feedback loop** | A developer gets no signal on whether they are getting better at working with AI. Skill grows slowly and by accident. |
-| **Usage is invisible** | The only things most people see are a bill or a limit message. Nobody can answer "what did I do with Claude this week?" without digging. |
-| **Wrong yardsticks** | When teams do try to measure, they reach for what is easy: tokens burned or lines produced. These reward waste. A developer who writes a sharp prompt and gets a small, correct change looks "worse" than one who burns tokens in loops. |
-| **Hidden features** | Plan mode, subagents, skills, hooks, task lists, project memory and connected tools exist, but there is no way to see which ones you have never tried. |
-| **Quality is unseen** | Did the code get tested after Claude changed it? Did the first test run pass? Which files keep getting reworked? None of this is visible at a glance. |
-| **Cost without context** | Spend is reported as a total. It is hard to tell a healthy $40 from a wasteful $40, or to see where a spike came from. |
-| **Standups take effort** | "What did I work on this week?" is reconstructed from memory, although a precise record of the work already exists. |
-| **Privacy worries** | Many analytics tools want to upload prompts and code to a server. That is a non-starter for a lot of engineers and organisations. |
+### 2.2 Visibility exists, but it is scattered
 
-### 2.3 Why existing options do not close the gap
+Claude Code gives you several ways to look at your usage. Each one answers one
+narrow question, in a different place, for a different scope. This is how they
+stand in the current Claude Code documentation:
 
-- **Token/cost counters** answer "how much", but not "how well" or "what next".
-- **Server-side analytics** can see volume, but need data to leave the machine
-  and, by design, look at people from above rather than helping them look at
-  themselves.
-- **Delivery metrics** (tickets, pull requests, build pipelines) measure the
-  team's pipeline, not how an individual works with an AI assistant, and they
-  need integrations that take weeks to set up.
+| Where you look | What it shows | Scope | What it cannot tell you |
+|---|---|---|---|
+| `/usage` (also reachable as `/cost` and `/stats`) | Session cost estimate, API and wall-clock time, lines added/removed, tokens by model, a prompt-cache line. On subscription plans, plan-usage bars and a breakdown by skill, subagent, plugin and MCP server | The session block **resets when you `/clear`**. The plan view covers the last 24 hours or 7 days, from this machine's history | A month of history, trend lines, per-project cost, or whether the work was any good |
+| `/context` | What is filling the context window right now, with suggestions | The current session only | Anything about past sessions |
+| `/status` | Version, model, account, connectivity | Right now | Any usage or cost number |
+| `/insights` | An AI-written HTML report on recent sessions (projects, patterns, friction, suggestions) | Up to 200 new sessions per run, on this machine | It is a document you generate on demand, **and it spends your tokens** |
+| `/resume` | A list of past sessions with title, branch and size | Local transcripts | Cost, quality, or any comparison between sessions |
+| `/export` | A plain-text copy of one conversation | The current session | Anything across sessions |
+| `/memory`, `/permissions`, `/hooks`, `/agents`, `/mcp`, `/model` | How Claude Code is *configured* | The current setup | Whether you actually *use* what you configured |
+| Status line | Live cost, context % and, for Pro/Max, plan limits, shown while you work | The current session; you must write or install a script | Anything once you close the window: nothing is kept |
+| OpenTelemetry export | Metrics and events (cost, tokens, active time, lines, tool decisions) streamed to a backend | Whatever you collect | It needs an endpoint, a collector and dashboards someone has to build and run |
+| Admin analytics (Console, claude.ai) | Team usage, estimated spend, acceptance rates, per-user views | Owners and Admins on Team/Enterprise plans | A personal view for an individual developer; the perspective is organisational |
 
-The data needed to answer the real questions already exists, in detail, on
-every developer's own laptop. It was simply never turned into something
-readable.
+**Read down that table and the pattern is clear.** There are about ten different
+surfaces. Most are one-moment, one-session snapshots shown in a terminal. They
+disappear when you scroll or `/clear`. The ones that last (telemetry, admin
+analytics) need infrastructure or administrator access and look at people from
+above. Nothing in the list gives an individual developer **one place, with
+history, that connects usage to habits and outcomes.**
+
+### 2.3 One question, many places
+
+Here is what it takes to answer ordinary questions a developer might ask.
+
+| The question | Closest built-in answer | What is still missing | Dashboard page |
+|---|---|---|---|
+| "How much did I use Claude last month, per project and per model?" | `/usage` shows the current session | A month view, split by project and model | Overview, Tools & Models, Projects |
+| "What did that spike on Tuesday come from?" | `/usage` covers the current session and a 24-hour / 7-day plan view | The day, the session and the model behind a spike | Value |
+| "Am I any better at using Claude than I was a month ago?" | No built-in view found in the docs | A baseline and a trend | My Adoption |
+| "Is Claude's code getting tested?" | No built-in view found in the docs | Whether a test ran after the last edit | Quality |
+| "Why does everything feel slow and stuck?" | `/usage` shows API time, not where it went | Turn time, failure loops, slow commands | Flow |
+| "Which Claude Code features have I never tried?" | `/memory`, `/hooks`, `/mcp`... show what is *set up* | What is actually *used* | My Adoption |
+| "What should I do differently?" | `/insights` gives a narrative (and uses tokens) | Ranked, evidence-based moves at no token cost | Advisor |
+| "What did I do this week?" | `/resume` lists sessions | A grouped summary for a standup | Weekly Report |
+| "Am I working too late?" | Not in a personal view (telemetry records active time, but you must collect and chart it) | Active time, quiet hours, weekends | Time & Focus |
+| "Can I trust these numbers?" | No built-in view found in the docs | What the logs contain, and how sure each metric is | Data Health |
+
+To answer even three of these today a developer would need to run several
+commands, in the right session, at the right moment, and copy the results by
+hand into a spreadsheet. In practice they don't, so the questions go
+unanswered.
+
+### 2.4 The problems, one by one
+
+**Problem 1: Information is split across many commands and screens.**
+*Today:* cost is in one command, context in another, sessions in a third,
+configuration in half a dozen more, and team figures in a web console that most
+developers cannot open. *Why it hurts:* no one assembles the pieces, so no one
+sees the whole picture. *What the dashboard does:* puts all of it on one page
+with one date selector, one set of definitions and one look, so a number on one
+tab means the same thing on every other tab.
+
+**Problem 2: Usage is a snapshot, not a history.**
+*Today:* the figures that are easy to see belong to "right now" or "this
+session", and some reset when you clear the conversation. *Why it hurts:*
+improvement is a change over time, and you cannot see change without history.
+*What the dashboard does:* reads every session log still on the machine, so it
+can show 7 days, 30 days, 90 days, all time or a custom range, always with the
+change against the previous equal-length period.
+
+**Problem 3: Activity is shown, effectiveness is not.**
+*Today:* the built-in views tell you how much you did (tokens, minutes, lines).
+*Why it hurts:* "how much" says nothing about "how well". *What the dashboard
+does:* adds the missing layer, with Flow (does work move smoothly), Quality
+(was it checked) and Adoption (are you using the tool deeply and getting better).
+
+**Problem 4: The easy yardsticks are the wrong ones.**
+*Today:* when people do measure, they count tokens or lines produced. *Why it
+hurts:* these reward waste. A sharp prompt that gets a small, correct change
+looks worse than a long loop of retries. *What the dashboard does:* shows
+tokens and lines only as context, never as a goal, and builds scores on
+behaviour: clean first-pass turns, recovery from failures, verification after
+edits, and use of the right features.
+
+**Problem 5: Configuration is visible; use is not.**
+*Today:* `/memory`, `/hooks`, `/agents` and `/mcp` tell you what is set up.
+*Why it hurts:* a feature that is configured but never used, or a capability
+nobody knows about, stays invisible. *What the dashboard does:* the My Adoption
+checklist detects ten capabilities from real tool calls (project memory,
+run-and-verify, plan mode, subagents, skills, hooks, task lists, connected
+tools, slash commands, web research) and shows which ones you have used and
+which you never tried.
+
+**Problem 6: Quality of AI-written code is invisible.**
+*Today:* no built-in view tells you whether Claude's last edit was followed by a test,
+whether the first test run passed, or which files keep being reworked. *Why it
+hurts:* unchecked AI code is the biggest risk of working with an assistant.
+*What the dashboard does:* the Quality page measures verification after the last
+edit, first-run pass rate, tests written alongside code, rework hotspots and
+risky-command signals.
+
+**Problem 7: Cost has no context.**
+*Today:* spend is a total (and, on a subscription plan, a share of a limit).
+*Why it hurts:* you cannot tell a healthy $40 from a wasteful $40, or explain
+a spike. *What the dashboard does:* Value shows cost per 100 lines, cost per
+verified session, cache savings, spike days with the session behind them, and
+whether an expensive model is being used on sessions that edited nothing.
+
+**Problem 8: There is no feedback and no path to get better.**
+*Today:* no built-in view tells a developer what "good" looks like or what to try next.
+*Why it hurts:* skill grows slowly and by accident. *What the dashboard does:*
+My Adoption gives a score, six levels with a clear way up, and the next three
+moves. The Advisor ranks the most valuable changes, quotes the evidence behind
+each, and lets you run a one-click experiment to see whether the change worked.
+
+**Problem 9: Reporting takes effort.**
+*Today:* "what did you work on this week?" is rebuilt from memory.
+*Why it hurts:* it wastes time and loses detail. *What the dashboard does:* the
+Weekly Report builds it from the session titles Claude Code already stores and
+copies it as Markdown in one click.
+
+**Problem 10: The tools that last need infrastructure or admin access.**
+*Today:* durable analytics means setting up OpenTelemetry with a collector and
+dashboards, or having an Owner/Admin role on a Team or Enterprise plan.
+*Why it hurts:* an individual developer has neither, and the organisational
+view is about people, not about helping a person improve. *What the dashboard
+does:* needs one Python file and no accounts. The developer owns the data and
+the view.
+
+**Problem 11: Raw numbers do not tell you what to do.**
+*Today:* even good data stays a table of figures. *Why it hurts:* people stop
+looking when the data does not say what to change. *What the dashboard does:*
+every page ends in plain language, and the Advisor turns the data into a short
+list of moves ("only 38 % of your edit sessions were verified, so ask Claude to
+run the tests").
+
+**Problem 12: Raw log numbers cannot be trusted as they are.**
+*Today:* Claude Code's logs repeat the same response more than once, so naive
+counting inflates tokens and cost. Different Claude Code versions also write
+different fields. *Why it hurts:* a dashboard built on inflated or missing data
+misleads. *What the dashboard does:* de-duplicates every response, and the Data
+Health page shows which signals exist in *your* logs, so a missing signal shows
+as "not in your logs" instead of a quiet zero.
+
+**Problem 13: Seeing yourself should not mean sending yourself somewhere.**
+*Today:* many analytics approaches assume prompts and code go to a server.
+*Why it hurts:* that is a non-starter for a lot of engineers and
+organisations. *What the dashboard does:* nothing leaves the machine, it calls
+no API, and it works offline.
+
+### 2.5 What it costs to leave this unsolved
+
+For the **developer**: slower skill growth, unchecked AI-written code reaching
+review, wasted time in failure loops, wasted spend they cannot explain, and
+unused features that would have saved effort.
+
+For the **organisation**: very uneven practice between people with the same
+licence, no way to know whether the tool is being used deeply or barely
+touched, and no safe, consent-based way to learn from the people who use it
+best. The tool is paid for either way. Whether it pays off depends on habits
+that nobody can currently see.
+
+### 2.6 What this is, and what it is not
+
+The dashboard **complements** the built-in commands. It does not replace them:
+
+- Keep using `/context` to manage the live context window, and `/usage` for the
+  authoritative view of plan limits.
+- Keep using the Console and your cloud billing console for anything that
+  affects an invoice. The dashboard's cost is an estimate.
+- Organisations that need centralised monitoring still have OpenTelemetry and
+  admin analytics for that job.
+
+The dashboard fills the gap **between** them: a personal, local, historical
+view that joins usage, habits, quality and cost in one place.
 
 ---
 
@@ -102,6 +255,22 @@ readable.
 > **Every time you use Claude Code, it saves a detailed diary of the session
 > on your machine. This dashboard reads that diary, does the maths locally, and
 > shows you a mirror.**
+
+**From many commands to one dashboard**
+
+```
+  Today                                         With the dashboard
+  ─────                                         ──────────────────
+  /usage    cost, current session ┐
+  /context  window, right now     │
+  /status   version, account      │
+  /insights narrative (uses tokens)├──────────▶  ONE page, one date range
+  /resume   list of sessions      │              · usage + cost + history
+  /memory /hooks /agents /mcp     │              · habits + adoption level
+  status line (live, not kept)    │              · flow + quality + value
+  OpenTelemetry (needs a backend) │              · ranked advice
+  admin console (admins only)     ┘              · all on your own machine
+```
 
 The mirror is meant to be:
 
@@ -227,6 +396,13 @@ pages marked "Yes". Everything, including the project detail view, respects it.
   much Claude produced); lines of code per day; **exploration vs building**.
 - **Exports:** copy a text summary, download a CSV of daily numbers, or the
   full JSON.
+- **Plan usage limits:** your real 5-hour and 7-day plan usage, the same
+  percentages Claude Code reports, shown beside your history instead of only in
+  the moment. They are captured through Claude Code's status-line hook (set up
+  once with `python dev_token_dashboard.py --setup-notifications`) and are
+  available on Pro and Max plans. The card flags a stale reading, and falls back
+  to a clearly labelled estimate when none exists. On Windows, optional toast
+  notifications can warn you as you cross usage milestones.
 
 **How the main numbers are calculated**
 - *Tokens* are summed per Claude response and **de-duplicated** by message ID
@@ -543,8 +719,14 @@ Things worth stating plainly:
 
 ## 8. How it helps the individual developer
 
+Section 2 listed what is missing. This section shows what the developer gets
+back, first as a quick lookup and then as situations.
+
+### 8.1 Quick lookup
+
 | What the developer wants | Where they get it |
 |---|---|
+| "How much did I use it, per project and model?" | **Overview**, **Tools & Models**, **Projects** |
 | "Am I getting better at this?" | **My Adoption** level, pillar trends, 12-week chart |
 | "What should I try next?" | **Advisor** and **Your next 3 moves** |
 | "Why did that session cost so much?" | **Value** cost spikes and the session behind them |
@@ -554,16 +736,58 @@ Things worth stating plainly:
 | "Am I overworking?" | **Time & Focus** quiet-hours and weekend share |
 | "Are my prompts any good?" | **Flow** clean first-pass turns and **Description** fluency |
 | "What features am I missing?" | **My Adoption** feature checklist |
+| "Am I close to my plan limit?" | **Overview** plan usage card, with optional notifications |
 | "Can I trust these numbers?" | **Data Health** and the confidence badges |
 
-**A day in the life (illustrative).** A developer opens the Advisor on Friday and
-sees that only 38 % of their edit sessions ended with a test or build run. They
-start the one-click experiment, begin adding "run the tests and fix failures" to
-their prompts, and over the following weeks watch the Quality page climb. The
-same developer notices that Range is their weakest pillar because they have
-never used plan mode or task lists, and tries both on the next risky change.
-No manager was involved, no data left the laptop, and the change came from
-their own evidence.
+### 8.2 What changes for the developer
+
+| Before | After |
+|---|---|
+| Ten places to look, each a snapshot | One page with history and a date selector |
+| "I think I'm using it well" | A score, a level and a trend |
+| Cost is a number | Cost per 100 lines, per verified session, with spikes explained |
+| Quality is a feeling | Verified-after-edit and first-run pass, measured |
+| Unknown features stay unknown | A checklist of what you have and have not tried |
+| Advice means reading and guessing | Ranked moves with the evidence quoted |
+| Monday standup from memory | One click to a Markdown update |
+| Data sent somewhere to be analysed | Everything stays on your laptop |
+
+### 8.3 Situations (illustrative)
+
+These are examples of how the tool is meant to be used. They are not measured
+results.
+
+**The newcomer.** A developer in their first weeks opens My Adoption and sees
+"Building your baseline", then Explorer. The checklist shows nine unused
+features and the coach suggests two of them, so they learn what exists by
+using it, not by reading a manual.
+
+**The heavy user who is not getting better.** Someone uses Claude every day and
+feels productive, yet sits at Power user. The Advisor shows only 38 % of edit
+sessions ended with a test or build run. They start the one-click experiment,
+begin adding "run the tests and fix failures" to their prompts, and over the
+following weeks watch the Quality page climb. The same developer notices Range is
+their weakest pillar because they have never used plan mode or task lists, and
+tries both on the next risky change.
+
+**The developer who keeps getting stuck.** Flow shows two failure loops last
+week and a 90th-percentile session of more than three hours. The Advisor
+suggests starting a fresh session per task. They do, and the stuck count falls.
+
+**The cost-conscious developer.** Value shows a spike day, names the session
+behind it, and shows that most top-tier model spend went to sessions where
+nothing was edited. They switch to a lighter model for exploration.
+
+**The developer who is working too late.** Time & Focus shows a quarter of
+messages after 23:00 and most weekends touched. The coach ranks "protect your
+evenings" first. It is a quiet, private nudge, not a report to anyone.
+
+**The developer who needs a status update.** On Friday afternoon they open the
+Weekly Report, review what they worked on by project, copy it as Markdown and
+paste it into the team channel.
+
+In each case no manager was involved, no data left the laptop, and the change
+came from the developer's own evidence.
 
 **Why this changes behaviour:** the feedback is immediate, it is about *your*
 habits, it names a specific action, and there is no audience to perform for.
@@ -607,6 +831,16 @@ Being direct about what it does not do:
 - **Scores are heuristics.** Weights and thresholds are judgement calls, and
   they should be tuned once real usage data has been reviewed.
 - **Corrections are detected at the start of a prompt only.**
+- **It can only see logs that still exist.** Claude Code's documentation says
+  session transcripts are kept for 30 days by default (the `cleanupPeriodDays`
+  setting). If your logs are cleaned up, "all time" means "all that remains".
+  Check or raise the setting if you want longer history.
+- **Plan usage needs the status-line hook and a subscription.** The live 5-hour
+  and 7-day figures are captured by a hook that runs only while a Claude Code
+  session is active, and Claude Code provides them for Pro and Max plans. Toast
+  notifications are Windows-only for now.
+- **Like `/usage`'s plan view, it reads this machine only.** Work done on other
+  devices or in claude.ai is not included.
 - **Some signals depend on the Claude Code version.** Permission "reject"
   values, compaction events and subagent log lines have not yet been confirmed
   on a wide range of real logs. Data Health shows what each installation has.
@@ -624,6 +858,7 @@ before anything is aggregated.**
 | **Calibrate thresholds on real data.** Review scores from several developers' real logs and adjust targets and level boundaries. | The weights are hand-picked and should be validated, not trusted. |
 | **"Copy my adoption report" button.** A Markdown summary of level, pillars, what changed and next moves. | Lets a developer share their own progress on their own terms. |
 | **Confirm unverified log signals** on more Claude Code versions. | Fewer "not in your logs" gaps. |
+| **Keep a personal history that outlives log cleanup.** Save small daily roll-ups (numbers only) next to the dashboard. | Trends survive even when old transcripts are deleted. |
 | **Saved experiments over longer periods,** with a before/after summary. | Closes the loop on behaviour change. |
 
 ### Medium term: broaden the lens
@@ -639,6 +874,7 @@ before anything is aggregated.**
 |---|---|---|
 | **Voluntary, anonymised team summary.** Each developer may choose to export a small summary file (scores and trends only, no prompts, titles or code). | Gives leaders a picture of adoption maturity without surveillance. | Opt-in per person; the file is shown before it is shared; no ranking by name. |
 | **Team-calibrated targets.** Set level thresholds from the team's own distribution. | Fairer than fixed numbers. | Aggregates only. |
+| **Optional import from OpenTelemetry** for organisations that already collect it. | Lets the same pages work from an existing pipeline. | Opt-in; no new data collection. |
 | **Optional links to delivery data** (pull requests, CI results) to test whether better habits go with better outcomes. | Turns "Proxy" signals into evidence. | Explicitly outside the current scope; adds integration and consent work. |
 | **Org-wide learning loop:** share the habits of people whose Quality and Flow improved fastest. | Spreads practice, not just measurement. | Needs voluntary participation. |
 
