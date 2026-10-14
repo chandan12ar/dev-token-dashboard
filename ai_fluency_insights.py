@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Dev Token Dashboard — a fully-local, zero-token-cost dashboard for your Claude Code usage.
+AI Fluency Insights — a fully-local, zero-token-cost dashboard for your Claude Code usage.
 
 It reads the JSONL session logs Claude Code already writes to ~/.claude/projects/
 (no API calls, no tokens consumed) and serves a live auto-refreshing dashboard.
 
 Usage:
-    python dev_token_dashboard.py            # serves on http://localhost:8787
-    python dev_token_dashboard.py --port 9000
-    python dev_token_dashboard.py --dir "C:/Users/you/.claude/projects"
+    python ai_fluency_insights.py            # serves on http://localhost:8787
+    python ai_fluency_insights.py --port 9000
+    python ai_fluency_insights.py --dir "C:/Users/you/.claude/projects"
 
 Requires: Python 3.8+ (standard library only).
 """
@@ -1074,7 +1074,7 @@ def _fmt_k(n):
 def send_windows_toast(title, message):
     """Fire a native Windows toast via the built-in WinRT API through
     powershell.exe — no pip dependency, no module install, matches how
-    Restart-Dashboard.ps1 already shells out to PowerShell."""
+    Restart-Insights.ps1 already shells out to PowerShell."""
     if os.name != "nt":
         return
     ps_script = (
@@ -1085,13 +1085,13 @@ def send_windows_toast(title, message):
         '$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent('
         '[Windows.UI.Notifications.ToastTemplateType]::ToastText02);'
         '$x = $t.GetElementsByTagName("text");'
-        '$x.Item(0).AppendChild($t.CreateTextNode($env:DTD_TOAST_TITLE)) > $null;'
-        '$x.Item(1).AppendChild($t.CreateTextNode($env:DTD_TOAST_MSG)) > $null;'
+        '$x.Item(0).AppendChild($t.CreateTextNode($env:AFI_TOAST_TITLE)) > $null;'
+        '$x.Item(1).AppendChild($t.CreateTextNode($env:AFI_TOAST_MSG)) > $null;'
         '$n = [Windows.UI.Notifications.ToastNotification]::new($t);'
         '[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('
-        '"Dev Token Dashboard").Show($n)'
+        '"AI Fluency Insights").Show($n)'
     )
-    env = dict(os.environ, DTD_TOAST_TITLE=title, DTD_TOAST_MSG=message)
+    env = dict(os.environ, AFI_TOAST_TITLE=title, AFI_TOAST_MSG=message)
     try:
         subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
@@ -2869,7 +2869,7 @@ def ai_reflection(week: dict, question: str) -> dict:
 
 HTML = r"""<!DOCTYPE html>
 <html lang="en"><head>
-<meta charset="utf-8"><title>Dev Token Dashboard</title>
+<meta charset="utf-8"><title>AI Fluency Insights</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <script src="/chart.umd.min.js"></script>
@@ -3487,7 +3487,7 @@ background:var(--fill)}
 <aside class="side">
   <div class="ident">
     <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div>
-    <div class="txt"><div class="nm">Dev Tokens</div><div class="sub">Claude Code analytics</div></div>
+    <div class="txt"><div class="nm">AI Fluency Insights</div><div class="sub">Claude Code analytics</div></div>
   </div>
 
   <nav class="nav" id="nav" aria-label="Sections">
@@ -3879,7 +3879,7 @@ Costs are estimates at public API pricing (incl. cache read/write rates) &mdash;
 </div></div>
 <script>
 /* ══════════════════════════════════════════════════════════════════════
-   Dev Token Dashboard — front end
+   AI Fluency Insights — front end
    Motion model: springs, not durations. Every animation starts from the
    value currently on screen, so it can be grabbed and reversed mid-flight.
    ══════════════════════════════════════════════════════════════════════ */
@@ -5194,7 +5194,12 @@ class Handler(BaseHTTPRequestHandler):
 # onboarding-design.md for the full design.
 # ---------------------------------------------------------------------------
 
-STATUSLINE_MARKER = "dev_token_dashboard_statusline.js"
+STATUSLINE_MARKER = "ai_fluency_insights_statusline.js"
+# Installs made before the rename point at this file; still treated as ours.
+LEGACY_STATUSLINE_MARKER = "dev_token_dashboard_statusline.js"
+# Windows logon task names: current, and the pre-rename one (cleaned up on install/uninstall).
+STARTUP_TASK = "AIFluencyInsights"
+LEGACY_STARTUP_TASK = "DevTokenDashboard"
 
 
 def claude_config_dir():
@@ -5221,21 +5226,26 @@ def classify_statusline(settings):
     command = sl.get("command") if isinstance(sl, dict) else None
     if not isinstance(command, str) or not command:
         return "missing"
-    if STATUSLINE_MARKER in command:
+    if STATUSLINE_MARKER in command or LEGACY_STATUSLINE_MARKER in command:
         return "ours"
     return "foreign"
 
 
 def merge_statusline_config(settings, statusline_js_path):
     new_settings = dict(settings)
-    if classify_statusline(settings) == "missing":
+    kind = classify_statusline(settings)
+    if kind == "missing":
         new_settings["statusLine"] = {
             "type": "command",
             "command": f'node "{statusline_js_path}"',
             "refreshInterval": 30,
         }
     else:  # "ours" -- caller must not call this for "foreign"
-        new_settings["statusLine"] = dict(settings["statusLine"], refreshInterval=30)
+        sl = dict(settings["statusLine"], refreshInterval=30)
+        if LEGACY_STATUSLINE_MARKER in sl["command"]:
+            # Pre-rename install: point it at the new script path.
+            sl["command"] = f'node "{statusline_js_path}"'
+        new_settings["statusLine"] = sl
     return new_settings
 
 
@@ -5255,14 +5265,14 @@ def write_settings_with_backup(settings_path, new_settings):
     return backup_path
 
 
-# Written verbatim to <claude_config_dir>/dev_token_dashboard_statusline.js by
+# Written verbatim to <claude_config_dir>/ai_fluency_insights_statusline.js by
 # run_setup_notifications() -- never to statusline.js or any user-chosen path.
 # Trimmed from the hand-written ~/.claude/statusline.js already in use on the
 # maintainer's machine: same merge-onto-previous-snapshot side effect, plus a
 # minimal one-line status output for users who had no statusLine at all.
-BUNDLED_STATUSLINE_JS = r"""// dev-token-dashboard:managed-statusline
+BUNDLED_STATUSLINE_JS = r"""// ai-fluency-insights:managed-statusline
 // Captures Anthropic's real rate_limits (five_hour/seven_day) for
-// dev_token_dashboard.py's plan-usage panel and toast notifications.
+// ai_fluency_insights.py's plan-usage panel and toast notifications.
 // See docs/DASHBOARD_GUIDE.md#plan-usage-limits.
 const fs = require('fs');
 const os = require('os');
@@ -5466,11 +5476,15 @@ def main():
         if os.name != "nt":
             sys.exit("Startup install is Windows-only.")
         import subprocess
-        task = "DevTokenDashboard"
+        task = STARTUP_TASK
+        quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if args.uninstall_startup:
             subprocess.run(["schtasks", "/Delete", "/TN", task, "/F"])
+            subprocess.run(["schtasks", "/Delete", "/TN", LEGACY_STARTUP_TASK, "/F"], **quiet)
             print("Removed logon task.")
             return
+        # Drop the pre-rename task so two copies don't start at logon.
+        subprocess.run(["schtasks", "/Delete", "/TN", LEGACY_STARTUP_TASK, "/F"], **quiet)
         pyw = sys.executable.replace("python.exe", "pythonw.exe")
         if not os.path.exists(pyw):
             pyw = sys.executable
@@ -5480,14 +5494,14 @@ def main():
                             "/SC", "ONLOGON", "/F"])
         if r.returncode == 0:
             print(f"Installed: dashboard will start at logon on port {args.port}.")
-            print("Remove anytime with:  python dev_token_dashboard.py --uninstall-startup")
+            print("Remove anytime with:  python ai_fluency_insights.py --uninstall-startup")
         else:
             print("Failed — try running the terminal as Administrator.")
         return
 
     if not os.path.isdir(args.dir):
         print(f"[!] Log directory not found: {args.dir}")
-        print("    Pass it explicitly:  python dev_token_dashboard.py --dir <path>")
+        print("    Pass it explicitly:  python ai_fluency_insights.py --dir <path>")
         sys.exit(1)
 
     scanner = Scanner(args.dir)
@@ -5503,7 +5517,7 @@ def main():
     Handler.watcher = watcher
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://localhost:{args.port}"
-    print(f"  Dev Token Dashboard running at {url}")
+    print(f"  AI Fluency Insights running at {url}")
     print(f"  Reading logs from: {args.dir}")
     hint = startup_hint()
     if hint:

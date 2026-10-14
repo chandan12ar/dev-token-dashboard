@@ -1,4 +1,10 @@
-# ⚡ Dev Token Dashboard
+# ⚡ AI Fluency Insights
+
+> *Formerly "Dev Token Dashboard".* Renamed because it measures far more than
+> tokens: fluency, flow, quality and value. Existing installs keep working —
+> re-run `python ai_fluency_insights.py --setup-notifications` once to move the
+> statusline hook to the new script name, and `--install-startup` to replace the
+> old Windows logon task.
 
 A **100% local** dashboard for your Claude Code usage. Zero token cost — it
 never calls any API. It reads the session logs Claude Code already saves on
@@ -21,9 +27,9 @@ Estimated. And it needs no Node/npm: just Python, which you already have.
 ## Quick start
 
 ```
-git clone https://github.com/chandan12ar/dev-token-dashboard.git
-cd dev-token-dashboard
-python dev_token_dashboard.py
+git clone https://github.com/chandan12ar/ai-fluency-insights.git
+cd ai-fluency-insights
+python ai_fluency_insights.py
 ```
 
 Opens http://localhost:8787. Requires Python 3.8+ and a machine where
@@ -79,7 +85,7 @@ Inspired by Anthropic's [Reflect with Claude](https://www.anthropic.com/news/ref
 - **Task mix** — sessions auto-classified into feature / bugfix / refactor /
   docs / explore from their AI titles, stacked per day, and included in the
   weekly markdown export
-- **Fix** — `Restart-Dashboard.ps1` now also kills Store-Python processes
+- **Fix** — `Restart-Insights.ps1` now also kills Store-Python processes
   (`pythonw3.11.exe`), which previously survived restarts holding stale code
 
 All of it 100% local and zero-token, except the two explicit `claude -p` buttons.
@@ -101,7 +107,7 @@ All of it 100% local and zero-token, except the two explicit `claude -p` buttons
   or the full stats payload as **JSON**
 - **Sturdier AI summary** — resolves the `claude` executable directly,
   5-minute timeout, and real error messages when it fails
-- **Restart scripts** — `Restart-Dashboard.bat` kills every running copy
+- **Restart scripts** — `Restart-Insights.bat` kills every running copy
   and relaunches a fresh windowless instance (handy after editing the script)
 - **Accuracy fixes** — session count/average now follow the selected range,
   timestamps are bucketed in your local timezone, and avg prompt words is

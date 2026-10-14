@@ -1,4 +1,4 @@
-# Dev Token Dashboard — Problem, Solution and Roadmap
+# AI Fluency Insights — Problem, Solution and Roadmap
 
 *A plain-language report on what problem this tool solves, what every page does,
 how every number is calculated, and where it can go next.*
@@ -28,7 +28,7 @@ AI coding assistants are now part of daily engineering work. Using them well
 is a skill, and like any skill it improves faster when you can see what you are
 doing. Today, almost nobody can.
 
-**The Dev Token Dashboard turns the log files Claude Code already writes on
+**AI Fluency Insights turns the log files Claude Code already writes on
 each developer's machine into a private, personal view of how they use it:
 how much, how well, and what to try next.**
 
@@ -38,7 +38,7 @@ how much, how well, and what to try next.**
   separate commands and screens, most of them one-session snapshots. This puts
   usage, cost, habits, quality and history in a single dashboard with one date
   range and one set of definitions ([section 2](#2-the-problem)).
-- **Zero setup cost.** `python dev_token_dashboard.py` and open
+- **Zero setup cost.** `python ai_fluency_insights.py` and open
   `http://localhost:8787`. No installs, no accounts, no admin rights.
 - **Built for the developer first.** It compares a person only with their own
   past. It never ranks people against each other.
@@ -399,7 +399,7 @@ pages marked "Yes". Everything, including the project detail view, respects it.
 - **Plan usage limits:** your real 5-hour and 7-day plan usage, the same
   percentages Claude Code reports, shown beside your history instead of only in
   the moment. They are captured through Claude Code's status-line hook (set up
-  once with `python dev_token_dashboard.py --setup-notifications`) and are
+  once with `python ai_fluency_insights.py --setup-notifications`) and are
   available on Pro and Max plans. The card flags a stale reading, and falls back
   to a clearly labelled estimate when none exists. On Windows, optional toast
   notifications can warn you as you cross usage milestones.

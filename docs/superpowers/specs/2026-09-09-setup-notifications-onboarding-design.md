@@ -1,7 +1,7 @@
 # Setup/onboarding path for accurate plan-usage notifications
 
 **Status:** approved for implementation planning
-**Author:** Claude (dev-token-dashboard session), with Chandan AR
+**Author:** Claude (ai-fluency-insights session), with Chandan AR
 **Date:** 2026-09-09
 
 ## Problem
@@ -50,7 +50,7 @@ dead-code bug (`NOTIFY["enabled"]` is defined but never checked).
 
 ## New files owned by this feature
 
-- `~/.claude/dev_token_dashboard_statusline.js` — the bundled statusline
+- `~/.claude/ai_fluency_insights_statusline.js` — the bundled statusline
   script this feature writes, **only** under this dashboard-namespaced
   filename. It never writes to `~/.claude/statusline.js` or any other
   path a user might have created by hand, so it can never silently
@@ -63,7 +63,7 @@ dead-code bug (`NOTIFY["enabled"]` is defined but never checked).
 ### Entry point
 
 ```
-python dev_token_dashboard.py --setup-notifications [--dry-run]
+python ai_fluency_insights.py --setup-notifications [--dry-run]
 ```
 
 Follows the existing early-return CLI-action pattern already used by
@@ -89,7 +89,7 @@ one of:
 
 - `"missing"` — no `statusLine` key, or it's not a dict with a `command`.
 - `"ours"` — `statusLine.command` contains the substring
-  `dev_token_dashboard_statusline.js`.
+  `ai_fluency_insights_statusline.js`.
 - `"foreign"` — a `statusLine.command` exists and doesn't contain that
   marker.
 
@@ -100,13 +100,13 @@ directly unit-testable with fixture dicts, matching the existing style of
 ### Step 3 — act on the classification
 
 **`missing`:**
-- Print exactly what will be written: the new `dev_token_dashboard_statusline.js`
+- Print exactly what will be written: the new `ai_fluency_insights_statusline.js`
   content (a fixed, short bundled script — see below) and the new
   `statusLine` block:
   ```json
   {
     "type": "command",
-    "command": "node \"<abs path>/dev_token_dashboard_statusline.js\"",
+    "command": "node \"<abs path>/ai_fluency_insights_statusline.js\"",
     "refreshInterval": 30
   }
   ```
@@ -119,7 +119,7 @@ directly unit-testable with fixture dicts, matching the existing style of
   abort with a message instead of hanging on `input()`.
 - On yes: back up `settings.json` (skip the backup step if the file
   doesn't exist yet — nothing to back up), write the new
-  `dev_token_dashboard_statusline.js`, merge the `statusLine` block into
+  `ai_fluency_insights_statusline.js`, merge the `statusLine` block into
   the settings dict (touching no other top-level key), and write
   `settings.json` atomically (temp file + `os.replace`, mirroring
   `save_notify_state`'s existing pattern).
@@ -166,7 +166,7 @@ so one window missing on a given render doesn't blank the other), plus a
 minimal one-line status output (`dir  model  ctx X%  5h X%  wk X%`) so
 users who had no status line at all get a reasonable default, not a
 blank line. First line is a marker comment,
-`// dev-token-dashboard:managed-statusline`, which is what
+`// ai-fluency-insights:managed-statusline`, which is what
 `classify_statusline` keys off of via the filename rather than parsing
 the comment (the filename check is sufficient and simpler; the comment
 is for human readers who open the file).

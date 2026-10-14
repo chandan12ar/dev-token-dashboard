@@ -1,7 +1,7 @@
-"""Tests for dev_token_dashboard.py: notifications and setup, plus the My Adoption,
+"""Tests for ai_fluency_insights.py: notifications and setup, plus the My Adoption,
 Flow, Quality, Value, Advisor and Data Health engines.
 
-Run with:  python -m unittest test_dev_token_dashboard -v
+Run with:  python -m unittest test_ai_fluency_insights -v
 """
 import json
 import os
@@ -11,49 +11,49 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import dev_token_dashboard as dtd
+import ai_fluency_insights as afi
 
 
 class MilestonesCrossedTests(unittest.TestCase):
     def test_single_milestone_crossed(self):
         # 50000/200000 = 25%
-        self.assertEqual(dtd.milestones_crossed(0, 50_000, 200_000), [25])
+        self.assertEqual(afi.milestones_crossed(0, 50_000, 200_000), [25])
 
     def test_no_milestone_crossed_when_still_below(self):
-        self.assertEqual(dtd.milestones_crossed(0, 10_000, 200_000), [])
+        self.assertEqual(afi.milestones_crossed(0, 10_000, 200_000), [])
 
     def test_multiple_milestones_crossed_in_one_jump(self):
-        self.assertEqual(dtd.milestones_crossed(0, 200_000, 200_000),
+        self.assertEqual(afi.milestones_crossed(0, 200_000, 200_000),
                           [25, 50, 75, 85, 100])
 
     def test_already_past_milestone_does_not_refire(self):
         # prev is already above 50% threshold -> no new crossing
-        self.assertEqual(dtd.milestones_crossed(120_000, 130_000, 200_000), [])
+        self.assertEqual(afi.milestones_crossed(120_000, 130_000, 200_000), [])
 
     def test_zero_total_disables_milestones(self):
-        self.assertEqual(dtd.milestones_crossed(0, 999_999, 0), [])
+        self.assertEqual(afi.milestones_crossed(0, 999_999, 0), [])
 
     def test_drop_then_regrowth_refires_same_milestone(self):
         # simulates a context compaction: usage drops, then climbs back past 50%
-        self.assertEqual(dtd.milestones_crossed(90_000, 110_000, 200_000), [50])
+        self.assertEqual(afi.milestones_crossed(90_000, 110_000, 200_000), [50])
 
 
 class StepsCrossedTests(unittest.TestCase):
     def test_single_step_crossed(self):
-        self.assertEqual(dtd.steps_crossed(8_000, 12_000, 10_000), [10_000])
+        self.assertEqual(afi.steps_crossed(8_000, 12_000, 10_000), [10_000])
 
     def test_multiple_steps_crossed_in_one_jump(self):
-        self.assertEqual(dtd.steps_crossed(0, 25_000, 10_000),
+        self.assertEqual(afi.steps_crossed(0, 25_000, 10_000),
                           [10_000, 20_000])
 
     def test_no_step_crossed_when_still_below(self):
-        self.assertEqual(dtd.steps_crossed(1_000, 4_999, 5_000), [])
+        self.assertEqual(afi.steps_crossed(1_000, 4_999, 5_000), [])
 
     def test_no_step_crossed_on_no_increase(self):
-        self.assertEqual(dtd.steps_crossed(10_000, 10_000, 5_000), [])
+        self.assertEqual(afi.steps_crossed(10_000, 10_000, 5_000), [])
 
     def test_zero_step_disables(self):
-        self.assertEqual(dtd.steps_crossed(0, 999_999, 0), [])
+        self.assertEqual(afi.steps_crossed(0, 999_999, 0), [])
 
 
 class WeightedTokensTests(unittest.TestCase):
@@ -65,20 +65,20 @@ class WeightedTokensTests(unittest.TestCase):
     def test_input_and_output_weighted_by_pricing_ratio(self):
         # every PRICING tier prices output at 5x input, so output carries a
         # flat 5x weight regardless of model
-        self.assertEqual(dtd.weighted_tokens(1_000, 100, 0, 0), 1_000 + 500)
+        self.assertEqual(afi.weighted_tokens(1_000, 100, 0, 0), 1_000 + 500)
 
     def test_cache_write_weighted_at_1_25x(self):
-        self.assertEqual(dtd.weighted_tokens(0, 0, 1_000, 0), 1_250)
+        self.assertEqual(afi.weighted_tokens(0, 0, 1_000, 0), 1_250)
 
     def test_cache_read_weighted_at_0_1x(self):
-        self.assertEqual(dtd.weighted_tokens(0, 0, 0, 1_000), 100)
+        self.assertEqual(afi.weighted_tokens(0, 0, 0, 1_000), 100)
 
 
 class SessionTokenTrackerTests(unittest.TestCase):
     def make_tracker(self, **notify_overrides):
-        notify = dict(dtd.NOTIFY)
+        notify = dict(afi.NOTIFY)
         notify.update(notify_overrides)
-        return dtd.SessionTokenTracker(notify=notify)
+        return afi.SessionTokenTracker(notify=notify)
 
     def test_context_pct_event_on_usage(self):
         t = self.make_tracker(context_window=100_000,
@@ -106,7 +106,7 @@ class SessionTokenTrackerTests(unittest.TestCase):
 
     def test_resuming_from_saved_state_does_not_refire(self):
         # simulates restart: tracker rebuilt from persisted totals
-        t = dtd.SessionTokenTracker(notify=dict(dtd.NOTIFY, context_window=0,
+        t = afi.SessionTokenTracker(notify=dict(afi.NOTIFY, context_window=0,
                                                  session_step=10_000,
                                                  task_step=0),
                                      session_total=9_500)
@@ -122,21 +122,21 @@ class PlanWindowTrackerTests(unittest.TestCase):
     WINDOW_SECONDS = 5 * 3600
 
     def test_first_event_starts_window_and_may_cross_milestone(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         events = t.add(ts_epoch=1_000, tokens=30_000)
         self.assertEqual(events, [25])
         self.assertEqual(t.window_start, 1_000)
         self.assertEqual(t.window_total, 30_000)
 
     def test_second_event_within_window_accumulates(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         t.add(1_000, 30_000)
         events = t.add(1_000 + 3600, 30_000)  # 60% total now
         self.assertEqual(events, [50])
         self.assertEqual(t.window_total, 60_000)
 
     def test_event_at_exactly_5h_starts_a_new_window(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         t.add(0, 90_000)
         events = t.add(self.WINDOW_SECONDS, 10_000)
         self.assertEqual(t.window_start, self.WINDOW_SECONDS)
@@ -144,19 +144,19 @@ class PlanWindowTrackerTests(unittest.TestCase):
         self.assertEqual(events, [])  # 10% of the fresh window, no crossing
 
     def test_event_just_under_5h_stays_in_same_window(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         t.add(0, 10_000)
         t.add(self.WINDOW_SECONDS - 1, 10_000)
         self.assertEqual(t.window_start, 0)
         self.assertEqual(t.window_total, 20_000)
 
     def test_zero_ceiling_disables_milestones(self):
-        t = dtd.PlanWindowTracker(ceiling=0)
+        t = afi.PlanWindowTracker(ceiling=0)
         events = t.add(0, 50_000)
         self.assertEqual(events, [])
 
     def test_pct_caps_at_100(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         t.add(0, 150_000)
         self.assertEqual(t.pct(now_epoch=100), 100)
 
@@ -168,41 +168,41 @@ class PlanWindowTrackerTests(unittest.TestCase):
         # the exact "8% used, resets in 0h 0m" glitch seen in production:
         # resets_in_seconds() correctly says the window is over, but pct()
         # was still dividing the stale window_total by the ceiling.
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         t.add(0, 80_000)
         expired_now = self.WINDOW_SECONDS + 500
         self.assertEqual(t.resets_in_seconds(expired_now), 0)
         self.assertEqual(t.pct(now_epoch=expired_now), 0)
 
     def test_resets_in_seconds_counts_down_from_window_start(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         t.add(1_000, 10_000)
         self.assertEqual(t.resets_in_seconds(now_epoch=1_000 + 3600),
                           self.WINDOW_SECONDS - 3600)
 
     def test_resets_in_seconds_floors_at_zero_past_the_boundary(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000)
+        t = afi.PlanWindowTracker(ceiling=100_000)
         t.add(0, 10_000)
         self.assertEqual(t.resets_in_seconds(now_epoch=self.WINDOW_SECONDS + 500), 0)
 
     def test_state_round_trips_into_a_new_tracker(self):
-        t = dtd.PlanWindowTracker(ceiling=100_000, window_start=500, window_total=20_000)
-        restored = dtd.PlanWindowTracker(ceiling=100_000, **t.state())
+        t = afi.PlanWindowTracker(ceiling=100_000, window_start=500, window_total=20_000)
+        restored = afi.PlanWindowTracker(ceiling=100_000, **t.state())
         self.assertEqual(restored.window_start, 500)
         self.assertEqual(restored.window_total, 20_000)
 
 
 class NotifyStatePersistenceTests(unittest.TestCase):
     def test_missing_file_returns_empty_dict(self):
-        self.assertEqual(dtd.load_notify_state("/no/such/path.json"), {})
+        self.assertEqual(afi.load_notify_state("/no/such/path.json"), {})
 
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "state.json")
             state = {"sess-1": {"session_total": 12_345, "task_total": 0,
                                  "last_context_usage": 12_345}}
-            dtd.save_notify_state(path, state)
-            self.assertEqual(dtd.load_notify_state(path), state)
+            afi.save_notify_state(path, state)
+            self.assertEqual(afi.load_notify_state(path), state)
 
 
 class NotificationWatcherTests(unittest.TestCase):
@@ -210,7 +210,7 @@ class NotificationWatcherTests(unittest.TestCase):
     def _write_jsonl(path, entries):
         with open(path, "w", encoding="utf-8") as f:
             for obj in entries:
-                f.write(dtd.json.dumps(obj) + "\n")
+                f.write(afi.json.dumps(obj) + "\n")
 
     @staticmethod
     def _usage_entry(sid, input_tokens, output_tokens):
@@ -231,11 +231,11 @@ class NotificationWatcherTests(unittest.TestCase):
                                [self._usage_entry(sid, 20_000, 0)])
             self._write_jsonl(os.path.join(proj, "b.jsonl"),
                                [self._usage_entry(sid, 20_000, 0)])
-            scanner = dtd.Scanner(root)
-            notify = dict(dtd.NOTIFY, context_window=0,
+            scanner = afi.Scanner(root)
+            notify = dict(afi.NOTIFY, context_window=0,
                           session_step=10_000, task_step=0,
                           active_window_min=999_999)
-            watcher = dtd.NotificationWatcher(
+            watcher = afi.NotificationWatcher(
                 scanner, notify=notify,
                 state_path=os.path.join(root, "state.json"))
             watcher.poll_once()
@@ -249,24 +249,24 @@ class NotificationWatcherTests(unittest.TestCase):
             path = os.path.join(proj, "a.jsonl")
             self._write_jsonl(path, [self._usage_entry(sid, 5_000, 0)])
             state_path = os.path.join(root, "state.json")
-            notify = dict(dtd.NOTIFY, context_window=0,
+            notify = dict(afi.NOTIFY, context_window=0,
                           session_step=10_000, task_step=0,
                           active_window_min=999_999)
 
-            scanner1 = dtd.Scanner(root)
-            w1 = dtd.NotificationWatcher(scanner1, notify=notify, state_path=state_path)
+            scanner1 = afi.Scanner(root)
+            w1 = afi.NotificationWatcher(scanner1, notify=notify, state_path=state_path)
             w1.poll_once()  # baseline poll: session_total becomes 5000
 
             # simulate a dashboard restart: a brand-new watcher and Scanner,
             # same on-disk logs and same persisted state file
-            scanner2 = dtd.Scanner(root)
-            w2 = dtd.NotificationWatcher(scanner2, notify=notify, state_path=state_path)
+            scanner2 = afi.Scanner(root)
+            w2 = afi.NotificationWatcher(scanner2, notify=notify, state_path=state_path)
             w2.poll_once()
 
             # no new entries since the restart, so w2 shouldn't need to
             # touch this session at all — its persisted total must survive
             # unchanged (not doubled) in the state file it re-saves
-            saved = dtd.load_notify_state(state_path)
+            saved = afi.load_notify_state(state_path)
             self.assertEqual(saved["sessions"][sid]["session_total"], 5_000)
             self.assertEqual(w2.recent_events, [])
 
@@ -278,27 +278,27 @@ class NotificationWatcherTests(unittest.TestCase):
             path = os.path.join(proj, "a.jsonl")
             self._write_jsonl(path, [self._usage_entry(sid, 5_000, 0)])
             state_path = os.path.join(root, "state.json")
-            notify = dict(dtd.NOTIFY, context_window=0,
+            notify = dict(afi.NOTIFY, context_window=0,
                           session_step=10_000, task_step=0,
                           active_window_min=999_999)
 
-            scanner1 = dtd.Scanner(root)
-            w1 = dtd.NotificationWatcher(scanner1, notify=notify, state_path=state_path)
+            scanner1 = afi.Scanner(root)
+            w1 = afi.NotificationWatcher(scanner1, notify=notify, state_path=state_path)
             w1.poll_once()  # sid becomes known, session_total=5000
 
             # this poll only looks at files modified in the last 0 minutes,
             # so sid's file is now "outside the active window" and won't be
             # touched — its persisted total must not be lost
-            scanner2 = dtd.Scanner(root)
-            w2 = dtd.NotificationWatcher(
+            scanner2 = afi.Scanner(root)
+            w2 = afi.NotificationWatcher(
                 scanner2, notify=dict(notify, active_window_min=0),
                 state_path=state_path)
             w2.poll_once()
 
-            saved = dtd.load_notify_state(state_path)
+            saved = afi.load_notify_state(state_path)
             self.assertEqual(saved["sessions"][sid]["session_total"], 5_000)
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_new_usage_after_baseline_fires_normally(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             proj = os.path.join(root, "proj")
@@ -306,18 +306,18 @@ class NotificationWatcherTests(unittest.TestCase):
             sid = "sess-1"
             path = os.path.join(proj, "a.jsonl")
             self._write_jsonl(path, [self._usage_entry(sid, 5_000, 0)])
-            scanner = dtd.Scanner(root)
-            notify = dict(dtd.NOTIFY, context_window=0,
+            scanner = afi.Scanner(root)
+            notify = dict(afi.NOTIFY, context_window=0,
                           session_step=10_000, task_step=0,
                           active_window_min=999_999)
-            watcher = dtd.NotificationWatcher(
+            watcher = afi.NotificationWatcher(
                 scanner, notify=notify,
                 state_path=os.path.join(root, "state.json"))
             watcher.poll_once()
             self.assertEqual(watcher.recent_events, [])  # baseline poll
 
             with open(path, "a", encoding="utf-8") as f:
-                f.write(dtd.json.dumps(self._usage_entry(sid, 6_000, 0)) + "\n")
+                f.write(afi.json.dumps(self._usage_entry(sid, 6_000, 0)) + "\n")
             watcher.poll_once()
             kinds = [e["message"] for e in watcher.recent_events]
             self.assertTrue(any("11.0k" in m or "10.0k" in m for m in kinds),
@@ -332,7 +332,7 @@ class PlanWindowNotificationTests(unittest.TestCase):
     def _write_jsonl(path, entries):
         with open(path, "w", encoding="utf-8") as f:
             for obj in entries:
-                f.write(dtd.json.dumps(obj) + "\n")
+                f.write(afi.json.dumps(obj) + "\n")
 
     @staticmethod
     def _usage_entry(sid, input_tokens, output_tokens, ts):
@@ -342,7 +342,7 @@ class PlanWindowNotificationTests(unittest.TestCase):
                                        "cache_creation_input_tokens": 0,
                                        "cache_read_input_tokens": 0}}}
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_plan_pct_combines_sessions_and_coalesces_per_poll(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             proj = os.path.join(root, "proj")
@@ -353,21 +353,21 @@ class PlanWindowNotificationTests(unittest.TestCase):
                 "sess-a", 1_000, 0, "2026-01-01T00:00:00Z")])
             self._write_jsonl(path_b, [self._usage_entry(
                 "sess-b", 1_000, 0, "2026-01-01T00:00:01Z")])
-            notify = dict(dtd.NOTIFY, context_window=0, session_step=0, task_step=0,
+            notify = dict(afi.NOTIFY, context_window=0, session_step=0, task_step=0,
                           window_ceiling=10_000, active_window_min=999_999)
             state_path = os.path.join(root, "state.json")
-            scanner = dtd.Scanner(root)
-            watcher = dtd.NotificationWatcher(scanner, notify=notify, state_path=state_path)
+            scanner = afi.Scanner(root)
+            watcher = afi.NotificationWatcher(scanner, notify=notify, state_path=state_path)
             watcher.poll_once()  # baseline: both sessions newly discovered, silent
             self.assertEqual(watcher.recent_events, [])
 
             # new usage lands on both sessions between polls; combined they
             # cross 25/50/75% of the ceiling in one poll -> one toast, not three
             with open(path_a, "a", encoding="utf-8") as f:
-                f.write(dtd.json.dumps(self._usage_entry(
+                f.write(afi.json.dumps(self._usage_entry(
                     "sess-a", 4_000, 0, "2026-01-01T00:01:00Z")) + "\n")
             with open(path_b, "a", encoding="utf-8") as f:
-                f.write(dtd.json.dumps(self._usage_entry(
+                f.write(afi.json.dumps(self._usage_entry(
                     "sess-b", 4_000, 0, "2026-01-01T00:01:01Z")) + "\n")
             watcher.poll_once()
 
@@ -377,7 +377,7 @@ class PlanWindowNotificationTests(unittest.TestCase):
             self.assertIn("75%", plan_events[0]["message"])
             self.assertEqual(mock_toast.call_count, 1)
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_plan_window_state_persists_across_restart(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             proj = os.path.join(root, "proj")
@@ -385,25 +385,25 @@ class PlanWindowNotificationTests(unittest.TestCase):
             path = os.path.join(proj, "a.jsonl")
             self._write_jsonl(path, [self._usage_entry(
                 "sess-1", 1_000, 0, "2026-01-01T00:00:00Z")])
-            notify = dict(dtd.NOTIFY, context_window=0, session_step=0, task_step=0,
+            notify = dict(afi.NOTIFY, context_window=0, session_step=0, task_step=0,
                           window_ceiling=10_000, active_window_min=999_999)
             state_path = os.path.join(root, "state.json")
 
-            scanner1 = dtd.Scanner(root)
-            w1 = dtd.NotificationWatcher(scanner1, notify=notify, state_path=state_path)
+            scanner1 = afi.Scanner(root)
+            w1 = afi.NotificationWatcher(scanner1, notify=notify, state_path=state_path)
             w1.poll_once()  # baseline: sess-1 newly discovered, plan window untouched
 
             with open(path, "a", encoding="utf-8") as f:
-                f.write(dtd.json.dumps(self._usage_entry(
+                f.write(afi.json.dumps(self._usage_entry(
                     "sess-1", 3_000, 0, "2026-01-01T00:01:00Z")) + "\n")
             w1.poll_once()  # sess-1 now known -> 3000 tokens added to the plan window
 
-            saved = dtd.load_notify_state(state_path)
+            saved = afi.load_notify_state(state_path)
             self.assertEqual(saved["plan_window"]["window_total"], 3_000)
 
             # simulate restart: fresh watcher, same on-disk state
-            scanner2 = dtd.Scanner(root)
-            w2 = dtd.NotificationWatcher(scanner2, notify=notify, state_path=state_path)
+            scanner2 = afi.Scanner(root)
+            w2 = afi.NotificationWatcher(scanner2, notify=notify, state_path=state_path)
             self.assertEqual(w2.plan_tracker.window_total, 3_000)
 
 
@@ -413,31 +413,31 @@ class LoadRateLimitsTests(unittest.TestCase):
     unavailable rather than serve a number that's stopped moving."""
 
     def test_missing_file_returns_none(self):
-        self.assertIsNone(dtd.load_rate_limits("/no/such/path.json"))
+        self.assertIsNone(afi.load_rate_limits("/no/such/path.json"))
 
     def test_fresh_file_returns_data(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "rl.json")
             data = {"rate_limits": {"five_hour": {"used_percentage": 23.5}},
                      "captured_at": 1000.0}
-            dtd.save_notify_state(path, data)
-            self.assertEqual(dtd.load_rate_limits(path, now=1000.0 + 60), data)
+            afi.save_notify_state(path, data)
+            self.assertEqual(afi.load_rate_limits(path, now=1000.0 + 60), data)
 
     def test_stale_file_returns_none(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "rl.json")
             data = {"rate_limits": {"five_hour": {"used_percentage": 23.5}},
                      "captured_at": 1000.0}
-            dtd.save_notify_state(path, data)
-            stale_now = 1000.0 + dtd.RATE_LIMITS_STALE_SECONDS + 1
-            self.assertIsNone(dtd.load_rate_limits(path, now=stale_now))
+            afi.save_notify_state(path, data)
+            stale_now = 1000.0 + afi.RATE_LIMITS_STALE_SECONDS + 1
+            self.assertIsNone(afi.load_rate_limits(path, now=stale_now))
 
     def test_corrupt_file_returns_none(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "rl.json")
             with open(path, "w", encoding="utf-8") as f:
                 f.write("{not json")
-            self.assertIsNone(dtd.load_rate_limits(path))
+            self.assertIsNone(afi.load_rate_limits(path))
 
 
 class OfficialRateLimitNotificationTests(unittest.TestCase):
@@ -447,9 +447,9 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
     milestones already seen before a restart."""
 
     def _watcher(self, root, rate_limits_path):
-        scanner = dtd.Scanner(root)
-        return dtd.NotificationWatcher(
-            scanner, notify=dict(dtd.NOTIFY, active_window_min=999_999),
+        scanner = afi.Scanner(root)
+        return afi.NotificationWatcher(
+            scanner, notify=dict(afi.NOTIFY, active_window_min=999_999),
             state_path=os.path.join(root, "state.json"),
             rate_limits_path=rate_limits_path)
 
@@ -457,9 +457,9 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
         rl = {"five_hour": {"used_percentage": five_pct, "resets_at": 9_999_999_999}}
         if seven_pct is not None:
             rl["seven_day"] = {"used_percentage": seven_pct, "resets_at": 9_999_999_999}
-        dtd.save_notify_state(path, {
+        afi.save_notify_state(path, {
             "rate_limits": rl,
-            "captured_at": captured_at if captured_at is not None else dtd.time.time(),
+            "captured_at": captured_at if captured_at is not None else afi.time.time(),
         })
 
     def test_snapshot_prefers_official_over_estimate_when_fresh(self):
@@ -475,12 +475,12 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
     def test_snapshot_reports_capture_age_for_transparency(self):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
-            self._write_rl(rl_path, 81, seven_pct=11, captured_at=dtd.time.time() - 300)
+            self._write_rl(rl_path, 81, seven_pct=11, captured_at=afi.time.time() - 300)
             w = self._watcher(root, rl_path)
             snap = w.plan_window_snapshot()
             self.assertEqual(snap["captured_age_min"], 5)
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_85pct_milestone_fires_not_90(self, mock_toast):
         # the dashboard's requested milestones are 25/50/75/85/100, not the
         # generic MILESTONES default of ...90... from earlier iterations
@@ -497,7 +497,7 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             self.assertEqual(len(official_events), 1, w.recent_events)
             self.assertIn("85%", official_events[0]["message"])
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_weekly_uses_20_40_60_80_100_not_5h_milestones(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
@@ -514,7 +514,7 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             self.assertEqual(len(weekly_events), 1, w.recent_events)
             self.assertIn("40%", weekly_events[0]["message"])
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_5h_and_weekly_milestones_are_independent(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
@@ -544,7 +544,7 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
         # the local estimate.
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
-            stale_at = dtd.time.time() - dtd.RATE_LIMITS_STALE_SECONDS - 3600
+            stale_at = afi.time.time() - afi.RATE_LIMITS_STALE_SECONDS - 3600
             self._write_rl(rl_path, 42, seven_pct=17, captured_at=stale_at)
             w = self._watcher(root, rl_path)
             snap = w.plan_window_snapshot()
@@ -560,17 +560,17 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
         # showing nothing.
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
-            dtd.save_notify_state(rl_path, {
+            afi.save_notify_state(rl_path, {
                 "rate_limits": {"five_hour": {"used_percentage": 91,
-                                               "resets_at": dtd.time.time() - 60}},
-                "captured_at": dtd.time.time() - dtd.RATE_LIMITS_STALE_SECONDS - 3600,
+                                               "resets_at": afi.time.time() - 60}},
+                "captured_at": afi.time.time() - afi.RATE_LIMITS_STALE_SECONDS - 3600,
             })
             w = self._watcher(root, rl_path)
             snap = w.plan_window_snapshot()
             self.assertEqual(snap["source"], "official")
             self.assertEqual(snap["pct"], 0)
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_first_sighting_sets_baseline_without_firing(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
@@ -580,7 +580,7 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             self.assertEqual(w.recent_events, [])
             mock_toast.assert_not_called()
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_crossing_a_milestone_fires_once(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
@@ -596,7 +596,7 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             self.assertIn("75%", official_events[0]["message"])
             self.assertEqual(mock_toast.call_count, 1)
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_same_window_does_not_refire_on_noisy_official_pct(self, mock_toast):
         # Anthropic's reported used_percentage for the *same* window (same
         # resets_at) can wobble by a point or two between statusline
@@ -628,45 +628,45 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
             self.assertEqual(len(official_events), 1, w.recent_events)
             self.assertEqual(mock_toast.call_count, 1)
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_new_window_refires_milestones_from_zero(self, mock_toast):
         # A genuinely new 5h window (different resets_at) must be free to
         # fire 25/50/75/85 again from scratch, even though the previous
         # window already fired them all.
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
-            resets1 = dtd.time.time() + 1000
-            dtd.save_notify_state(rl_path, {
+            resets1 = afi.time.time() + 1000
+            afi.save_notify_state(rl_path, {
                 "rate_limits": {"five_hour": {"used_percentage": 80, "resets_at": resets1}},
-                "captured_at": dtd.time.time()})
+                "captured_at": afi.time.time()})
             w = self._watcher(root, rl_path)
             w.poll_once()  # baseline at 80%
 
-            dtd.save_notify_state(rl_path, {
+            afi.save_notify_state(rl_path, {
                 "rate_limits": {"five_hour": {"used_percentage": 87, "resets_at": resets1}},
-                "captured_at": dtd.time.time()})
+                "captured_at": afi.time.time()})
             w.poll_once()  # crosses 85% in window 1
             self.assertEqual(mock_toast.call_count, 1)
 
             resets2 = resets1 + 5 * 3600
-            dtd.save_notify_state(rl_path, {
+            afi.save_notify_state(rl_path, {
                 "rate_limits": {"five_hour": {"used_percentage": 30, "resets_at": resets2}},
-                "captured_at": dtd.time.time()})
+                "captured_at": afi.time.time()})
             w.poll_once()  # new window: crosses 25%
             self.assertEqual(mock_toast.call_count, 2)
 
             official_events = [e for e in w.recent_events if e["id"] == "official:five_hour:25"]
             self.assertEqual(len(official_events), 1, w.recent_events)
 
-    @patch.object(dtd, "send_windows_toast")
+    @patch.object(afi, "send_windows_toast")
     def test_restart_does_not_refire_already_crossed_milestone(self, mock_toast):
         with tempfile.TemporaryDirectory() as root:
             rl_path = os.path.join(root, "rl.json")
             state_path = os.path.join(root, "state.json")
             self._write_rl(rl_path, 60)
-            scanner1 = dtd.Scanner(root)
-            w1 = dtd.NotificationWatcher(
-                scanner1, notify=dict(dtd.NOTIFY, active_window_min=999_999),
+            scanner1 = afi.Scanner(root)
+            w1 = afi.NotificationWatcher(
+                scanner1, notify=dict(afi.NOTIFY, active_window_min=999_999),
                 state_path=state_path, rate_limits_path=rl_path)
             w1.poll_once()  # baseline at 60%
 
@@ -676,9 +676,9 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
 
             # restart: fresh watcher loads the persisted official_prev=76,
             # same 76% value on disk -> no new crossing, no refire
-            scanner2 = dtd.Scanner(root)
-            w2 = dtd.NotificationWatcher(
-                scanner2, notify=dict(dtd.NOTIFY, active_window_min=999_999),
+            scanner2 = afi.Scanner(root)
+            w2 = afi.NotificationWatcher(
+                scanner2, notify=dict(afi.NOTIFY, active_window_min=999_999),
                 state_path=state_path, rate_limits_path=rl_path)
             w2.poll_once()
             self.assertEqual(w2.recent_events, [])
@@ -687,22 +687,22 @@ class OfficialRateLimitNotificationTests(unittest.TestCase):
 
 class StatuslineConfigTests(unittest.TestCase):
     def test_classify_missing_when_no_statusline_key(self):
-        self.assertEqual(dtd.classify_statusline({}), "missing")
+        self.assertEqual(afi.classify_statusline({}), "missing")
 
     def test_classify_missing_when_statusline_not_a_dict(self):
-        self.assertEqual(dtd.classify_statusline({"statusLine": "oops"}), "missing")
+        self.assertEqual(afi.classify_statusline({"statusLine": "oops"}), "missing")
 
     def test_classify_missing_when_command_absent(self):
-        self.assertEqual(dtd.classify_statusline({"statusLine": {"type": "command"}}), "missing")
+        self.assertEqual(afi.classify_statusline({"statusLine": {"type": "command"}}), "missing")
 
     def test_classify_ours_when_marker_in_command(self):
         settings = {"statusLine": {"type": "command",
-                                    "command": 'node "C:\\Users\\x\\.claude\\dev_token_dashboard_statusline.js"'}}
-        self.assertEqual(dtd.classify_statusline(settings), "ours")
+                                    "command": 'node "C:\\Users\\x\\.claude\\ai_fluency_insights_statusline.js"'}}
+        self.assertEqual(afi.classify_statusline(settings), "ours")
 
     def test_classify_foreign_when_other_command(self):
         settings = {"statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"}}
-        self.assertEqual(dtd.classify_statusline(settings), "foreign")
+        self.assertEqual(afi.classify_statusline(settings), "foreign")
 
     def test_classify_missing_when_command_not_a_string(self):
         # A non-string command (e.g. an int, from a hand-edited settings.json)
@@ -712,42 +712,56 @@ class StatuslineConfigTests(unittest.TestCase):
         # dict, command key absent -- also classifies as "missing" rather
         # than "foreign".
         settings = {"statusLine": {"type": "command", "command": 12345}}
-        self.assertEqual(dtd.classify_statusline(settings), "missing")
+        self.assertEqual(afi.classify_statusline(settings), "missing")
 
     def test_merge_adds_full_block_when_missing(self):
-        new = dtd.merge_statusline_config({}, "/home/x/.claude/dev_token_dashboard_statusline.js")
+        new = afi.merge_statusline_config({}, "/home/x/.claude/ai_fluency_insights_statusline.js")
         self.assertEqual(new["statusLine"], {
             "type": "command",
-            "command": 'node "/home/x/.claude/dev_token_dashboard_statusline.js"',
+            "command": 'node "/home/x/.claude/ai_fluency_insights_statusline.js"',
             "refreshInterval": 30,
         })
 
     def test_merge_preserves_other_top_level_keys(self):
         settings = {"model": "opusplan", "enabledPlugins": {"foo": True}}
-        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        new = afi.merge_statusline_config(settings, "/x/ai_fluency_insights_statusline.js")
         self.assertEqual(new["model"], "opusplan")
         self.assertEqual(new["enabledPlugins"], {"foo": True})
 
     def test_merge_patches_refresh_interval_only_when_ours(self):
         settings = {"statusLine": {"type": "command",
-                                    "command": 'node "/x/dev_token_dashboard_statusline.js"'},
+                                    "command": 'node "/x/ai_fluency_insights_statusline.js"'},
                     "model": "opusplan"}
-        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        new = afi.merge_statusline_config(settings, "/x/ai_fluency_insights_statusline.js")
         self.assertEqual(new["statusLine"]["refreshInterval"], 30)
         self.assertEqual(new["statusLine"]["command"], settings["statusLine"]["command"])
         self.assertEqual(new["model"], "opusplan")
 
     def test_merge_is_a_noop_when_already_correct(self):
         settings = {"statusLine": {"type": "command",
-                                    "command": 'node "/x/dev_token_dashboard_statusline.js"',
+                                    "command": 'node "/x/ai_fluency_insights_statusline.js"',
                                     "refreshInterval": 30}}
-        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        new = afi.merge_statusline_config(settings, "/x/ai_fluency_insights_statusline.js")
         self.assertEqual(new, settings)
+
+    def test_classify_legacy_pre_rename_install_as_ours(self):
+        settings = {"statusLine": {"type": "command",
+                                    "command": 'node "/x/dev_token_dashboard_statusline.js"'}}
+        self.assertEqual(afi.classify_statusline(settings), "ours")
+
+    def test_merge_migrates_legacy_install_to_new_script_path(self):
+        settings = {"statusLine": {"type": "command", "padding": 2,
+                                    "command": 'node "/x/dev_token_dashboard_statusline.js"'}}
+        new = afi.merge_statusline_config(settings, "/x/ai_fluency_insights_statusline.js")
+        self.assertEqual(new["statusLine"], {
+            "type": "command", "padding": 2, "refreshInterval": 30,
+            "command": 'node "/x/ai_fluency_insights_statusline.js"',
+        })
 
 
 class LoadSettingsJsonTests(unittest.TestCase):
     def test_missing_file_returns_empty_dict_no_error(self):
-        settings, err = dtd.load_settings_json("/no/such/settings.json")
+        settings, err = afi.load_settings_json("/no/such/settings.json")
         self.assertEqual(settings, {})
         self.assertIsNone(err)
 
@@ -756,7 +770,7 @@ class LoadSettingsJsonTests(unittest.TestCase):
             path = os.path.join(d, "settings.json")
             with open(path, "w", encoding="utf-8") as f:
                 f.write('{"model": "opusplan"}')
-            settings, err = dtd.load_settings_json(path)
+            settings, err = afi.load_settings_json(path)
             self.assertEqual(settings, {"model": "opusplan"})
             self.assertIsNone(err)
 
@@ -765,7 +779,7 @@ class LoadSettingsJsonTests(unittest.TestCase):
             path = os.path.join(d, "settings.json")
             with open(path, "w", encoding="utf-8") as f:
                 f.write("{not json")
-            settings, err = dtd.load_settings_json(path)
+            settings, err = afi.load_settings_json(path)
             self.assertIsNone(settings)
             self.assertIsNotNone(err)
 
@@ -773,30 +787,30 @@ class LoadSettingsJsonTests(unittest.TestCase):
 class ClaudeConfigDirTests(unittest.TestCase):
     def test_uses_env_var_when_set(self):
         with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": "/custom/dir"}):
-            self.assertEqual(dtd.claude_config_dir(), "/custom/dir")
+            self.assertEqual(afi.claude_config_dir(), "/custom/dir")
 
     def test_falls_back_to_home_claude(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
             expected = os.path.join(os.path.expanduser("~"), ".claude")
-            self.assertEqual(dtd.claude_config_dir(), expected)
+            self.assertEqual(afi.claude_config_dir(), expected)
 
 
 class NodeAvailableTests(unittest.TestCase):
     def test_true_when_which_finds_node(self):
-        with patch.object(dtd.shutil, "which", return_value=r"C:\nodejs\node.exe"):
-            self.assertTrue(dtd.node_available())
+        with patch.object(afi.shutil, "which", return_value=r"C:\nodejs\node.exe"):
+            self.assertTrue(afi.node_available())
 
     def test_false_when_which_finds_nothing(self):
-        with patch.object(dtd.shutil, "which", return_value=None):
-            self.assertFalse(dtd.node_available())
+        with patch.object(afi.shutil, "which", return_value=None):
+            self.assertFalse(afi.node_available())
 
 
 class WriteSettingsWithBackupTests(unittest.TestCase):
     def test_no_backup_when_file_did_not_exist(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "settings.json")
-            backup = dtd.write_settings_with_backup(path, {"a": 1})
+            backup = afi.write_settings_with_backup(path, {"a": 1})
             self.assertIsNone(backup)
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), {"a": 1})
@@ -811,7 +825,7 @@ class WriteSettingsWithBackupTests(unittest.TestCase):
             # Read the original bytes before calling the function
             with open(path, "rb") as f:
                 original_bytes = f.read()
-            backup = dtd.write_settings_with_backup(path, {"new": True})
+            backup = afi.write_settings_with_backup(path, {"new": True})
             self.assertIsNotNone(backup)
             self.assertTrue(os.path.exists(backup))
             # Check backup filename format
@@ -827,7 +841,7 @@ class WriteSettingsWithBackupTests(unittest.TestCase):
     def test_written_file_is_valid_json(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "settings.json")
-            dtd.write_settings_with_backup(path, {"statusLine": {"type": "command"}})
+            afi.write_settings_with_backup(path, {"statusLine": {"type": "command"}})
             with open(path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), {"statusLine": {"type": "command"}})
 
@@ -837,33 +851,33 @@ class RunSetupNotificationsTests(unittest.TestCase):
         prints = []
         kwargs.setdefault("print_fn", prints.append)
         kwargs.setdefault("isatty_fn", lambda: True)
-        code = dtd.run_setup_notifications(claude_dir=claude_dir, **kwargs)
+        code = afi.run_setup_notifications(claude_dir=claude_dir, **kwargs)
         return code, prints
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_dry_run_writes_nothing(self, _node):
         with tempfile.TemporaryDirectory() as d:
             code, prints = self._run(d, dry_run=True, input_fn=lambda _: self.fail("must not prompt"))
             self.assertEqual(code, 0)
             self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
-            self.assertFalse(os.path.exists(os.path.join(d, dtd.STATUSLINE_MARKER)))
+            self.assertFalse(os.path.exists(os.path.join(d, afi.STATUSLINE_MARKER)))
             self.assertTrue(any("Dry run" in p for p in prints))
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_missing_statusline_writes_after_yes(self, _node):
         with tempfile.TemporaryDirectory() as d:
             code, prints = self._run(d, input_fn=lambda _: "y")
             self.assertEqual(code, 0)
             settings_path = os.path.join(d, "settings.json")
-            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            js_path = os.path.join(d, afi.STATUSLINE_MARKER)
             self.assertTrue(os.path.exists(settings_path))
             self.assertTrue(os.path.exists(js_path))
             with open(settings_path, encoding="utf-8") as f:
                 settings = json.load(f)
-            self.assertIn(dtd.STATUSLINE_MARKER, settings["statusLine"]["command"])
+            self.assertIn(afi.STATUSLINE_MARKER, settings["statusLine"]["command"])
             self.assertEqual(settings["statusLine"]["refreshInterval"], 30)
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_missing_statusline_declines_on_no(self, _node):
         with tempfile.TemporaryDirectory() as d:
             code, prints = self._run(d, input_fn=lambda _: "n")
@@ -871,11 +885,11 @@ class RunSetupNotificationsTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
             self.assertTrue(any("Cancelled" in p for p in prints))
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_ours_already_correct_reports_no_changes(self, _node):
         with tempfile.TemporaryDirectory() as d:
             settings_path = os.path.join(d, "settings.json")
-            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            js_path = os.path.join(d, afi.STATUSLINE_MARKER)
             existing = {"statusLine": {"type": "command",
                                         "command": f'node "{js_path}"', "refreshInterval": 30}}
             with open(settings_path, "w", encoding="utf-8") as f:
@@ -891,7 +905,7 @@ class RunSetupNotificationsTests(unittest.TestCase):
             with open(settings_path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), existing)  # untouched
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_ours_correct_but_script_file_missing_falls_through_to_write(self, _node):
         # Regression test for Finding 1: settings already match (refreshInterval
         # 30, "ours" command) but the .js file itself is missing from disk --
@@ -901,7 +915,7 @@ class RunSetupNotificationsTests(unittest.TestCase):
         # and must instead proceed to the write flow so it can be repaired.
         with tempfile.TemporaryDirectory() as d:
             settings_path = os.path.join(d, "settings.json")
-            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            js_path = os.path.join(d, afi.STATUSLINE_MARKER)
             existing = {"statusLine": {"type": "command",
                                         "command": f'node "{js_path}"', "refreshInterval": 30}}
             with open(settings_path, "w", encoding="utf-8") as f:
@@ -915,7 +929,7 @@ class RunSetupNotificationsTests(unittest.TestCase):
             self.assertTrue(any("This will write" in p for p in prints))
             self.assertTrue(os.path.exists(js_path))  # repaired
 
-    @patch.object(dtd, "node_available", return_value=False)
+    @patch.object(afi, "node_available", return_value=False)
     def test_missing_node_aborts_without_writing(self, _node):
         with tempfile.TemporaryDirectory() as d:
             code, prints = self._run(d, input_fn=lambda _: self.fail("must not prompt"))
@@ -932,7 +946,7 @@ class RunSetupNotificationsTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertTrue(any("not valid JSON" in p for p in prints))
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_non_interactive_without_dry_run_aborts(self, _node):
         with tempfile.TemporaryDirectory() as d:
             code, prints = self._run(d, isatty_fn=lambda: False,
@@ -941,15 +955,15 @@ class RunSetupNotificationsTests(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(d, "settings.json")))
             self.assertTrue(any("not running interactively" in p.lower() for p in prints))
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_final_report_shown_after_successful_write(self, _node):
         with tempfile.TemporaryDirectory() as d:
             _, prints = self._run(d, input_fn=lambda _: "y")
             self.assertTrue(any("Rate-limit capture:" in p for p in prints))
             self.assertTrue(any("Toast notifications:" in p for p in prints))
 
-    @patch.object(dtd, "node_available", return_value=True)
-    @patch.object(dtd, "write_settings_with_backup", side_effect=OSError("Permission denied"))
+    @patch.object(afi, "node_available", return_value=True)
+    @patch.object(afi, "write_settings_with_backup", side_effect=OSError("Permission denied"))
     def test_write_permission_error_reported_not_crashed(self, _write, _node):
         with tempfile.TemporaryDirectory() as d:
             code, prints = self._run(d, input_fn=lambda _: "y")
@@ -963,31 +977,31 @@ class RunSetupNotificationsTests(unittest.TestCase):
 
 class ShouldRunNotificationsTests(unittest.TestCase):
     def test_true_by_default(self):
-        self.assertTrue(dtd.should_run_notifications(dict(dtd.NOTIFY, enabled=True)))
+        self.assertTrue(afi.should_run_notifications(dict(afi.NOTIFY, enabled=True)))
 
     def test_false_when_disabled(self):
-        self.assertFalse(dtd.should_run_notifications(dict(dtd.NOTIFY, enabled=False)))
+        self.assertFalse(afi.should_run_notifications(dict(afi.NOTIFY, enabled=False)))
 
     def test_true_when_key_absent(self):
-        notify = dict(dtd.NOTIFY)
+        notify = dict(afi.NOTIFY)
         del notify["enabled"]
-        self.assertTrue(dtd.should_run_notifications(notify))
+        self.assertTrue(afi.should_run_notifications(notify))
 
     def test_defaults_to_module_level_notify(self):
-        with patch.dict(dtd.NOTIFY, {"enabled": False}):
-            self.assertFalse(dtd.should_run_notifications())
+        with patch.dict(afi.NOTIFY, {"enabled": False}):
+            self.assertFalse(afi.should_run_notifications())
 
 
 class ForeignStatuslineTests(unittest.TestCase):
     def test_extract_script_path_from_quoted_command(self):
         self.assertEqual(
-            dtd._extract_script_path('node "C:\\Users\\x\\.claude\\statusline.js"'),
+            afi._extract_script_path('node "C:\\Users\\x\\.claude\\statusline.js"'),
             "C:\\Users\\x\\.claude\\statusline.js")
 
     def test_extract_script_path_returns_none_when_unquoted(self):
-        self.assertIsNone(dtd._extract_script_path("~/.claude/statusline.sh"))
+        self.assertIsNone(afi._extract_script_path("~/.claude/statusline.sh"))
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_foreign_statusline_does_not_write_settings(self, _node):
         with tempfile.TemporaryDirectory() as d:
             settings_path = os.path.join(d, "settings.json")
@@ -995,16 +1009,16 @@ class ForeignStatuslineTests(unittest.TestCase):
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(original, f)
             prints = []
-            code = dtd.run_setup_notifications(claude_dir=d, print_fn=prints.append,
+            code = afi.run_setup_notifications(claude_dir=d, print_fn=prints.append,
                                                 input_fn=lambda _: self.fail("must not prompt"),
                                                 isatty_fn=lambda: True)
             self.assertEqual(code, 0)
             with open(settings_path, encoding="utf-8") as f:
                 self.assertEqual(json.load(f), original)
-            self.assertFalse(os.path.exists(os.path.join(d, dtd.STATUSLINE_MARKER)))
+            self.assertFalse(os.path.exists(os.path.join(d, afi.STATUSLINE_MARKER)))
             self.assertTrue(any("existing statusline" in p.lower() for p in prints))
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_foreign_statusline_reports_fresh_capture_if_present(self, _node):
         with tempfile.TemporaryDirectory() as d:
             settings_path = os.path.join(d, "settings.json")
@@ -1012,15 +1026,15 @@ class ForeignStatuslineTests(unittest.TestCase):
                 json.dump({"statusLine": {"type": "command", "command": "node ~/.claude/statusline.js"}}, f)
             rl_path = os.path.join(d, "rate_limits_latest.json")
             with open(rl_path, "w", encoding="utf-8") as f:
-                json.dump({"rate_limits": {}, "captured_at": dtd.time.time()}, f)
+                json.dump({"rate_limits": {}, "captured_at": afi.time.time()}, f)
             prints = []
-            with patch.object(dtd, "RATE_LIMITS_PATH", rl_path):
-                dtd.run_setup_notifications(claude_dir=d, print_fn=prints.append,
+            with patch.object(afi, "RATE_LIMITS_PATH", rl_path):
+                afi.run_setup_notifications(claude_dir=d, print_fn=prints.append,
                                              input_fn=lambda _: self.fail("must not prompt"),
                                              isatty_fn=lambda: True)
             self.assertTrue(any("already has a fresh capture" in p for p in prints))
 
-    @patch.object(dtd, "node_available", return_value=True)
+    @patch.object(afi, "node_available", return_value=True)
     def test_foreign_statusline_catches_non_oserror_exceptions(self, _node):
         """Verify that non-OSError exceptions (e.g. ValueError from isfile) are caught."""
         with tempfile.TemporaryDirectory() as d:
@@ -1029,8 +1043,8 @@ class ForeignStatuslineTests(unittest.TestCase):
                 json.dump({"statusLine": {"type": "command", "command": 'node "/bad/path"'}}, f)
             prints = []
             # Mock os.path.isfile to raise ValueError (simulating a path with null bytes)
-            with patch.object(dtd.os.path, "isfile", side_effect=ValueError("null byte in path")):
-                code = dtd.run_setup_notifications(claude_dir=d, print_fn=prints.append,
+            with patch.object(afi.os.path, "isfile", side_effect=ValueError("null byte in path")):
+                code = afi.run_setup_notifications(claude_dir=d, print_fn=prints.append,
                                                     input_fn=lambda _: self.fail("must not prompt"),
                                                     isatty_fn=lambda: True)
             # Should complete without raising the ValueError
@@ -1042,11 +1056,11 @@ class ForeignStatuslineTests(unittest.TestCase):
 
 class StartupHintTests(unittest.TestCase):
     def test_none_on_non_windows_even_if_missing(self):
-        self.assertIsNone(dtd.startup_hint("/no/such/path.json", is_windows=False,
+        self.assertIsNone(afi.startup_hint("/no/such/path.json", is_windows=False,
                                             statusline_js_path="/no/such/statusline.js"))
 
     def test_hint_when_windows_and_never_captured(self):
-        hint = dtd.startup_hint("/no/such/path.json", is_windows=True,
+        hint = afi.startup_hint("/no/such/path.json", is_windows=True,
                                  statusline_js_path="/no/such/statusline.js")
         self.assertIsNotNone(hint)
         self.assertIn("--setup-notifications", hint)
@@ -1056,7 +1070,7 @@ class StartupHintTests(unittest.TestCase):
             path = os.path.join(d, "rate_limits_latest.json")
             with open(path, "w", encoding="utf-8") as f:
                 f.write("{}")
-            self.assertIsNone(dtd.startup_hint(path, is_windows=True,
+            self.assertIsNone(afi.startup_hint(path, is_windows=True,
                                                 statusline_js_path="/no/such/statusline.js"))
 
     def test_none_when_statusline_script_already_exists(self):
@@ -1065,35 +1079,35 @@ class StartupHintTests(unittest.TestCase):
         # but the managed script does, so the nudge would be confusing here and
         # must be suppressed.
         with tempfile.TemporaryDirectory() as d:
-            js_path = os.path.join(d, dtd.STATUSLINE_MARKER)
+            js_path = os.path.join(d, afi.STATUSLINE_MARKER)
             with open(js_path, "w", encoding="utf-8") as f:
                 f.write("// managed")
-            self.assertIsNone(dtd.startup_hint("/no/such/rate_limits.json", is_windows=True,
+            self.assertIsNone(afi.startup_hint("/no/such/rate_limits.json", is_windows=True,
                                                 statusline_js_path=js_path))
 
 
 class PrintFinalReportTests(unittest.TestCase):
     def test_toast_on_when_enabled_and_windows(self):
         prints = []
-        with patch.object(dtd.os, "name", "nt"), \
-             patch.dict(dtd.NOTIFY, {"enabled": True}):
-            dtd._print_final_report(prints.append)
+        with patch.object(afi.os, "name", "nt"), \
+             patch.dict(afi.NOTIFY, {"enabled": True}):
+            afi._print_final_report(prints.append)
         self.assertTrue(any("Toast notifications: ON" in p for p in prints), prints)
 
     def test_toast_off_when_disabled_on_windows(self):
         prints = []
-        with patch.object(dtd.os, "name", "nt"), \
-             patch.dict(dtd.NOTIFY, {"enabled": False}):
-            dtd._print_final_report(prints.append)
+        with patch.object(afi.os, "name", "nt"), \
+             patch.dict(afi.NOTIFY, {"enabled": False}):
+            afi._print_final_report(prints.append)
         self.assertTrue(any(p == "Toast notifications: OFF"
                              '  (edit NOTIFY["enabled"] in the script to change)'
                              for p in prints), prints)
 
     def test_toast_off_windows_only_on_non_windows(self):
         prints = []
-        with patch.object(dtd.os, "name", "posix"), \
-             patch.dict(dtd.NOTIFY, {"enabled": True}):
-            dtd._print_final_report(prints.append)
+        with patch.object(afi.os, "name", "posix"), \
+             patch.dict(afi.NOTIFY, {"enabled": True}):
+            afi._print_final_report(prints.append)
         self.assertTrue(any("Toast notifications: OFF (Windows only)" in p for p in prints), prints)
 
 
@@ -1112,7 +1126,7 @@ class ReportForeignStatuslineSizeGuardTests(unittest.TestCase):
                 f.seek(1_000_001)
                 f.write(b"\0")
             prints = []
-            dtd._report_foreign_statusline(
+            afi._report_foreign_statusline(
                 self._settings_for(f'node "{big_path}"'), prints.append)
             self.assertFalse(any("references rate_limits" in p for p in prints), prints)
 
@@ -1122,7 +1136,7 @@ class ReportForeignStatuslineSizeGuardTests(unittest.TestCase):
             with open(small_path, "w", encoding="utf-8") as f:
                 f.write("// writes rate_limits somewhere")
             prints = []
-            dtd._report_foreign_statusline(
+            afi._report_foreign_statusline(
                 self._settings_for(f'node "{small_path}"'), prints.append)
             self.assertTrue(any("references rate_limits" in p for p in prints), prints)
 
@@ -1133,7 +1147,7 @@ class BundledStatuslineJsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "statusline.js")
             with open(path, "w", encoding="utf-8") as f:
-                f.write(dtd.BUNDLED_STATUSLINE_JS)
+                f.write(afi.BUNDLED_STATUSLINE_JS)
             result = subprocess.run(["node", "--check", path],
                                      capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -1143,7 +1157,7 @@ class PricingTests(unittest.TestCase):
     def test_sonnet_rate_matches_current_anthropic_pricing(self):
         # Sonnet 5 is $2/$10 per MTok, confirmed permanent (the planned
         # $3/$15 rise was cancelled) -- see the token-economics brainstorm.
-        self.assertEqual(dtd.price_for("claude-sonnet-5"), {"in": 2.0, "out": 10.0})
+        self.assertEqual(afi.price_for("claude-sonnet-5"), {"in": 2.0, "out": 10.0})
 
 
 class ColdStartAndCacheHealthTests(unittest.TestCase):
@@ -1156,7 +1170,7 @@ class ColdStartAndCacheHealthTests(unittest.TestCase):
     def _write_jsonl(path, entries):
         with open(path, "w", encoding="utf-8") as f:
             for obj in entries:
-                f.write(dtd.json.dumps(obj) + "\n")
+                f.write(afi.json.dumps(obj) + "\n")
 
     @staticmethod
     def _usage_entry(sid, uid, ts, cache_write=0, cache_read=0,
@@ -1188,9 +1202,9 @@ class ColdStartAndCacheHealthTests(unittest.TestCase):
                                    cache_read=1_000_000),
             ]
             self._write_jsonl(os.path.join(proj, "a.jsonl"), entries)
-            scanner = dtd.Scanner(root)
+            scanner = afi.Scanner(root)
             st = scanner.build_stats()
-            totals = dtd.stats_to_json(st)["totals"]
+            totals = afi.stats_to_json(st)["totals"]
             # (2.50 + 2.50) / (2.50 + 2.90) * 100 = 92.6
             self.assertAlmostEqual(totals["cold_start_pct"], 92.6, places=1)
             # neither warm's follow-up call is a mid-session reset (reads
@@ -1212,9 +1226,9 @@ class ColdStartAndCacheHealthTests(unittest.TestCase):
                                    cache_read=1_000_000),
             ]
             self._write_jsonl(os.path.join(proj, "a.jsonl"), entries)
-            scanner = dtd.Scanner(root)
+            scanner = afi.Scanner(root)
             st = scanner.build_stats()
-            totals = dtd.stats_to_json(st)["totals"]
+            totals = afi.stats_to_json(st)["totals"]
             # 1 of the 2 non-first calls was a reset -> 50%
             self.assertEqual(totals["cache_reset_pct"], 50.0)
 
@@ -1224,9 +1238,9 @@ class AdoptionTests(unittest.TestCase):
 
     @staticmethod
     def _stamp(days_ago, hour=10, minute=0):
-        t = (dtd.datetime.now().astimezone().replace(hour=hour, minute=minute, second=0, microsecond=0)
-             - dtd.timedelta(days=days_ago))
-        return t.astimezone(dtd.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        t = (afi.datetime.now().astimezone().replace(hour=hour, minute=minute, second=0, microsecond=0)
+             - afi.timedelta(days=days_ago))
+        return t.astimezone(afi.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     def _session(self, sid, days_ago, tools=(), prompt="please add pagination to the orders list and keep the style",
                  hour=10, n=0):
@@ -1252,8 +1266,8 @@ class AdoptionTests(unittest.TestCase):
         with open(os.path.join(proj, "a.jsonl"), "w", encoding="utf-8") as f:
             for es in sessions:
                 for e in es:
-                    f.write(dtd.json.dumps(e) + "\n")
-        return dtd.build_adoption(dtd.Scanner(root).build_stats())
+                    f.write(afi.json.dumps(e) + "\n")
+        return afi.build_adoption(afi.Scanner(root).build_stats())
 
     def test_no_data_is_not_ready(self):
         a = self._build([])
@@ -1264,7 +1278,7 @@ class AdoptionTests(unittest.TestCase):
         a = self._build([self._session("a", 0), self._session("b", 1)])
         self.assertFalse(a["ready"])
         self.assertEqual(a["active_days"], 2)
-        self.assertEqual(a["min_days"], dtd.ADOPTION["min_active_days"])
+        self.assertEqual(a["min_days"], afi.ADOPTION["min_active_days"])
 
     def test_ready_payload_shape_and_ranges(self):
         edit = ("Edit", {"file_path": "/x/a.py", "new_string": "\n".join("l%d" % i for i in range(40))})
@@ -1279,9 +1293,9 @@ class AdoptionTests(unittest.TestCase):
         self.assertEqual(len(a["weekly"]), 12)
         self.assertEqual(len(a["calendar"]["cells"]), 17 * 7)
         self.assertLessEqual(len(a["coach"]), 3)
-        self.assertEqual(a["level"]["name"], dtd.adoption_level(a["score"])["name"])
+        self.assertEqual(a["level"]["name"], afi.adoption_level(a["score"])["name"])
         # the overall score really is the weighted blend of the four pillars
-        wt = dtd.ADOPTION["weights"]
+        wt = afi.ADOPTION["weights"]
         blend = sum(wt[p["id"]] * p["score"] for p in a["pillars"])
         self.assertLessEqual(abs(a["score"] - blend), 1)
 
@@ -1329,36 +1343,36 @@ class AdoptionLevelAndFluencyTests(unittest.TestCase):
                  40: "Power user", 59: "Power user", 60: "Expert", 74: "Expert",
                  75: "Pro", 89: "Pro", 90: "Pro Max", 100: "Pro Max"}
         for score, name in names.items():
-            self.assertEqual(dtd.adoption_level(score)["name"], name, score)
+            self.assertEqual(afi.adoption_level(score)["name"], name, score)
 
     def test_points_to_next_level(self):
-        lv = dtd.adoption_level(65)
+        lv = afi.adoption_level(65)
         self.assertEqual(lv["to_next"], 10)
         self.assertEqual(lv["next_name"], "Pro")
-        self.assertEqual(dtd.adoption_level(95)["to_next"], 0)
+        self.assertEqual(afi.adoption_level(95)["to_next"], 0)
 
     def test_pro_needs_every_pillar_above_the_floor(self):
         strong = {"habit": 90, "range": 80, "craft": 85, "impact": 80}
-        self.assertEqual(dtd.adoption_level(80, strong)["name"], "Pro")
+        self.assertEqual(afi.adoption_level(80, strong)["name"], "Pro")
         weak = dict(strong, range=40)
-        lv = dtd.adoption_level(80, weak)
+        lv = afi.adoption_level(80, weak)
         self.assertEqual(lv["name"], "Expert")
         self.assertIn("Range", lv["blocker"])
 
     def test_pro_max_needs_a_sustained_run(self):
         pillars = {"habit": 95, "range": 90, "craft": 92, "impact": 88}
         steady = [{"score": 91}] * 4
-        self.assertEqual(dtd.adoption_level(93, pillars, steady)["name"], "Pro Max")
-        lv = dtd.adoption_level(93, pillars, [{"score": 70}, {"score": 91}, {"score": 91}, {"score": 92}])
+        self.assertEqual(afi.adoption_level(93, pillars, steady)["name"], "Pro Max")
+        lv = afi.adoption_level(93, pillars, [{"score": 70}, {"score": 91}, {"score": 91}, {"score": 92}])
         self.assertEqual(lv["name"], "Pro")
         self.assertIn("4 weeks", lv["blocker"])
-        self.assertEqual(dtd.adoption_level(93, pillars, [{"score": 95}])["name"], "Pro")
+        self.assertEqual(afi.adoption_level(93, pillars, [{"score": 95}])["name"], "Pro")
 
     def test_fluency_matches_documented_formulas(self):
         w = {"sessions": [{"loc": 10, "bash": 1}, {"loc": 5, "bash": 0}, {"loc": 0, "bash": 0}],
              "human_tokens": 100, "output": 2500, "prompts": 20, "prompt_words": 400,
              "corrections": 1, "interruptions": 1, "tool_errors": 1, "writes": 10}
-        f = dtd.fluency_of(w)
+        f = afi.fluency_of(w)
         # delegation = 50*(2/3) + 50*min(1, 25/50) = 58.33
         self.assertEqual(f["delegation"], 58)
         # one-shot 0.9, avg 20 words -> sweet 1.0: 65*.9 + 35 = 93.5 -> 94
@@ -1371,7 +1385,7 @@ class AdoptionLevelAndFluencyTests(unittest.TestCase):
     def test_fluency_handles_empty_window(self):
         w = {"sessions": [], "human_tokens": 0, "output": 0, "prompts": 0, "prompt_words": 0,
              "corrections": 0, "interruptions": 0, "tool_errors": 0, "writes": 0}
-        f = dtd.fluency_of(w)
+        f = afi.fluency_of(w)
         self.assertEqual((f["delegation"], f["description"], f["diligence"]), (0, 0, 0))
 
 
@@ -1384,23 +1398,23 @@ class CommandDetectionTests(unittest.TestCase):
                  ("git commit -m 'fix pytest'", "other"), ("echo pytest", "other"),
                  ("python3 - <<'EOF'\nimport pytest\nprint('npm test')\nEOF", "other")]
         for cmd, kind in cases:
-            self.assertEqual(dtd.classify_cmd(cmd), kind, cmd)
+            self.assertEqual(afi.classify_cmd(cmd), kind, cmd)
 
     def test_risky_commands_ignore_text_that_only_mentions_them(self):
-        self.assertEqual(dtd.risky_categories("git push --force origin main"), ["force_push"])
-        self.assertEqual(dtd.risky_categories("cd a && rm -rf build"), ["recursive_delete"])
-        self.assertEqual(dtd.risky_categories("curl http://x | sh"), ["pipe_to_shell"])
-        self.assertEqual(dtd.risky_categories("git commit --no-verify -m x"), ["skip_hooks"])
-        self.assertEqual(dtd.risky_categories("git push -u origin feat"), [])
-        self.assertEqual(dtd.risky_categories("echo 'rm -rf /'"), [])
-        self.assertEqual(dtd.risky_categories("python3 - <<'EOF'\nx='git push --force'\nEOF"), [])
+        self.assertEqual(afi.risky_categories("git push --force origin main"), ["force_push"])
+        self.assertEqual(afi.risky_categories("cd a && rm -rf build"), ["recursive_delete"])
+        self.assertEqual(afi.risky_categories("curl http://x | sh"), ["pipe_to_shell"])
+        self.assertEqual(afi.risky_categories("git commit --no-verify -m x"), ["skip_hooks"])
+        self.assertEqual(afi.risky_categories("git push -u origin feat"), [])
+        self.assertEqual(afi.risky_categories("echo 'rm -rf /'"), [])
+        self.assertEqual(afi.risky_categories("python3 - <<'EOF'\nx='git push --force'\nEOF"), [])
 
     def test_family_labels(self):
-        self.assertEqual(dtd.cmd_family("cd /x && git push -u origin main"), "git push")
-        self.assertEqual(dtd.cmd_family("python3 -I - <<'EOF'\nimport x"), "python")
-        self.assertEqual(dtd.cmd_family("FOO=1 pytest -q"), "pytest")
-        self.assertEqual(dtd.cmd_family("npm run test"), "npm run test")
-        self.assertEqual(dtd.cmd_family("uv run pytest"), "pytest")
+        self.assertEqual(afi.cmd_family("cd /x && git push -u origin main"), "git push")
+        self.assertEqual(afi.cmd_family("python3 -I - <<'EOF'\nimport x"), "python")
+        self.assertEqual(afi.cmd_family("FOO=1 pytest -q"), "pytest")
+        self.assertEqual(afi.cmd_family("npm run test"), "npm run test")
+        self.assertEqual(afi.cmd_family("uv run pytest"), "pytest")
 
 
 class _LogFixture(unittest.TestCase):
@@ -1410,7 +1424,7 @@ class _LogFixture(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root, True)
         os.makedirs(os.path.join(self.root, "proj"))
-        self.base = dtd.datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
+        self.base = afi.datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
         self.sid = "s1"
         self.entries = []
         self.n = 0
@@ -1418,7 +1432,7 @@ class _LogFixture(unittest.TestCase):
         self.out_tokens = 100
 
     def _ts(self, off):
-        return (self.base + dtd.timedelta(seconds=off)).astimezone(dtd.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        return (self.base + afi.timedelta(seconds=off)).astimezone(afi.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
     def _base(self, off, **kw):
         d = {"sessionId": self.sid, "timestamp": self._ts(off), "cwd": "/nonexistent/p", "version": "2.1.296"}
@@ -1462,8 +1476,8 @@ class _LogFixture(unittest.TestCase):
     def stats(self):
         with open(os.path.join(self.root, "proj", "a.jsonl"), "w", encoding="utf-8") as f:
             for e in self.entries:
-                f.write(dtd.json.dumps(e) + "\n")
-        return dtd.Scanner(self.root).build_stats()
+                f.write(afi.json.dumps(e) + "\n")
+        return afi.Scanner(self.root).build_stats()
 
 
 class FlowEngineTests(_LogFixture):
@@ -1515,7 +1529,7 @@ class FlowEngineTests(_LogFixture):
         for _ in range(3):
             self.tool("Bash", {"command": "pytest"}, fail=True, text="Exit code 1")
         self.end_turn()
-        f = dtd.build_flow(self.stats())
+        f = afi.build_flow(self.stats())
         self.assertEqual((f["episodes"], f["stuck"], f["unrecovered"], f["recovered"]), (1, 1, 1, 0))
         self.assertEqual(f["recovery_pct"], 0)
 
@@ -1523,10 +1537,10 @@ class FlowEngineTests(_LogFixture):
         for i in range(4):
             self.prompt("task %d" % i)
             self.end_turn()
-        self.assertIsNone(dtd.build_flow(self.stats())["score"])
+        self.assertIsNone(afi.build_flow(self.stats())["score"])
         self.prompt("task 5")
         self.end_turn()
-        f = dtd.build_flow(self.stats())
+        f = afi.build_flow(self.stats())
         self.assertIsNotNone(f["score"])
         self.assertEqual(f["clean_pct"], 100)
 
@@ -1555,13 +1569,13 @@ class QualityEngineTests(_LogFixture):
 
     def test_verified_means_a_check_ran_after_the_last_edit(self):
         self._session(edit_first=True)
-        q = dtd.build_quality(self.stats())
+        q = afi.build_quality(self.stats())
         self.assertEqual(q["edited_sessions"], 1)
         self.assertEqual(q["verified_pct"], 100)
 
     def test_check_before_the_edit_does_not_count(self):
         self._session(edit_first=False)
-        q = dtd.build_quality(self.stats())
+        q = afi.build_quality(self.stats())
         self.assertEqual(q["verified_pct"], 0)
 
     def test_first_run_pass_and_fail_then_pass_recovery(self):
@@ -1570,7 +1584,7 @@ class QualityEngineTests(_LogFixture):
         self.tool("Bash", {"command": "pytest"}, fail=True, text="Exit code 1")
         self.tool("Bash", {"command": "pytest"})
         self.end_turn()
-        q = dtd.build_quality(self.stats())
+        q = afi.build_quality(self.stats())
         self.assertEqual(q["first_run_pass_pct"], 0)
         self.assertEqual(q["runs"]["test"]["runs"], 2)
         self.assertEqual((q["runs"]["test"]["fail_groups"], q["runs"]["test"]["recovered_groups"]), (1, 1))
@@ -1580,7 +1594,7 @@ class QualityEngineTests(_LogFixture):
         self.edit("/p/src/a.py")
         self.edit("/p/tests/test_a.py")
         self.end_turn()
-        q = dtd.build_quality(self.stats())
+        q = afi.build_quality(self.stats())
         self.assertEqual(q["tests_alongside_pct"], 100)
 
     def test_reedit_share_and_hotspot(self):
@@ -1589,7 +1603,7 @@ class QualityEngineTests(_LogFixture):
             self.edit("/p/src/hot.py")
         self.edit("/p/src/other.py")
         self.end_turn()
-        q = dtd.build_quality(self.stats())
+        q = afi.build_quality(self.stats())
         # 7 edits, 5 of them revisit a file already edited this session
         self.assertEqual(q["reedit_pct"], 71)
         self.assertEqual(q["hotspots"][0]["file"], "hot.py")
@@ -1602,7 +1616,7 @@ class QualityEngineTests(_LogFixture):
         self.tool("Read", {"file_path": "/p/.env"})
         self.tool("Bash", {"command": "python3 - <<'EOF'\nx = 'rm -rf /'\nEOF"})
         self.end_turn()
-        q = dtd.build_quality(self.stats())
+        q = afi.build_quality(self.stats())
         self.assertEqual(q["safety"], {"force_push": 1, "secret_file_touched": 1})
         self.assertEqual(q["permissions"], [{"decision": "accept", "source": "user", "n": 1}])
 
@@ -1635,7 +1649,7 @@ class ValueEngineTests(_LogFixture):
         self.edit(n=50)
         self.tool("Bash", {"command": "pytest"})
         self.end_turn()
-        v = dtd.build_value(self.stats())
+        v = afi.build_value(self.stats())
         self.assertEqual(v["loc"], 50)
         self.assertEqual(v["verified_sessions"], 1)
         self.assertGreater(v["cost_per_verified"], 0)
@@ -1646,22 +1660,22 @@ class HealthAndCatalogTests(_LogFixture):
     def test_missing_signals_are_reported_not_zeroed(self):
         self.prompt("hi")
         self.end_turn()
-        h = dtd.build_health(self.stats())
+        h = afi.build_health(self.stats())
         caps = {c["id"]: c for c in h["capabilities"]}
         self.assertEqual(caps["perms"]["status"], "missing")
         self.assertEqual(caps["turns"]["status"], "ok")
         self.assertEqual(h["versions"][0]["version"], "2.1.296")
 
     def test_catalog_is_complete_and_every_badge_in_the_page_exists(self):
-        ids = [m[0] for m in dtd.METRIC_CATALOG]
+        ids = [m[0] for m in afi.METRIC_CATALOG]
         self.assertEqual(len(ids), len(set(ids)))
-        for m in dtd.METRIC_CATALOG:
+        for m in afi.METRIC_CATALOG:
             self.assertIn(m[3], ("observed", "derived", "proxy", "estimated"))
             self.assertTrue(all(m[1:3]) and m[4] and m[5])
         import re as _re
-        used = set(_re.findall(r"cb\('([a-z_0-9]+)'\)", dtd.HTML))
-        used |= set(_re.findall(r",C\.\w+,'([a-z_0-9]+)'", dtd.HTML))
-        used |= set(_re.findall(r"insHero\([^,]+,[^,]+,[^,]+,'([a-z_0-9]+)'", dtd.HTML))
+        used = set(_re.findall(r"cb\('([a-z_0-9]+)'\)", afi.HTML))
+        used |= set(_re.findall(r",C\.\w+,'([a-z_0-9]+)'", afi.HTML))
+        used |= set(_re.findall(r"insHero\([^,]+,[^,]+,[^,]+,'([a-z_0-9]+)'", afi.HTML))
         self.assertTrue(used, "no badge ids found in the page")
         self.assertFalse(used - set(ids), used - set(ids))
 
@@ -1671,9 +1685,9 @@ class HealthAndCatalogTests(_LogFixture):
         self.tool("Bash", {"command": "pytest"}, fail=True, text="Exit code 1")
         self.end_turn()
         st = self.stats()
-        for payload in (dtd.build_flow(st), dtd.build_quality(st), dtd.build_value(st),
-                        dtd.build_health(st), dtd.catalog_payload()):
-            dtd.json.dumps(payload)
+        for payload in (afi.build_flow(st), afi.build_quality(st), afi.build_value(st),
+                        afi.build_health(st), afi.catalog_payload()):
+            afi.json.dumps(payload)
 
 
 class AdvisorTests(_LogFixture):
@@ -1690,7 +1704,7 @@ class AdvisorTests(_LogFixture):
 
     def test_unverified_work_triggers_the_verify_recommendation_with_evidence(self):
         st = self._many_sessions(verified=False)
-        adv = dtd.build_advisor(st, dtd.build_adoption(st) or {})
+        adv = afi.build_advisor(st, afi.build_adoption(st) or {})
         self.assertTrue(adv["ready"])
         verify = [r for r in adv["recs"] + adv["more"] if r["id"] == "verify"]
         self.assertEqual(len(verify), 1)
@@ -1700,7 +1714,7 @@ class AdvisorTests(_LogFixture):
 
     def test_verified_work_earns_a_win_not_a_warning(self):
         st = self._many_sessions(verified=True)
-        adv = dtd.build_advisor(st, {"end": dtd.build_adoption(st).get("end") or dtd.date.today().isoformat()})
+        adv = afi.build_advisor(st, {"end": afi.build_adoption(st).get("end") or afi.date.today().isoformat()})
         self.assertFalse([r for r in adv["recs"] if r["id"] == "verify"])
         self.assertTrue(any("check the work" in w for w in adv["wins"]))
 

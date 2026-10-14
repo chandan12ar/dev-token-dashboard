@@ -8,6 +8,7 @@ Thumbs.db
 .claude/settings.local.json
 
 # Local auto-start launcher (machine-specific)
+AIFluencyInsights-Startup.vbs
 DevTokenDashboard-Startup.vbs
 
 # Notification threshold-tracking state (local runtime data)

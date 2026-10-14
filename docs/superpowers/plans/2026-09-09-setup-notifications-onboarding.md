@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `--setup-notifications` CLI flag to `dev_token_dashboard.py` that safely wires Claude Code's `statusLine` hook so new users get real Anthropic plan-usage numbers without hand-editing config, plus a startup nudge for users who never run it, plus a fix for the dead `NOTIFY["enabled"]` flag.
+**Goal:** Add a `--setup-notifications` CLI flag to `ai_fluency_insights.py` that safely wires Claude Code's `statusLine` hook so new users get real Anthropic plan-usage numbers without hand-editing config, plus a startup nudge for users who never run it, plus a fix for the dead `NOTIFY["enabled"]` flag.
 
-**Architecture:** All new logic lives in `dev_token_dashboard.py` itself (single-file project — no new production files at rest, only files the wizard writes at runtime: `~/.claude/dev_token_dashboard_statusline.js` and a `settings.json` backup). A small set of pure/near-pure functions (classify existing config, compute the merged config, write it safely) are unit tested directly; a thin orchestrator wires them together behind the new CLI flag and is tested with a fake input/print and a tempdir standing in for `~/.claude`.
+**Architecture:** All new logic lives in `ai_fluency_insights.py` itself (single-file project — no new production files at rest, only files the wizard writes at runtime: `~/.claude/ai_fluency_insights_statusline.js` and a `settings.json` backup). A small set of pure/near-pure functions (classify existing config, compute the merged config, write it safely) are unit tested directly; a thin orchestrator wires them together behind the new CLI flag and is tested with a fake input/print and a tempdir standing in for `~/.claude`.
 
 **Tech Stack:** Python 3.8+ standard library only (`json`, `os`, `re`, `shutil`, `sys`, `time`) — no new dependencies. The bundled statusline script is Node.js (matches Claude Code's own `statusLine` convention and the hand-written script already in use).
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Never write to `~/.claude/statusline.js` or any path the user chose themselves — the wizard only ever creates `~/.claude/dev_token_dashboard_statusline.js` (constant `STATUSLINE_MARKER`).
+- Never write to `~/.claude/statusline.js` or any path the user chose themselves — the wizard only ever creates `~/.claude/ai_fluency_insights_statusline.js` (constant `STATUSLINE_MARKER`).
 - Never modify `settings.json` when an existing `statusLine` is "foreign" (not ours) — diagnose and print guidance only.
 - Always back up `settings.json` before any write to it, and write both it and the statusline script atomically (temp file + `os.replace`), matching the existing pattern in `save_notify_state`.
 - Toast notifications stay Windows-only in this plan; macOS/Linux get the rate-limit-capture setup only, with a printed note. (Spec non-goal — do not add `osascript`/`notify-send` support.)
@@ -25,12 +25,12 @@
 ## Task 1: Classify and merge the `statusLine` config (pure functions)
 
 **Files:**
-- Modify: `dev_token_dashboard.py` — add new functions just above `def default_root():` (currently line 2910)
-- Test: `test_dev_token_dashboard.py` — new `StatuslineConfigTests` class
+- Modify: `ai_fluency_insights.py` — add new functions just above `def default_root():` (currently line 2910)
+- Test: `test_ai_fluency_insights.py` — new `StatuslineConfigTests` class
 
 **Interfaces:**
 - Produces:
-  - `STATUSLINE_MARKER = "dev_token_dashboard_statusline.js"` (module constant)
+  - `STATUSLINE_MARKER = "ai_fluency_insights_statusline.js"` (module constant)
   - `claude_config_dir() -> str` — `$CLAUDE_CONFIG_DIR` if set, else `~/.claude` (same base `default_root()` uses, without the `/projects` suffix)
   - `load_settings_json(path: str) -> tuple[dict | None, str | None]` — `(settings, None)` on success (a missing file returns `({}, None)`); `(None, error_message)` if the file exists but isn't valid JSON or can't be read
   - `classify_statusline(settings: dict) -> str` — one of `"missing"`, `"ours"`, `"foreign"`
@@ -38,7 +38,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-Add to `test_dev_token_dashboard.py`:
+Add to `test_ai_fluency_insights.py`:
 
 ```python
 class StatuslineConfigTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class StatuslineConfigTests(unittest.TestCase):
 
     def test_classify_ours_when_marker_in_command(self):
         settings = {"statusLine": {"type": "command",
-                                    "command": 'node "C:\\Users\\x\\.claude\\dev_token_dashboard_statusline.js"'}}
+                                    "command": 'node "C:\\Users\\x\\.claude\\ai_fluency_insights_statusline.js"'}}
         self.assertEqual(dtd.classify_statusline(settings), "ours")
 
     def test_classify_foreign_when_other_command(self):
@@ -61,33 +61,33 @@ class StatuslineConfigTests(unittest.TestCase):
         self.assertEqual(dtd.classify_statusline(settings), "foreign")
 
     def test_merge_adds_full_block_when_missing(self):
-        new = dtd.merge_statusline_config({}, "/home/x/.claude/dev_token_dashboard_statusline.js")
+        new = dtd.merge_statusline_config({}, "/home/x/.claude/ai_fluency_insights_statusline.js")
         self.assertEqual(new["statusLine"], {
             "type": "command",
-            "command": 'node "/home/x/.claude/dev_token_dashboard_statusline.js"',
+            "command": 'node "/home/x/.claude/ai_fluency_insights_statusline.js"',
             "refreshInterval": 30,
         })
 
     def test_merge_preserves_other_top_level_keys(self):
         settings = {"model": "opusplan", "enabledPlugins": {"foo": True}}
-        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        new = dtd.merge_statusline_config(settings, "/x/ai_fluency_insights_statusline.js")
         self.assertEqual(new["model"], "opusplan")
         self.assertEqual(new["enabledPlugins"], {"foo": True})
 
     def test_merge_patches_refresh_interval_only_when_ours(self):
         settings = {"statusLine": {"type": "command",
-                                    "command": 'node "/x/dev_token_dashboard_statusline.js"'},
+                                    "command": 'node "/x/ai_fluency_insights_statusline.js"'},
                     "model": "opusplan"}
-        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        new = dtd.merge_statusline_config(settings, "/x/ai_fluency_insights_statusline.js")
         self.assertEqual(new["statusLine"]["refreshInterval"], 30)
         self.assertEqual(new["statusLine"]["command"], settings["statusLine"]["command"])
         self.assertEqual(new["model"], "opusplan")
 
     def test_merge_is_a_noop_when_already_correct(self):
         settings = {"statusLine": {"type": "command",
-                                    "command": 'node "/x/dev_token_dashboard_statusline.js"',
+                                    "command": 'node "/x/ai_fluency_insights_statusline.js"',
                                     "refreshInterval": 30}}
-        new = dtd.merge_statusline_config(settings, "/x/dev_token_dashboard_statusline.js")
+        new = dtd.merge_statusline_config(settings, "/x/ai_fluency_insights_statusline.js")
         self.assertEqual(new, settings)
 
 
@@ -130,12 +130,12 @@ class ClaudeConfigDirTests(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m unittest test_dev_token_dashboard.StatuslineConfigTests test_dev_token_dashboard.LoadSettingsJsonTests test_dev_token_dashboard.ClaudeConfigDirTests -v`
-Expected: FAIL with `AttributeError: module 'dev_token_dashboard' has no attribute 'classify_statusline'` (and similarly for the other new names).
+Run: `python -m unittest test_ai_fluency_insights.StatuslineConfigTests test_ai_fluency_insights.LoadSettingsJsonTests test_ai_fluency_insights.ClaudeConfigDirTests -v`
+Expected: FAIL with `AttributeError: module 'ai_fluency_insights' has no attribute 'classify_statusline'` (and similarly for the other new names).
 
 - [ ] **Step 3: Implement the functions**
 
-Insert into `dev_token_dashboard.py` immediately above `def default_root():`:
+Insert into `ai_fluency_insights.py` immediately above `def default_root():`:
 
 ```python
 # ---------------------------------------------------------------------------
@@ -145,7 +145,7 @@ Insert into `dev_token_dashboard.py` immediately above `def default_root():`:
 # onboarding-design.md for the full design.
 # ---------------------------------------------------------------------------
 
-STATUSLINE_MARKER = "dev_token_dashboard_statusline.js"
+STATUSLINE_MARKER = "ai_fluency_insights_statusline.js"
 
 
 def claude_config_dir():
@@ -191,13 +191,13 @@ def merge_statusline_config(settings, statusline_js_path):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python -m unittest test_dev_token_dashboard.StatuslineConfigTests test_dev_token_dashboard.LoadSettingsJsonTests test_dev_token_dashboard.ClaudeConfigDirTests -v`
+Run: `python -m unittest test_ai_fluency_insights.StatuslineConfigTests test_ai_fluency_insights.LoadSettingsJsonTests test_ai_fluency_insights.ClaudeConfigDirTests -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add dev_token_dashboard.py test_dev_token_dashboard.py
+git add ai_fluency_insights.py test_ai_fluency_insights.py
 git commit -m "Add statusLine config classify/merge helpers for setup wizard"
 ```
 
@@ -206,8 +206,8 @@ git commit -m "Add statusLine config classify/merge helpers for setup wizard"
 ## Task 2: Bundled statusline script, node check, and safe settings write
 
 **Files:**
-- Modify: `dev_token_dashboard.py` — add `import shutil` to the top imports; add new functions/constant after Task 1's block (still above `def default_root():`)
-- Test: `test_dev_token_dashboard.py` — new `WriteSettingsWithBackupTests` and `NodeAvailableTests` classes
+- Modify: `ai_fluency_insights.py` — add `import shutil` to the top imports; add new functions/constant after Task 1's block (still above `def default_root():`)
+- Test: `test_ai_fluency_insights.py` — new `WriteSettingsWithBackupTests` and `NodeAvailableTests` classes
 
 **Interfaces:**
 - Consumes: none from Task 1 (independent additions), but lives in the same file section
@@ -261,12 +261,12 @@ class WriteSettingsWithBackupTests(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m unittest test_dev_token_dashboard.NodeAvailableTests test_dev_token_dashboard.WriteSettingsWithBackupTests -v`
+Run: `python -m unittest test_ai_fluency_insights.NodeAvailableTests test_ai_fluency_insights.WriteSettingsWithBackupTests -v`
 Expected: FAIL — `dtd.shutil` and `dtd.node_available`/`dtd.write_settings_with_backup` don't exist yet.
 
 - [ ] **Step 3: Implement**
 
-Add `import shutil` next to the other stdlib imports at the top of `dev_token_dashboard.py` (alphabetical, next to `import re`).
+Add `import shutil` next to the other stdlib imports at the top of `ai_fluency_insights.py` (alphabetical, next to `import re`).
 
 Add to the setup-wizard section (after Task 1's functions):
 
@@ -290,14 +290,14 @@ def write_settings_with_backup(settings_path, new_settings):
     return backup_path
 
 
-# Written verbatim to <claude_config_dir>/dev_token_dashboard_statusline.js by
+# Written verbatim to <claude_config_dir>/ai_fluency_insights_statusline.js by
 # run_setup_notifications() -- never to statusline.js or any user-chosen path.
 # Trimmed from the hand-written ~/.claude/statusline.js already in use on the
 # maintainer's machine: same merge-onto-previous-snapshot side effect, plus a
 # minimal one-line status output for users who had no statusLine at all.
-BUNDLED_STATUSLINE_JS = r"""// dev-token-dashboard:managed-statusline
+BUNDLED_STATUSLINE_JS = r"""// ai-fluency-insights:managed-statusline
 // Captures Anthropic's real rate_limits (five_hour/seven_day) for
-// dev_token_dashboard.py's plan-usage panel and toast notifications.
+// ai_fluency_insights.py's plan-usage panel and toast notifications.
 // See docs/DASHBOARD_GUIDE.md#plan-usage-limits.
 const fs = require('fs');
 const os = require('os');
@@ -346,18 +346,18 @@ process.stdin.on('end', () => {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python -m unittest test_dev_token_dashboard.NodeAvailableTests test_dev_token_dashboard.WriteSettingsWithBackupTests -v`
+Run: `python -m unittest test_ai_fluency_insights.NodeAvailableTests test_ai_fluency_insights.WriteSettingsWithBackupTests -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Run the full suite to check nothing else broke**
 
-Run: `python -m unittest test_dev_token_dashboard -v`
+Run: `python -m unittest test_ai_fluency_insights -v`
 Expected: all PASS (previous count + new tests).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add dev_token_dashboard.py test_dev_token_dashboard.py
+git add ai_fluency_insights.py test_ai_fluency_insights.py
 git commit -m "Add bundled statusline script, node check, and safe settings writer"
 ```
 
@@ -366,8 +366,8 @@ git commit -m "Add bundled statusline script, node check, and safe settings writ
 ## Task 3: `run_setup_notifications` orchestrator — missing/ours/dry-run
 
 **Files:**
-- Modify: `dev_token_dashboard.py` — add after Task 2's block, still above `def default_root():`
-- Test: `test_dev_token_dashboard.py` — new `RunSetupNotificationsTests` class
+- Modify: `ai_fluency_insights.py` — add after Task 2's block, still above `def default_root():`
+- Test: `test_ai_fluency_insights.py` — new `RunSetupNotificationsTests` class
 
 **Interfaces:**
 - Consumes: `claude_config_dir`, `load_settings_json`, `classify_statusline`, `merge_statusline_config`, `node_available`, `write_settings_with_backup`, `BUNDLED_STATUSLINE_JS` (Tasks 1-2); `load_rate_limits`, `RATE_LIMITS_PATH`, `NOTIFY` (existing)
@@ -479,7 +479,7 @@ class RunSetupNotificationsTests(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m unittest test_dev_token_dashboard.RunSetupNotificationsTests -v`
+Run: `python -m unittest test_ai_fluency_insights.RunSetupNotificationsTests -v`
 Expected: FAIL — `dtd.run_setup_notifications` doesn't exist yet.
 
 - [ ] **Step 3: Implement**
@@ -575,18 +575,18 @@ def _report_foreign_statusline(settings, print_fn):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python -m unittest test_dev_token_dashboard.RunSetupNotificationsTests -v`
+Run: `python -m unittest test_ai_fluency_insights.RunSetupNotificationsTests -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Run the full suite**
 
-Run: `python -m unittest test_dev_token_dashboard -v`
+Run: `python -m unittest test_ai_fluency_insights -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add dev_token_dashboard.py test_dev_token_dashboard.py
+git add ai_fluency_insights.py test_ai_fluency_insights.py
 git commit -m "Add run_setup_notifications orchestrator for missing/ours/dry-run"
 ```
 
@@ -595,8 +595,8 @@ git commit -m "Add run_setup_notifications orchestrator for missing/ours/dry-run
 ## Task 4: `run_setup_notifications` — foreign statusLine diagnostics
 
 **Files:**
-- Modify: `dev_token_dashboard.py` — replace the `_report_foreign_statusline` stub from Task 3
-- Test: `test_dev_token_dashboard.py` — new `ForeignStatuslineTests` class
+- Modify: `ai_fluency_insights.py` — replace the `_report_foreign_statusline` stub from Task 3
+- Test: `test_ai_fluency_insights.py` — new `ForeignStatuslineTests` class
 
 **Interfaces:**
 - Consumes: `load_rate_limits`, `RATE_LIMITS_PATH` (existing); `run_setup_notifications` (Task 3, unchanged signature)
@@ -650,7 +650,7 @@ class ForeignStatuslineTests(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m unittest test_dev_token_dashboard.ForeignStatuslineTests -v`
+Run: `python -m unittest test_ai_fluency_insights.ForeignStatuslineTests -v`
 Expected: FAIL — `_extract_script_path` doesn't exist, and the stub `_report_foreign_statusline` raises `NotImplementedError`.
 
 - [ ] **Step 3: Implement**
@@ -688,18 +688,18 @@ def _report_foreign_statusline(settings, print_fn):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python -m unittest test_dev_token_dashboard.ForeignStatuslineTests -v`
+Run: `python -m unittest test_ai_fluency_insights.ForeignStatuslineTests -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Run the full suite**
 
-Run: `python -m unittest test_dev_token_dashboard -v`
+Run: `python -m unittest test_ai_fluency_insights -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add dev_token_dashboard.py test_dev_token_dashboard.py
+git add ai_fluency_insights.py test_ai_fluency_insights.py
 git commit -m "Add foreign-statusLine diagnostics to setup wizard"
 ```
 
@@ -708,7 +708,7 @@ git commit -m "Add foreign-statusLine diagnostics to setup wizard"
 ## Task 5: Wire `--setup-notifications`/`--dry-run` into the CLI
 
 **Files:**
-- Modify: `dev_token_dashboard.py:main()` (currently starting at line 2917)
+- Modify: `ai_fluency_insights.py:main()` (currently starting at line 2917)
 
 **Interfaces:**
 - Consumes: `run_setup_notifications` (Task 3/4)
@@ -749,30 +749,30 @@ Change to:
 
 - [ ] **Step 2: Manually verify the dry-run path**
 
-Run: `python dev_token_dashboard.py --setup-notifications --dry-run`
+Run: `python ai_fluency_insights.py --setup-notifications --dry-run`
 Expected: prints what it would write (or "Already configured" if this machine already has the marker-tagged statusLine from a previous run), makes no file changes. Confirm with `git status` / checking `~/.claude/settings.json` mtime that nothing changed.
 
 - [ ] **Step 3: Manually verify against a scratch config, not the real one**
 
 ```bash
 scratch=$(mktemp -d)
-CLAUDE_CONFIG_DIR="$scratch" python dev_token_dashboard.py --setup-notifications
+CLAUDE_CONFIG_DIR="$scratch" python ai_fluency_insights.py --setup-notifications
 ```
 Answer `y` at the prompt. Expected: `$scratch/settings.json` and
-`$scratch/dev_token_dashboard_statusline.js` are created; the real
+`$scratch/ai_fluency_insights_statusline.js` are created; the real
 `~/.claude/settings.json` is untouched. Re-run the same command (same
 `$scratch`) — expected: "Already configured -- ... needs no changes."
 Clean up afterward: `rm -rf "$scratch"`.
 
 - [ ] **Step 4: Run the full test suite**
 
-Run: `python -m unittest test_dev_token_dashboard -v`
+Run: `python -m unittest test_ai_fluency_insights -v`
 Expected: all PASS (nothing in this task touches tested logic, this just confirms the file still imports and runs cleanly).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add dev_token_dashboard.py
+git add ai_fluency_insights.py
 git commit -m "Wire --setup-notifications and --dry-run into the CLI"
 ```
 
@@ -781,8 +781,8 @@ git commit -m "Wire --setup-notifications and --dry-run into the CLI"
 ## Task 6: Fix the dead `NOTIFY["enabled"]` flag
 
 **Files:**
-- Modify: `dev_token_dashboard.py` — add helper near `NOTIFY` (line 68); modify `main()`'s thread-start (currently line 2984)
-- Test: `test_dev_token_dashboard.py` — new `ShouldRunNotificationsTests` class
+- Modify: `ai_fluency_insights.py` — add helper near `NOTIFY` (line 68); modify `main()`'s thread-start (currently line 2984)
+- Test: `test_ai_fluency_insights.py` — new `ShouldRunNotificationsTests` class
 
 **Interfaces:**
 - Produces: `should_run_notifications(notify: dict | None = None) -> bool` — reads `notify["enabled"]` (defaulting to the module-level `NOTIFY` dict, and to `True` if the key itself is absent)
@@ -809,7 +809,7 @@ class ShouldRunNotificationsTests(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m unittest test_dev_token_dashboard.ShouldRunNotificationsTests -v`
+Run: `python -m unittest test_ai_fluency_insights.ShouldRunNotificationsTests -v`
 Expected: FAIL — `dtd.should_run_notifications` doesn't exist.
 
 - [ ] **Step 3: Implement**
@@ -843,18 +843,18 @@ Change to:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python -m unittest test_dev_token_dashboard.ShouldRunNotificationsTests -v`
+Run: `python -m unittest test_ai_fluency_insights.ShouldRunNotificationsTests -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Run the full suite**
 
-Run: `python -m unittest test_dev_token_dashboard -v`
+Run: `python -m unittest test_ai_fluency_insights -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add dev_token_dashboard.py test_dev_token_dashboard.py
+git add ai_fluency_insights.py test_ai_fluency_insights.py
 git commit -m "Fix NOTIFY[\"enabled\"] so it actually gates the notification thread"
 ```
 
@@ -863,8 +863,8 @@ git commit -m "Fix NOTIFY[\"enabled\"] so it actually gates the notification thr
 ## Task 7: Startup nudge when rate-limit capture has never run
 
 **Files:**
-- Modify: `dev_token_dashboard.py` — add helper near Task 1's block; modify `main()` (around the existing `print(f"  Reading logs from: {args.dir}")` line, currently 2971)
-- Test: `test_dev_token_dashboard.py` — new `StartupHintTests` class
+- Modify: `ai_fluency_insights.py` — add helper near Task 1's block; modify `main()` (around the existing `print(f"  Reading logs from: {args.dir}")` line, currently 2971)
+- Test: `test_ai_fluency_insights.py` — new `StartupHintTests` class
 
 **Interfaces:**
 - Consumes: `RATE_LIMITS_PATH` (existing)
@@ -892,7 +892,7 @@ class StartupHintTests(unittest.TestCase):
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `python -m unittest test_dev_token_dashboard.StartupHintTests -v`
+Run: `python -m unittest test_ai_fluency_insights.StartupHintTests -v`
 Expected: FAIL — `dtd.startup_hint` doesn't exist.
 
 - [ ] **Step 3: Implement**
@@ -911,7 +911,7 @@ def startup_hint(rate_limits_path=None, is_windows=None):
 In `main()`, find:
 
 ```python
-    print(f"  Dev Token Dashboard running at {url}")
+    print(f"  AI Fluency Insights running at {url}")
     print(f"  Reading logs from: {args.dir}")
     print("  Ctrl+C to stop.")
 ```
@@ -919,7 +919,7 @@ In `main()`, find:
 Change to:
 
 ```python
-    print(f"  Dev Token Dashboard running at {url}")
+    print(f"  AI Fluency Insights running at {url}")
     print(f"  Reading logs from: {args.dir}")
     hint = startup_hint()
     if hint:
@@ -929,18 +929,18 @@ Change to:
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `python -m unittest test_dev_token_dashboard.StartupHintTests -v`
+Run: `python -m unittest test_ai_fluency_insights.StartupHintTests -v`
 Expected: all PASS.
 
 - [ ] **Step 5: Run the full suite**
 
-Run: `python -m unittest test_dev_token_dashboard -v`
+Run: `python -m unittest test_ai_fluency_insights -v`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add dev_token_dashboard.py test_dev_token_dashboard.py
+git add ai_fluency_insights.py test_ai_fluency_insights.py
 git commit -m "Add startup hint pointing to --setup-notifications when never run"
 ```
 
@@ -966,7 +966,7 @@ local estimate. To get Anthropic's real 5-hour/7-day numbers (and, on
 Windows, toast pop-ups as you cross usage milestones), run:
 
 ```
-python dev_token_dashboard.py --setup-notifications
+python ai_fluency_insights.py --setup-notifications
 ```
 
 It wires up a Claude Code `statusLine` hook for you and shows exactly
@@ -986,7 +986,7 @@ up the accurate numbers only.
 In the "Plan usage limits" section (added earlier today), find the paragraph starting "*How it's captured:*" and add, immediately after it:
 
 ```markdown
-*Setting it up:* run `python dev_token_dashboard.py --setup-notifications`
+*Setting it up:* run `python ai_fluency_insights.py --setup-notifications`
 (add `--dry-run` to preview first) — it configures the `statusLine` hook
 for you and won't touch an existing custom one. See
 [SETUP.md](../SETUP.md#3b-optional-accurate-plan-usage-numbers-and-toast-notifications).

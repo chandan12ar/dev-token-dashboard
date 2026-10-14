@@ -1,4 +1,4 @@
-# How the Dev Token Dashboard Works
+# How AI Fluency Insights Works
 
 A 100% local dashboard for Claude Code usage. It consumes **zero tokens** — it
 never calls any API. It only reads the session logs Claude Code already saves
@@ -139,13 +139,13 @@ every metric's confidence badge, formula and limitation.
 ## Running it
 
 ```
-python dev_token_dashboard.py               # serves http://localhost:8787
-python dev_token_dashboard.py --port 9000   # different port
-python dev_token_dashboard.py --dir <path>  # custom logs location
-python dev_token_dashboard.py --dump        # print raw stats JSON and exit
+python ai_fluency_insights.py               # serves http://localhost:8787
+python ai_fluency_insights.py --port 9000   # different port
+python ai_fluency_insights.py --dir <path>  # custom logs location
+python ai_fluency_insights.py --dump        # print raw stats JSON and exit
 ```
 
-On Windows, after editing the script, `Restart-Dashboard.bat` stops every
+On Windows, after editing the script, `Restart-Insights.bat` stops every
 running copy (matched by command line *and* by whoever owns port 8787) and
 relaunches one fresh windowless instance, then opens the browser.
 

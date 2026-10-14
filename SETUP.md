@@ -1,6 +1,6 @@
 # Setup Guide
 
-Get the Dev Token Dashboard running on your machine in under two minutes.
+Get AI Fluency Insights running on your machine in under two minutes.
 
 ## Prerequisites
 
@@ -16,16 +16,16 @@ Get the Dev Token Dashboard running on your machine in under two minutes.
 
 ```
 git clone <this-repo-url>
-cd dev-token-dashboard
+cd ai-fluency-insights
 ```
 
-(or just download `dev_token_dashboard.py` and `chart.umd.min.js` into a
+(or just download `ai_fluency_insights.py` and `chart.umd.min.js` into a
 folder — those two files are the entire app.)
 
 ## 2. Run it
 
 ```
-python dev_token_dashboard.py
+python ai_fluency_insights.py
 ```
 
 That's it. Your browser opens http://localhost:8787 with your stats. The
@@ -49,15 +49,15 @@ The script auto-detects this (it also honors the `CLAUDE_CONFIG_DIR`
 environment variable). If your logs live somewhere unusual:
 
 ```
-python dev_token_dashboard.py --dir "D:\path\to\.claude\projects"
+python ai_fluency_insights.py --dir "D:\path\to\.claude\projects"
 ```
 
 ### Options
 
 ```
-python dev_token_dashboard.py --port 9000      # different port
-python dev_token_dashboard.py --no-browser     # don't auto-open the browser
-python dev_token_dashboard.py --dump           # print raw stats JSON and exit
+python ai_fluency_insights.py --port 9000      # different port
+python ai_fluency_insights.py --no-browser     # don't auto-open the browser
+python ai_fluency_insights.py --dump           # print raw stats JSON and exit
 ```
 
 ## 3. Optional: start automatically at logon
@@ -65,8 +65,8 @@ python dev_token_dashboard.py --dump           # print raw stats JSON and exit
 ### Windows — option A: Task Scheduler (needs an Administrator terminal)
 
 ```
-python dev_token_dashboard.py --install-startup     # install
-python dev_token_dashboard.py --uninstall-startup   # remove
+python ai_fluency_insights.py --install-startup     # install
+python ai_fluency_insights.py --uninstall-startup   # remove
 ```
 
 ### Windows — option B: Startup folder (no admin needed)
@@ -77,9 +77,9 @@ console-less Python), with the script path as argument. In PowerShell:
 ```powershell
 $pyw = (Get-Command pythonw.exe).Source
 $ws = New-Object -ComObject WScript.Shell
-$lnk = $ws.CreateShortcut("$([Environment]::GetFolderPath('Startup'))\Dev Token Dashboard.lnk")
+$lnk = $ws.CreateShortcut("$([Environment]::GetFolderPath('Startup'))\AI Fluency Insights.lnk")
 $lnk.TargetPath = $pyw
-$lnk.Arguments = '"C:\full\path\to\dev_token_dashboard.py" --no-browser'
+$lnk.Arguments = '"C:\full\path\to\ai_fluency_insights.py" --no-browser'
 $lnk.Save()
 ```
 
@@ -90,7 +90,7 @@ Delete the shortcut (`Win+R` → `shell:startup`) to remove auto-start.
 ```
 crontab -e
 # add:
-@reboot /usr/bin/python3 /full/path/to/dev_token_dashboard.py --no-browser
+@reboot /usr/bin/python3 /full/path/to/ai_fluency_insights.py --no-browser
 ```
 
 (or create a `launchd` user agent if you prefer.)
@@ -98,19 +98,19 @@ crontab -e
 ### Linux (systemd)
 
 ```
-# ~/.config/systemd/user/token-dashboard.service
+# ~/.config/systemd/user/ai-fluency-insights.service
 [Unit]
-Description=Dev Token Dashboard
+Description=AI Fluency Insights
 
 [Service]
-ExecStart=/usr/bin/python3 /full/path/to/dev_token_dashboard.py --no-browser
+ExecStart=/usr/bin/python3 /full/path/to/ai_fluency_insights.py --no-browser
 
 [Install]
 WantedBy=default.target
 ```
 
 ```
-systemctl --user enable --now token-dashboard
+systemctl --user enable --now ai-fluency-insights
 ```
 
 ## 3b. Optional: accurate plan-usage numbers and toast notifications
@@ -120,7 +120,7 @@ local estimate. To get Anthropic's real 5-hour/7-day numbers (and, on
 Windows, toast pop-ups as you cross usage milestones), run:
 
 ```
-python dev_token_dashboard.py --setup-notifications
+python ai_fluency_insights.py --setup-notifications
 ```
 
 It wires up a Claude Code `statusLine` hook for you and shows exactly

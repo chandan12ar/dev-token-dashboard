@@ -1,15 +1,15 @@
-# Restart the Dev Token Dashboard on a fresh process so it reloads the latest
-# code, then open it in your browser. Invoked by Restart-Dashboard.bat.
+# Restart AI Fluency Insights on a fresh process so it reloads the latest
+# code, then open it in your browser. Invoked by Restart-Insights.bat.
 $ErrorActionPreference = 'SilentlyContinue'
 $port   = 8787
-$script = Join-Path $PSScriptRoot 'dev_token_dashboard.py'
+$script = Join-Path $PSScriptRoot 'ai_fluency_insights.py'
 
 Write-Host ''
-Write-Host '  Dev Token Dashboard - restart' -ForegroundColor Cyan
+Write-Host '  AI Fluency Insights - restart' -ForegroundColor Cyan
 Write-Host '  -----------------------------'
 
 if (-not (Test-Path $script)) {
-    Write-Host "  ERROR: dev_token_dashboard.py not found next to this script." -ForegroundColor Red
+    Write-Host "  ERROR: ai_fluency_insights.py not found next to this script." -ForegroundColor Red
     Start-Sleep -Seconds 4
     exit 1
 }
@@ -19,7 +19,7 @@ if (-not (Test-Path $script)) {
 Write-Host '  Stopping running instances...'
 $killed = 0
 Get-CimInstance Win32_Process |
-    Where-Object { $_.Name -match '^pythonw?[\d.]*\.exe$' -and $_.CommandLine -like '*dev_token_dashboard*' } |
+    Where-Object { $_.Name -match '^pythonw?[\d.]*\.exe$' -and $_.CommandLine -like '*ai_fluency_insights*' } |
     ForEach-Object { if (Stop-Process -Id $_.ProcessId -Force -PassThru) { $killed++ } }
 foreach ($procId in ((Get-NetTCPConnection -LocalPort $port -State Listen).OwningProcess | Select-Object -Unique)) {
     if (Stop-Process -Id $procId -Force -PassThru) { $killed++ }
