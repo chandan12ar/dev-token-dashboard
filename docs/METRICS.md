@@ -349,9 +349,12 @@ reads → explore. It's a heuristic — expect roughly-right, not perfect.
 
 ## 11. AI Fluency report (v1.2)
 
-Four 0–100 heuristic scores per ISO week, adapted for coding from
-Anthropic's 4D AI-fluency framework (Delegation, Description,
-Discernment, Diligence). All computed locally:
+Four 0–100 heuristic scores per ISO week, adapted for coding from the
+4D AI Fluency Framework (Delegation, Description, Discernment, Diligence) by
+Rick Dakan and Joseph Feller with Anthropic, licensed
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) — see
+[Credits](../README.md#credits). Changes were made; not endorsed by the
+authors. All computed locally:
 
 | Dimension | Formula |
 |---|---|

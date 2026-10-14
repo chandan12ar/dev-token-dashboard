@@ -211,6 +211,18 @@ Your prompts and logs never leave your disk.
 - [docs/METRICS.md](docs/METRICS.md) — **the math**: exact formula behind every metric, what each dashboard section means, and the known approximations
 - [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md) — why our token counting is the correct one
 
+## Credits
+
+The **AI Fluency report** (Delegation, Description, Discernment, Diligence) is
+adapted from the [AI Fluency Framework](https://www-cdn.anthropic.com/b383cf6baddbfc72fdf8b0ed533a518e2872d531.pdf)
+by **Rick Dakan and Joseph Feller**, developed with Anthropic
+(© 2025 Dakan, Feller and Anthropic, [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/)).
+The scores here are heuristic, coding-specific adaptations computed from local
+logs. Changes were made to the original framework, and the authors and
+Anthropic have not reviewed or endorsed this project. AI Fluency Insights is an
+independent, unofficial tool and is not affiliated with Anthropic.
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). The framework-derived material described under
+[Credits](#credits) remains subject to its own CC BY-NC-SA 4.0 terms.
