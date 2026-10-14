@@ -31,8 +31,10 @@ import tts  # noqa: E402
 from record import LEAD, record  # noqa: E402
 
 FPS = 30
-DATA_REAL = "Everything you are about to see is running on my own real Claude Code logs."
-DATA_SAMPLE = "This preview runs on sample data, not real usage."
+# Optional spoken line before the tour (the {DATA} slot in walkthrough.json). Empty by default:
+# the narration does not talk about the data source. Use --data-line to add one.
+DATA_REAL = ""
+DATA_SAMPLE = ""
 
 
 def default_logs():
