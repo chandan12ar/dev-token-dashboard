@@ -26,6 +26,7 @@ class Recorder:
     def __init__(self, page, size):
         self.page, self.size = page, size
         self.x, self.y = size[0] - 160, size[1] // 2
+        self.stage_on = False
 
     async def v(self, expr, arg=None):
         return await self.page.evaluate(expr, arg)
@@ -43,6 +44,8 @@ class Recorder:
 
     def _clamp(self, r):
         w, h = self.size
+        if r["x"] < 240:                      # sidebar: land exactly on the button
+            return (r["x"], r["y"])
         return (min(max(r["x"], 340), w - 60), min(max(r["y"], 150), h - 130))
 
     async def point_at(self, target, ms=850):
@@ -59,6 +62,7 @@ class Recorder:
         if "stage" in act:
             await self.v("() => V.hideCursor()")
             await self.v("s => V.stage(s)", stages[act["stage"]] if act["stage"] else None)
+            self.stage_on = bool(act["stage"])
             await asyncio.sleep(0.9 if act["stage"] else 0.8)
         elif "reveal" in act:
             n = await self.v("() => V.revealCount()")
@@ -186,7 +190,9 @@ async def record(script, durations, url, frames_dir, chromium=None, size=(1600, 
             t0 = time.time()
             beats.append({"i": i, "start": t0, "dur": dur})
             text = (b.get("cap") or b["say"]).replace("{DATA}", data_line).strip()
-            has_stage = any("stage" in a and a["stage"] for a in b.get("do", []))
+            # no caption over a title card: the card is the visual
+            has_stage = any("stage" in a and a["stage"] for a in b.get("do", [])) or (
+                rec.stage_on and not any("stage" in a for a in b.get("do", [])))
             await page.evaluate("t => V.caption(t)", text if captions and not has_stage else None)
             log("  [%2d/%d] %s" % (i + 1, len(script["beats"]), text[:70]))
             for a in b.get("do", []):
