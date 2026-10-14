@@ -6,6 +6,8 @@ Every engine turns one sentence of text into a mono 24 kHz WAV file.
           Best quality, free, needs internet. Default when installed.
   sapi    Windows built-in voices (System.Speech via PowerShell). Offline.
   say     macOS `say`. Offline.
+  kokoro  Kokoro-82M open neural voice, offline on CPU (pip install kokoro-onnx; set
+          KOKORO_MODEL and KOKORO_VOICES). Natural sounding, no network needed.
   flite   ffmpeg's bundled flite filter. Offline but robotic: preview quality only.
 
 `auto` picks the first engine that works, in the order above.
@@ -16,8 +18,8 @@ import shutil
 import subprocess
 import sys
 
-ENGINES = ("edge", "sapi", "say", "flite")
-DEFAULT_VOICE = {"edge": "en-US-AriaNeural", "sapi": "", "say": "Samantha", "flite": "slt"}
+ENGINES = ("edge", "kokoro", "sapi", "say", "flite")
+DEFAULT_VOICE = {"edge": "en-US-AriaNeural", "kokoro": "af_heart", "sapi": "", "say": "Samantha", "flite": "slt"}
 
 
 def _ffmpeg_to_wav(src, dst):
@@ -62,6 +64,36 @@ def _say(text, out, voice, rate):
     os.remove(tmp)
 
 
+_KOKORO = None
+
+
+def _kokoro(text, out, voice, rate):
+    """Kokoro-82M, a small open (Apache-2.0) neural voice that runs offline on CPU.
+    KOKORO_MODEL = path to model_quantized.onnx, KOKORO_VOICES = folder of <voice>.bin style files
+    (the kokoro-js npm package ships them). speed comes from `rate` like "+5%"."""
+    global _KOKORO
+    import wave
+
+    import numpy as np
+    from kokoro_onnx import Kokoro
+
+    if _KOKORO is None:
+        vdir = os.environ["KOKORO_VOICES"]
+        npz = os.path.join(vdir, "_voices.npz")
+        if not os.path.exists(npz):
+            np.savez(npz, **{f[:-4]: np.fromfile(os.path.join(vdir, f), dtype=np.float32).reshape(-1, 1, 256)
+                             for f in os.listdir(vdir) if f.endswith(".bin")})
+        _KOKORO = Kokoro(os.environ["KOKORO_MODEL"], npz)
+    speed = 1.0 + float(str(rate).rstrip("%") or 0) / 100.0
+    audio, sr = _KOKORO.create(text, voice=voice, speed=speed, lang="en-us")
+    tmp = out + ".src.wav"
+    with wave.open(tmp, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
+    _ffmpeg_to_wav(tmp, out)
+    os.remove(tmp)
+
+
 def _flite(text, out, voice, rate):
     txt = out + ".txt"
     with open(txt, "w", encoding="utf-8") as f:
@@ -72,7 +104,7 @@ def _flite(text, out, voice, rate):
     os.remove(txt)
 
 
-_FN = {"edge": _edge, "sapi": _sapi, "say": _say, "flite": _flite}
+_FN = {"edge": _edge, "kokoro": _kokoro, "sapi": _sapi, "say": _say, "flite": _flite}
 
 
 def _available(engine):
@@ -82,6 +114,12 @@ def _available(engine):
             return True
         except ImportError:
             return False
+    if engine == "kokoro":
+        try:
+            import kokoro_onnx  # noqa: F401
+        except ImportError:
+            return False
+        return bool(os.environ.get("KOKORO_MODEL") and os.environ.get("KOKORO_VOICES"))
     if engine == "sapi":
         return sys.platform.startswith("win") and shutil.which("powershell") is not None
     if engine == "say":

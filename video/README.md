@@ -21,12 +21,24 @@ Useful flags:
 | `--privacy` | Turns on the dashboard's Privacy mode first: hides session titles, prompt previews and file names. Use this if the video will be shared. |
 | `--voice en-US-AvaNeural` | Another edge-tts voice. `edge-tts --list-voices` shows them all. |
 | `--engine sapi` / `say` | Offline voices (Windows / macOS) if you do not want edge-tts, which needs internet. |
+| `--engine kokoro` | Kokoro-82M, an open neural voice that runs offline on CPU and sounds natural. `pip install kokoro-onnx`, then set `KOKORO_MODEL` (the `model_quantized.onnx` file) and `KOKORO_VOICES` (the `voices/` folder of the `kokoro-js` npm package). Default voice `af_heart`. |
 | `--rate -8%` | Slow the narration down (edge-tts). |
 | `--dir PATH` | Read logs from somewhere else. |
 | `--no-captions` | Do not burn captions into the picture. |
 | `--sample` | Use generated **sample** data (`make_sample_logs.py`) and label the video "SAMPLE DATA - PREVIEW". For trying the pipeline on a machine with no logs. Never presented as real usage. |
 
 A run takes roughly as long as the video plus encoding (about 10 minutes for a 7 minute video).
+
+## Change only the voice
+
+`build_video.py` keeps its working folder. To try another voice without recording the screen again
+(minutes instead of a full run):
+
+```
+python video/revoice.py --work <that folder> --engine kokoro --voice af_heart --out video/out/new-voice.mp4
+```
+
+Each sentence is fitted into the slot the old one had, sped up slightly (at most 18%) if it runs long.
 
 ## Change the story
 
