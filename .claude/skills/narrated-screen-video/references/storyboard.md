@@ -7,6 +7,9 @@
 4. Story arc that works
 5. Pacing rules
 6. Stage cards
+7. Drafting from the live app
+8. Templates by product type
+9. Command-line tools
 
 ## 1. Layout
 
@@ -83,3 +86,33 @@ Resolve against what is **visible now**: after a `tab` action, only that tab's c
 ## 6. Stage cards (`stages`)
 
 Keys: `mark` (logo tile), `eyebrow`, `title` (`**word**` becomes the accent colour), `sub`, `items` (`{k,v}` rows or `{v}` question rows), `chips`, `cmd` (monospace box), `url`, `align: "center"`. Dark gradient background, readable at 1600x900. Restyle in `overlay.js` (`#v-stage`, `.vs-*`) to match the brand.
+
+## 7. Drafting from the live app
+
+`python scripts/draft_storyboard.py --url URL --out script.json --shots shots/` opens the app, finds the navigation (tabs, sidebar, top nav; pass `--nav "css"` if it guesses wrong), clicks through each item and records for every view: the heading, a KPI row if there is one, each card (kind: card / chart / table), and whether a table scrolls sideways. It writes:
+- `script.json` with `tab`, `scroll`, `spot`, `sweep`, `hscroll` actions and real selectors already in place;
+- `_context` on each beat: the on-screen text of that block, to write the narration from;
+- screenshots (`shots/NN-name.png` and `-full.png`): open them, you are the only one who can judge what matters.
+
+All narration is `TODO:`; `build_video.py` refuses to run until none is left. The tool cannot know *why* a number matters, so do not auto-fill sentences from `_context`: write what question the view answers and what a viewer should do with it. Selectors are generated paths (`#id` where possible, else `tag:nth-of-type` chains) and can break if the app changes: prefer `text:` or an id you add yourself for anything important.
+
+## 8. Templates by product type (`assets/templates/`)
+
+| File | Shape |
+|---|---|
+| `dashboard.json` | problem -> what exists -> questions -> solution -> tabs (KPI, chart, wide table) -> wrap-up |
+| `saas-onboarding.json` | before -> sign-in/first screen -> core step -> result; use `--storage-state` + `--blur-auto` |
+| `api-docs.json` | auth -> first request -> response -> reference; copy real responses |
+| `cli-tool.json` | install -> first run -> a useful flag; uses `terminal-replay.html` |
+| `release-notes.json` | headline -> 2-4 changes shown live -> fixes -> upgrade; 60-90 s |
+
+Each beat's `say` says what that sentence has to accomplish. Replace every `TODO`, delete beats you don't need, add more per tab.
+
+## 9. Command-line tools
+
+`assets/terminal-replay.html` is a scripted terminal page. Serve the `assets` folder (`python3 -m http.server 8790 -d assets`), record `http://127.0.0.1:8790/terminal-replay.html` with `--config-js` containing `window.V_CONFIG = { ready: '#term', root: 'body' };`, and drive it with `eval` actions:
+
+```json
+{"eval": "T.run([['cmd','acme init'],['out',['Created acme.config.json','{g}Ready.{/}']],['wait',600]])"}
+```
+Steps: `cmd` (types, then Enter), `out` (lines, optional `{delay}`), `comment`, `wait`, `clear`. Colours `{g}{r}{y}{b}{d}...{/}`. Run the real command first and paste what it really printed - an invented output is a lie in a product video. Keep commands short and output under ~8 lines per beat. A working example: `assets/examples/cli-demo.json`.

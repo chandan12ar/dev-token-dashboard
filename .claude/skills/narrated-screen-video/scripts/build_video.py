@@ -27,6 +27,7 @@ import wave
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tts  # noqa: E402
+import words  # noqa: E402
 from record import LEAD, record  # noqa: E402
 
 FPS = 30
@@ -40,7 +41,7 @@ def start_server(cmd, url, ready_path):
         if p is not None and p.poll() is not None:
             raise SystemExit("app server exited early:\n" + (p.stdout.read() or ""))
         try:
-            urllib.request.urlopen(url.rstrip("/") + "/" + ready_path.lstrip("/"), timeout=2).read(64)
+            urllib.request.urlopen(url if not ready_path else url.rstrip("/") + "/" + ready_path.lstrip("/"), timeout=2).read(64)
             return p
         except Exception:
             time.sleep(0.3)
@@ -95,9 +96,17 @@ def main():
     ap.add_argument("--sidebar-px", type=int, default=0, help="width of a fixed left sidebar; the cursor lands exactly there")
     ap.add_argument("--scheme", default="light", choices=("light", "dark"), help="browser colour scheme")
     ap.add_argument("--badge", default="", help="text for a small corner badge when a beat says {BADGE} (e.g. SAMPLE DATA)")
+    ap.add_argument("--storage-state", default=None, help="saved login (scripts/save_login.py) for apps behind a sign-in")
+    ap.add_argument("--basic-auth", default=None, help="user:password for HTTP basic auth")
+    ap.add_argument("--brand", default=None, help="brand.json from extract_brand.py (title cards use the app's colours/font)")
+    ap.add_argument("--blur", default="", help="comma-separated CSS selectors to blur (emails, keys, names)")
+    ap.add_argument("--blur-auto", action="store_true", help="also blur emails, API keys/tokens and IP addresses found in the page text")
+    ap.add_argument("--lexicon", default=None, help="extra pronunciation fixes JSON {\"API\": \"A P I\"} merged over lexicon.default.json")
+    ap.add_argument("--no-highlight", action="store_true", help="plain sentence captions instead of word-by-word highlighting")
+    ap.add_argument("--allow-missing", action="store_true", help="do not fail when a spotlight/scroll/click target was not found")
     ap.add_argument("--engine", default="auto", choices=("auto",) + tts.ENGINES, help="text-to-speech engine")
     ap.add_argument("--voice", default=None, help="voice name for the engine")
-    ap.add_argument("--rate", default="+0%", help="speaking rate, e.g. -4%% or +8%%")
+    ap.add_argument("--rate", default=None, help="speaking rate, e.g. -10%% or +8%%. Default is per engine (kokoro -20%%, edge -4%%) to land near 160 words/min")
     ap.add_argument("--out", default="out/video.mp4")
     ap.add_argument("--size", default="1600x900")
     ap.add_argument("--chromium", default=os.environ.get("CHROMIUM_PATH"), help="path to a Chromium/Chrome binary (default: Playwright's)")
@@ -120,24 +129,34 @@ def main():
     if a.only:
         script["beats"] = script["beats"][:a.only]
     beats = script["beats"]
+    todo = [i + 1 for i, bt in enumerate(beats) if "TODO" in bt["say"]] + (["stage cards"] if "TODO" in json.dumps(script["stages"]) else [])
+    if todo:
+        sys.exit("the storyboard still has TODO text (beats %s). Write the narration first; draft_storyboard.py only drafts the visuals." % todo)
     rd = lambda p: open(p, encoding="utf-8").read() if p else ""
 
     engine = tts.pick_engine(a.engine)
     voice = a.voice or tts.DEFAULT_VOICE[engine]
-    print("voice: %s / %s%s" % (engine, voice, "   (robotic preview voice - install edge-tts for the final cut)" if engine == "flite" else ""))
+    a.rate = a.rate or tts.DEFAULT_RATE[engine]
+    print("voice: %s / %s  rate %s%s" % (engine, voice, a.rate, "   (robotic preview voice - install edge-tts for the final cut)" if engine == "flite" else ""))
     print("app  : %s" % a.url)
 
     # 1. narration, one WAV per sentence (cached by content so re-runs are quick)
     wav_dir = os.path.join(work, "wav"); os.makedirs(wav_dir, exist_ok=True)
-    durations, wavs = [], []
+    durations, wavs, word_times = [], [], {}
+    lex = tts.load_lexicon()
+    if a.lexicon:
+        lex.update(tts.load_lexicon(a.lexicon))
     print("synthesizing narration...")
     for i, b in enumerate(beats):
-        text = b["say"].replace("{DATA}", data_line).strip()
+        text = tts.apply_lexicon(b["say"].replace("{DATA}", data_line).strip(), lex)     # what is SPOKEN
         key = hashlib.sha1(("%s|%s|%s|%s" % (engine, voice, a.rate, text)).encode()).hexdigest()[:12]
         wp = os.path.join(wav_dir, "%03d-%s.wav" % (i, key))
         if not os.path.exists(wp):
             tts.synth(text, wp, engine, voice, a.rate)
         durations.append(tts.duration(wp)); wavs.append(wp)
+        if not a.no_highlight:                          # caption words timed against the real clip
+            cap = (b.get("cap") or b["say"]).replace("{DATA}", data_line).strip()
+            word_times[i] = words.word_timings(cap, wp)
     print("  narration: %.0f s of speech in %d lines" % (sum(durations), len(beats)))
 
     # 2. record the screen
@@ -149,7 +168,11 @@ def main():
         print("recording...")
         rec = asyncio.run(record(script, durations, url, frames_dir, chromium=a.chromium, size=(W, H),
                                  init_js=rd(a.init_js), config_js=rd(a.config_js), sidebar_px=a.sidebar_px,
-                                 color_scheme=a.scheme, captions=not a.no_captions, badge=a.badge, data_line=data_line))
+                                 color_scheme=a.scheme, captions=not a.no_captions, badge=a.badge, data_line=data_line,
+                                 storage_state=a.storage_state, word_times=word_times,
+                                 http_credentials=dict(zip(("username", "password"), a.basic_auth.split(":", 1))) if a.basic_auth else None,
+                                 brand=json.load(open(a.brand)) if a.brand else None,
+                                 blur={"selectors": [x.strip() for x in a.blur.split(",") if x.strip()], "auto": a.blur_auto} if (a.blur or a.blur_auto) else None))
     finally:
         if srv is not None:
             srv.terminate()
@@ -183,9 +206,17 @@ def main():
                 c.write("%d:%02d %s\n" % (m, int(start % 60), b["chapter"]))
                 s.write("\n## %s\n\n" % b["chapter"])
             s.write(text + "\n\n")
+    if rec.get("missing"):
+        print("\n!! %d target(s) were not found, so those beats show no spotlight/scroll/click:" % len(rec["missing"]))
+        for m in rec["missing"]:
+            print("   -", m)
+        if not a.allow_missing:
+            print("Fix the targets in the storyboard (or pass --allow-missing). The video was still written to %s." % a.out)
     print("\nDone: %s  (%.1f MB, %d:%02d)" % (a.out, os.path.getsize(a.out) / 1e6, total // 60, total % 60))
     print("      %s.srt / .chapters.txt / .script.md" % base)
     print("      working files kept in %s" % work)
+    if rec.get("missing") and not a.allow_missing:
+        sys.exit(3)
 
 
 if __name__ == "__main__":

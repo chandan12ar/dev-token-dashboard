@@ -9,6 +9,7 @@ not a full re-recording, and the picture is identical.
     python revoice.py --script script.json --work <build_video --work dir> --engine kokoro --voice af_heart --out out/new.mp4
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -35,6 +36,7 @@ def main():
     ap.add_argument("--engine", default="auto", choices=("auto",) + tts.ENGINES)
     ap.add_argument("--voice", default=None)
     ap.add_argument("--script", required=True, help="the same storyboard JSON the recording used")
+    ap.add_argument("--lexicon", default=None, help="extra pronunciation fixes JSON merged over lexicon.default.json")
     ap.add_argument("--jobs", type=int, default=2)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -48,11 +50,15 @@ def main():
     data_line = ""
     wdir = os.path.join(a.work, "wav-%s-%s" % (engine, voice))
     os.makedirs(wdir, exist_ok=True)
-    texts = {bt["i"]: beats[bt["i"]]["say"].replace("{DATA}", data_line).strip() for bt in rec["beats"]}
+    lex = tts.load_lexicon()
+    if a.lexicon:
+        lex.update(tts.load_lexicon(a.lexicon))
+    texts = {bt["i"]: tts.apply_lexicon(beats[bt["i"]]["say"].replace("{DATA}", data_line).strip(), lex) for bt in rec["beats"]}
     slot = {bt["i"]: bt["dur"] - LEAD - 0.12 for bt in rec["beats"]}
 
     def path(i, rate):
-        return os.path.join(wdir, "%03d%s.wav" % (i, "" if rate == "+0%" else rate.replace("%", "pc")))
+        h = hashlib.sha1(texts[i].encode()).hexdigest()[:8]       # a changed sentence or lexicon never reuses an old clip
+        return os.path.join(wdir, "%03d-%s%s.wav" % (i, h, "" if rate == "+0%" else rate.replace("%", "pc")))
 
     print("voice: %s / %s, %d lines" % (engine, voice, len(texts)))
     todo = [(texts[i], path(i, "+0%"), engine, voice, "+0%") for i in texts if not os.path.exists(path(i, "+0%"))]

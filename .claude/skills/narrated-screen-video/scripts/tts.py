@@ -19,7 +19,27 @@ import subprocess
 import sys
 
 ENGINES = ("edge", "kokoro", "sapi", "say", "flite")
+# Natural narration is ~150-170 words/min. Measured: Kokoro at its default speed reads ~200 wpm (brisk, tiring over minutes),
+# edge-tts ~165. So each engine gets a default rate that lands near the comfortable range; override with --rate.
+DEFAULT_RATE = {"edge": "-4%", "kokoro": "-20%", "sapi": "+0%", "say": "+0%", "flite": "+0%"}
 DEFAULT_VOICE = {"edge": "en-US-AriaNeural", "kokoro": "af_heart", "sapi": "", "say": "Samantha", "flite": "slt"}
+
+
+def load_lexicon(path=None):
+    """Pronunciation fixes: {"API": "A P I", "SQL": "sequel"}. Applied to what is SPOKEN only; captions keep the real
+    spelling. Default file: lexicon.default.json next to this script. Pass several with load_lexicon(a) | load_lexicon(b)."""
+    import json
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "lexicon.default.json")
+    with open(path, encoding="utf-8") as f:
+        return {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+
+def apply_lexicon(text, lex):
+    """Replace whole words (case-sensitive, longest first), e.g. API -> A P I, but not inside 'RAPID'."""
+    import re
+    for k in sorted(lex, key=len, reverse=True):
+        text = re.sub(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(k), lex[k].replace("\\", "\\\\"), text)
+    return text
 
 
 def _ffmpeg_to_wav(src, dst):

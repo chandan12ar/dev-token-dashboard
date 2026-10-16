@@ -17,3 +17,7 @@ DevTokenDashboard-Startup.vbs
 
 # Walkthrough video outputs
 video/out/
+
+# Saved browser sessions from the narrated-screen-video skill (a logged-in session: never commit)
+state.json
+*.storage-state.json

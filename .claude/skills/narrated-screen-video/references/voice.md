@@ -6,6 +6,8 @@
 3. Writing text that a TTS reads well
 4. Pacing and fitting
 5. Auditioning and re-voicing
+6. Pronunciation lexicon
+7. Word-by-word caption highlighting
 
 ## 1. Engines (`scripts/tts.py`)
 
@@ -49,7 +51,7 @@ Speed: roughly 1.5-3 s of compute per sentence on CPU; `revoice.py --jobs 2` run
 
 ## 4. Pacing and fitting
 
-- Default rate `+0%`. Edge sounds good slightly slower (`-4%`); Kokoro sounds best at its native speed.
+- Defaults are per engine: edge `-4%`, kokoro `-20%` (`tts.DEFAULT_RATE`). Measured: Kokoro at native speed reads ~200 words/min, which is brisk and tiring over minutes; -20% lands near 160, the comfortable narration range. `check_video.py --script` reports words/min per beat (flags above 185).
 - In `build_video.py` the recording is timed from the real clip lengths, so nothing is stretched.
 - In `revoice.py` the *picture is fixed*, so each new clip must fit the old slot (old duration - 0.42 s). If it is longer it is re-spoken faster, at most +18% (beyond that the voice sounds rushed) and the script warns `still X s long` if it still overlaps. If many lines overflow, re-record instead of speeding up.
 - Loudness: the final mix is `loudnorm I=-16 TP=-1.5`; a healthy result measures mean about -16 dB, peak below -1 dB (`check_video.py`).
@@ -70,3 +72,16 @@ python scripts/revoice.py --script video/script.json --work <the build --work di
     --engine kokoro --voice af_heart --jobs 2 --out video/out/new-voice.mp4
 ```
 It needs the `--work` folder from the original build (`rec.json` has every beat's timing, `frames.txt` the picture). If the user also changed the *text*, the caption in the picture is baked in and no longer matches - re-record instead.
+
+## 6. Pronunciation lexicon
+
+Do not respell words inside the narration. Keep the storyboard text as written and add spoken forms to a lexicon: `scripts/lexicon.default.json` ships with common ones (`API` -> `A P I`, `SQL` -> `sequel`, `CLI`, `JSON`, `OAuth`...). Add yours in a file and pass `--lexicon mine.json` (merged over the default):
+
+```json
+{"Kokoro": "ko-ko-ro", "Nginx": "engine-x", "kubectl": "cube control"}
+```
+Whole words only, case-sensitive, applied to what is *spoken*; the burned-in caption and SRT keep the real spelling. TTS clips are cached by the spoken text, so a lexicon change re-synthesizes only affected lines. Audition the term before relying on a respelling.
+
+## 7. Word-by-word caption highlighting
+
+Captions highlight each word as it is spoken (karaoke style). No engine reports word times offline (Kokoro does not), so `words.py` estimates them: it finds where speech really starts and ends inside each clip, then spreads the words over that window in proportion to how long each takes to say (letters + syllables, with extra pause after commas and sentence ends). Typical error about 100 ms, which reads as in sync. Turn off with `--no-highlight`. Because timing is estimated from the caption text, a `cap` that differs a lot from the speech still highlights smoothly.

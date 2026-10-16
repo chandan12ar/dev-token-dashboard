@@ -1,6 +1,7 @@
 # Recording and sync: how the picture and voice stay together
 
 ## Contents
+0. Extra recorder features
 1. Pipeline
 2. Why frames, not a screen recorder
 3. Beat timing
@@ -8,6 +9,19 @@
 5. Serving the app safely
 6. Encoding settings
 7. Sandbox notes
+
+## 0. Extra recorder features
+
+| Feature | Flag | Notes |
+|---|---|---|
+| Brand-matched cards | `--brand brand.json` (`extract_brand.py`) | accent, title-card background and font come from the app; the overlay reads CSS variables so one file restyles everything |
+| Blur sensitive text | `--blur ".sel,#id"`, `--blur-auto` | auto masks emails, API keys/tokens (sk-, ghp_, AKIA, xox, JWT, long hex) and IPv4 addresses, and keeps masking as the page changes |
+| Login | `--storage-state state.json` / `--basic-auth user:pw` | state from `save_login.py` run on the user's machine; never commit it |
+| Strict targets | default on; `--allow-missing` to relax | missing spotlight/scroll/click/hscroll targets are listed and the build exits 3 |
+| TODO guard | always | `build_video.py` refuses to record while any `TODO` remains in narration or cards |
+| Caption highlight | default on; `--no-highlight` | see `voice.md` |
+
+Overlay rules learned the hard way: every class the overlay adds is prefixed (`v-`, `vw-`) because a host page's own `.cur` or `.on` once restyled the highlight; clicks (`tab`, `click`) land on the exact centre of the element, while decorative moves (`hover`, `sweep`) are kept 150 px from the top and 130 px from the bottom; a spotlight on an element that has become hidden (tab switched) fades out instead of dimming the whole page.
 
 ## 1. Pipeline
 

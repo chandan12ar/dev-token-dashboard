@@ -27,6 +27,7 @@ class Recorder:
         self.page, self.size, self.sidebar_px = page, size, sidebar_px
         self.x, self.y = size[0] - 160, size[1] // 2
         self.stage_on = False
+        self.missing = []        # targets that were not found; build_video fails on these in strict mode
 
     async def v(self, expr, arg=None):
         return await self.page.evaluate(expr, arg)
@@ -51,12 +52,16 @@ class Recorder:
         lo = self.sidebar_px + 100 if self.sidebar_px else 60
         return (min(max(r["x"], lo), w - 60), min(max(r["y"], 150), h - 130))
 
-    async def point_at(self, target, ms=850):
+    async def point_at(self, target, ms=850, exact=False):
+        """Glide the cursor to a target. exact=True (anything that will be clicked) lands on the element's centre with no
+        clamping: nudging a click target off its button is how a click silently hits its neighbour."""
         r = await self.v("t => V.rect(t)", target)
         if not r:
             print("   ! target not found:", target)
+            self.missing.append(target)
             return False
-        await self.move(*self._clamp(r), ms=ms)
+        w, h = self.size
+        await self.move(*((min(max(r["x"], 4), w - 4), min(max(r["y"], 4), h - 4)) if exact else self._clamp(r)), ms=ms)
         return True
 
     async def do(self, act, budget, stages):
@@ -80,7 +85,7 @@ class Recorder:
                 await self.v("i => V.reveal(i)", act["reveal"])
         elif "tab" in act:                    # click a navigation target, then start the new view at the top
             await self.v("() => V.spot(null)")
-            if await self.point_at(act["tab"], 750):
+            if await self.point_at(act["tab"], 750, exact=True):
                 await p.mouse.down(); await p.mouse.up()
             await self.v("() => scrollTo(0, 0)")
             await asyncio.sleep(1.1)
@@ -88,6 +93,7 @@ class Recorder:
             y = await self.v("([t, c]) => V.scrollInfo(t, c)", [act["scroll"], bool(act.get("center"))])
             if y is None:
                 print("   ! scroll target not found:", act["scroll"])
+                self.missing.append(act["scroll"])
             else:
                 await self.v("([y, ms]) => V.scrollTo(y, ms)", [y, act.get("ms", 1500)])
         elif "scroll_y" in act:
@@ -105,6 +111,7 @@ class Recorder:
             ok = await self.v("([t, l]) => V.spot(t, l)", [act["spot"], act.get("label")])
             if not ok and act["spot"]:
                 print("   ! spot target not found:", act["spot"])
+                self.missing.append(str(act["spot"]))
         elif "hover" in act:
             await self.point_at(act["hover"], act.get("ms", 900))
         elif "sweep" in act:
@@ -118,12 +125,15 @@ class Recorder:
                 span = max(1.0, (budget - 0.8) * 1000) if act.get("over") else act.get("ms", 2500)
                 await self.move(x1, y, span)
         elif "click" in act:
-            if await self.point_at(act["click"], 800):
+            if await self.point_at(act["click"], 800, exact=True):
                 await asyncio.sleep(0.15)
                 await p.mouse.down(); await p.mouse.up()
                 await asyncio.sleep(0.5)
         elif "hscroll" in act:
-            await self.v("([t, to, ms]) => V.hscroll(t, to, ms)", [act["hscroll"], act["to"], act.get("ms", 2000)])
+            res = await self.v("([t, to, ms]) => V.hscroll(t, to, ms)", [act["hscroll"], act["to"], act.get("ms", 2000)])
+            if res is None:
+                print("   ! hscroll target not found:", act["hscroll"])
+                self.missing.append(act["hscroll"])
         elif "key" in act:
             await p.keyboard.press(act["key"])
         elif "badge" in act:
@@ -137,7 +147,8 @@ class Recorder:
 
 
 async def record(script, durations, url, frames_dir, chromium=None, size=(1600, 900), init_js="", config_js="",
-                 sidebar_px=0, color_scheme="light", captions=True, badge="", data_line="", log=print):
+                 sidebar_px=0, color_scheme="light", captions=True, badge="", data_line="", log=print,
+                 storage_state=None, http_credentials=None, brand=None, blur=None, word_times=None):
     """Returns {"frames": [(ts, path)], "t_end": ts, "beats": [{"start": ts, "dur": s, "i": n}]}."""
     os.makedirs(frames_dir, exist_ok=True)
     stages = script["stages"]
@@ -147,12 +158,20 @@ async def record(script, durations, url, frames_dir, chromium=None, size=(1600, 
         if chromium:
             launch["executable_path"] = chromium
         browser = await pw.chromium.launch(**launch)
-        ctx = await browser.new_context(viewport={"width": W, "height": H}, device_scale_factor=1,
-                                        color_scheme=color_scheme)
+        ctx_args = {"viewport": {"width": W, "height": H}, "device_scale_factor": 1, "color_scheme": color_scheme}
+        if storage_state:                              # saved login (scripts/save_login.py)
+            ctx_args["storage_state"] = storage_state
+        if http_credentials:                           # {"username": ..., "password": ...} for HTTP basic auth
+            ctx_args["http_credentials"] = http_credentials
+        ctx = await browser.new_context(**ctx_args)
         if init_js:                                   # runs before the page's own scripts (seed localStorage, flags...)
             await ctx.add_init_script(init_js)
         page = await ctx.new_page()
         await page.goto(url)
+        if brand:                                     # extract_brand.py output: colours/font for the title cards
+            await page.add_script_tag(content="window.V_BRAND = %s;" % json.dumps(brand))
+        if blur:                                      # {"selectors": [...], "auto": true}
+            await page.add_script_tag(content="window.V_BLUR = %s;" % json.dumps(blur))
         if config_js:                                 # window.V_CONFIG = {...}, see overlay.js
             await page.add_script_tag(content=config_js)
         await page.add_script_tag(path=os.path.join(HERE, "overlay.js"))
@@ -195,7 +214,9 @@ async def record(script, durations, url, frames_dir, chromium=None, size=(1600, 
             # no caption over a title card: the card is the visual
             has_stage = any("stage" in a and a["stage"] for a in b.get("do", [])) or (
                 rec.stage_on and not any("stage" in a for a in b.get("do", [])))
-            await page.evaluate("t => V.caption(t)", text if captions and not has_stage else None)
+            wt = (word_times or {}).get(i)
+            await page.evaluate("([t, o]) => V.caption(t, o)", [text if captions and not has_stage else None,
+                                                                {"words": wt, "delay": LEAD} if wt else None])
             log("  [%2d/%d] %s" % (i + 1, len(script["beats"]), text[:70]))
             for a in b.get("do", []):
                 a = json.loads(json.dumps(a).replace("{BADGE}", badge).replace("{DATA}", data_line))
@@ -214,4 +235,4 @@ async def record(script, durations, url, frames_dir, chromium=None, size=(1600, 
         if pending:
             await asyncio.gather(*pending)
         await browser.close()
-    return {"frames": frames, "t_end": t_end, "beats": beats}
+    return {"frames": frames, "t_end": t_end, "beats": beats, "missing": sorted(set(rec.missing))}

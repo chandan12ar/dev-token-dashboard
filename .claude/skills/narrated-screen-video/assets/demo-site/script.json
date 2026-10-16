@@ -1,0 +1,17 @@
+{
+  "title": "Selftest walkthrough",
+  "stages": {
+    "intro": {"align": "center", "mark": true, "eyebrow": "Self test", "title": "Acme **Reports**", "sub": "A tiny app used to check the video pipeline."},
+    "problem": {"eyebrow": "The problem", "title": "Numbers live in **many places**", "items": [{"k": "Billing", "v": "Revenue only."}, {"k": "Analytics", "v": "Usage only."}, {"v": "Nobody can answer: are we growing?"}]},
+    "outro": {"align": "center", "mark": true, "title": "Acme **Reports**", "sub": "One page, every Monday.", "cmd": "open reports.acme.example", "url": "acme.example"}
+  },
+  "beats": [
+    {"chapter": "Intro", "say": "This is Acme Reports, a tiny app that lets us test the whole video pipeline.", "do": [{"stage": "intro"}, {"wait": 1.0}]},
+    {"chapter": "The problem", "say": "Most teams keep their numbers in several tools, and none of them answers one simple question. Are we growing?", "do": [{"stage": "problem"}, {"reveal": "over"}]},
+    {"chapter": "Overview", "say": "On the overview tab, four numbers show how the week went.", "do": [{"stage": null}, {"wait": 0.8}, {"tab": "#nav button[data-s=overview]"}, {"spot": ".kpis", "label": "This week"}]},
+    {"say": "Below it, the revenue trend. Notice that the email and the key on the next card are blurred.", "do": [{"spot": null}, {"scroll": "#trend", "ms": 1200}, {"spot": "#trend", "label": "Revenue trend"}, {"sweep": "#c1", "over": true}]},
+    {"chapter": "Usage", "say": "The usage tab shows who is actually using the product.", "do": [{"spot": null}, {"tab": "#nav button[data-s=usage]"}]},
+    {"say": "This table is wider than the screen, so we scroll it sideways to see every column.", "do": [{"scroll": "#adoption"}, {"spot": "#adoption", "label": "Feature adoption"}, {"hscroll": ".tw", "to": 1, "ms": 2200}, {"hscroll": ".tw", "to": 0, "ms": 1200}]},
+    {"chapter": "Wrap up", "say": "That is everything the pipeline does in one short run.", "do": [{"spot": null}, {"stage": "outro"}, {"wait": 1.0}]}
+  ]
+}
