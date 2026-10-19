@@ -1,0 +1,10 @@
+{
+  "accent": "#c2603d",
+  "stageBg": "#170f0c",
+  "stageFg": "#f5f3f0",
+  "muted": "#b9bcc6",
+  "font": "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"Segoe UI Variable Text\", \"Segoe UI\", Inter, Roboto, \"Helvetica Neue\", sans-serif",
+  "_source": "css variable --acc",
+  "_app_bg": "rgb(242, 242, 245)",
+  "_app_fg": "rgb(23, 24, 28)"
+}

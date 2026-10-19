@@ -1,0 +1,294 @@
+{
+  "title": "AI Fluency Insights - 90-second product tour",
+  "stages": {
+    "intro": {
+      "align": "center",
+      "mark": true,
+      "eyebrow": "AI Fluency Insights",
+      "title": "Are you getting **better** at working with AI?",
+      "sub": "Every Claude Code session leaves a trail. Almost nobody reads it."
+    },
+    "scattered": {
+      "eyebrow": "The problem",
+      "title": "The answers are **scattered**, and they disappear",
+      "items": [
+        {
+          "k": "/usage",
+          "v": "This session only, and it resets when you /clear"
+        },
+        {
+          "k": "/insights",
+          "v": "A one-off report that spends your tokens"
+        },
+        {
+          "k": "Admin analytics",
+          "v": "A team view from above, for admins only"
+        },
+        {
+          "k": "Your habits",
+          "v": "Nowhere. No history, no trend, no next step"
+        }
+      ]
+    },
+    "solution": {
+      "align": "center",
+      "mark": true,
+      "eyebrow": "The answer",
+      "title": "One private dashboard, built from logs **you already have**",
+      "chips": [
+        "100% local",
+        "Zero tokens",
+        "One Python file",
+        "No installs"
+      ]
+    },
+    "outro": {
+      "align": "center",
+      "mark": true,
+      "title": "Stop guessing. **See how you work.**",
+      "sub": "AI Fluency Insights for Claude Code",
+      "cmd": "python ai_fluency_insights.py",
+      "url": "http://localhost:8787"
+    }
+  },
+  "beats": [
+    {
+      "chapter": "Intro",
+      "say": "You use Claude Code every day. But are you actually getting better at it?",
+      "do": [
+        {
+          "stage": "intro"
+        },
+        {
+          "wait": 0.6
+        }
+      ]
+    },
+    {
+      "chapter": "The problem",
+      "say": "Today, the answers are scattered across a dozen commands, and most vanish the moment you clear your session.",
+      "do": [
+        {
+          "stage": "scattered"
+        },
+        {
+          "reveal": "over"
+        }
+      ]
+    },
+    {
+      "chapter": "The answer",
+      "say": "AI Fluency Insights turns the logs Claude Code already saves into one private dashboard. Zero tokens. Nothing leaves your machine.",
+      "do": [
+        {
+          "stage": "solution"
+        },
+        {
+          "reveal": "over"
+        }
+      ]
+    },
+    {
+      "chapter": "Overview",
+      "say": "Your whole month, on one screen: tokens, cost, lines of code and sessions, each with its trend.",
+      "do": [
+        {
+          "stage": null
+        },
+        {
+          "badge": "{BADGE}"
+        },
+        {
+          "wait": 0.4
+        },
+        {
+          "spot": "#kpis",
+          "label": "Your month at a glance"
+        },
+        {
+          "wait": 1.8
+        },
+        {
+          "spot": "#kpis .kpi:nth-child(4)",
+          "label": "What it would cost at API prices"
+        },
+        {
+          "wait": 1.6
+        },
+        {
+          "spot": "#kpis .kpi:nth-child(6)",
+          "label": "Code Claude wrote for you"
+        }
+      ]
+    },
+    {
+      "say": "And your leverage: for every token you type, Claude gives back hundreds.",
+      "do": [
+        {
+          "spot": "#kpis .kpi:nth-child(12)",
+          "label": "Leverage"
+        },
+        {
+          "wait": 1.4
+        },
+        {
+          "spot": null
+        },
+        {
+          "scroll": "card:You vs Claude",
+          "ms": 1200
+        },
+        {
+          "spot": "card:You vs Claude",
+          "label": "You vs Claude"
+        },
+        {
+          "sweep": "#cBalance",
+          "over": true
+        }
+      ]
+    },
+    {
+      "chapter": "My Adoption",
+      "say": "My Adoption scores you from Explorer to Pro Max, across four pillars: habit, range, craft and impact.",
+      "do": [
+        {
+          "spot": null
+        },
+        {
+          "tab": "nav:adoption"
+        },
+        {
+          "spot": "#adoHero",
+          "label": "Your level, compared only with your own past"
+        },
+        {
+          "wait": 2.4
+        },
+        {
+          "spot": "#adoHero .ad-pills",
+          "label": "Four pillars"
+        }
+      ]
+    },
+    {
+      "say": "It shows the features you really use, and the ones, like hooks or skills, you've never tried.",
+      "do": [
+        {
+          "spot": null
+        },
+        {
+          "scroll": "card:Range",
+          "ms": 1400
+        },
+        {
+          "spot": "card:Range",
+          "label": "What you use"
+        },
+        {
+          "wait": 2.0
+        },
+        {
+          "spot": [
+            "#adoFeats .ad-feat:nth-child(5)",
+            "#adoFeats .ad-feat:nth-child(6)"
+          ],
+          "label": "Never tried"
+        }
+      ]
+    },
+    {
+      "chapter": "Quality",
+      "say": "Quality checks whether tests ran after Claude's last edit, and flags the files Claude keeps rewriting.",
+      "do": [
+        {
+          "spot": null
+        },
+        {
+          "tab": "nav:quality"
+        },
+        {
+          "spot": "#qualHero",
+          "label": "Was the work checked?"
+        },
+        {
+          "wait": 2.0
+        },
+        {
+          "spot": "card:Verification loop",
+          "label": "Tests, builds, lint"
+        },
+        {
+          "wait": 1.6
+        },
+        {
+          "spot": "card:Rework hotspots",
+          "label": "Rework hotspots"
+        }
+      ]
+    },
+    {
+      "chapter": "Advisor",
+      "say": "The Advisor turns it all into your top moves, each backed by evidence from your own data.",
+      "do": [
+        {
+          "spot": null
+        },
+        {
+          "tab": "nav:advisor"
+        },
+        {
+          "spot": "#advRecs",
+          "label": "Ranked, with the evidence shown"
+        },
+        {
+          "wait": 1.8
+        },
+        {
+          "spot": "#advRecs .ad-step:nth-child(1)",
+          "label": "The evidence"
+        },
+        {
+          "wait": 1.6
+        },
+        {
+          "spot": "#advRecs .ad-step:nth-child(2)",
+          "label": "The fix"
+        }
+      ]
+    },
+    {
+      "say": "Try one as an experiment, and next week, see if the number really moved.",
+      "do": [
+        {
+          "spot": null
+        },
+        {
+          "click": "#advRecs button[data-exp]"
+        },
+        {
+          "wait": 0.6
+        },
+        {
+          "spot": "#advExpCard",
+          "label": "Your experiment"
+        }
+      ]
+    },
+    {
+      "chapter": "Get started",
+      "say": "Stop guessing. Run one command, and see how you really work with AI.",
+      "do": [
+        {
+          "spot": null
+        },
+        {
+          "stage": "outro"
+        },
+        {
+          "wait": 1.2
+        }
+      ]
+    }
+  ]
+}
