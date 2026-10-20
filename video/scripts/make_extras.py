@@ -2,7 +2,8 @@
 """Derive the extra deliverables from a finished video: poster/thumbnail, 30-second teaser, vertical 9:16 cut, GIF.
 
     python make_extras.py out/demo.mp4 --work <build --work dir> --script video/script.json [--out-dir out/extras]
-                          [--only poster teaser vertical gif] [--teaser-len 30] [--gif-at 20 --gif-len 6]
+                          [--only poster teaser vertical gif] [--teaser-len 30 | --teaser-beats 1,3,4,9,11]
+                          [--gif-at 20 --gif-len 6]
 
 poster    1280x720 JPEG of the intro title card (clean: no caption burned in). Use --poster-at SECONDS to take an app
           frame instead (captions are baked into the picture, so choose a moment between sentences), and
@@ -54,27 +55,30 @@ def poster(video, out, beats, script, at, band=False):
     print("poster  ->", out, "(frame at %.1f s)" % at)
 
 
-def teaser(video, out, beats, script, total):
+def teaser(video, out, beats, script, total, chosen=None):
     if not beats:
         print("teaser needs --work"); return
-    pick = [beats[0]]
-    used = pick[0][1]
-    mid = [b for b in beats[1:-1] if b[1] <= 8.5 and any(k in a for a in script["beats"][b[2]].get("do", []) for k in ("spot", "scroll", "hscroll", "sweep", "click"))]
-    want = max(1, int((total - used - beats[-1][1]) // 6))
-    step = max(1, len(mid) // want)
-    for b in mid[::step][:want]:
-        pick.append(b); used += b[1]
-    pick.append(beats[-1])
+    if chosen:                                     # hand-picked 1-based beat numbers, always kept whole
+        pick, cap = [beats[i - 1] for i in chosen], None
+    else:
+        pick, cap = [beats[0]], 9.0
+        used = pick[0][1]
+        mid = [b for b in beats[1:-1] if b[1] <= 8.5 and any(k in a for a in script["beats"][b[2]].get("do", []) for k in ("spot", "scroll", "hscroll", "sweep", "click"))]
+        want = max(1, int((total - used - beats[-1][1]) // 6))
+        step = max(1, len(mid) // want)
+        for b in mid[::step][:want]:
+            pick.append(b); used += b[1]
+        pick.append(beats[-1])
     fc, labels = [], []
     for n, (st, d, _) in enumerate(pick):
-        d = min(d, 9.0); f = 0.35
+        d = min(d, cap) if cap else d; f = 0.35
         fc.append("[0:v]trim=%.3f:%.3f,setpts=PTS-STARTPTS,fade=t=in:d=%.2f,fade=t=out:st=%.3f:d=%.2f[v%d]" % (st, st + d, f, d - f, f, n))
         fc.append("[0:a]atrim=%.3f:%.3f,asetpts=PTS-STARTPTS,afade=t=in:d=%.2f,afade=t=out:st=%.3f:d=%.2f[a%d]" % (st, st + d, f, d - f, f, n))
         labels.append("[v%d][a%d]" % (n, n))
     fc.append("".join(labels) + "concat=n=%d:v=1:a=1[v][a]" % len(pick))
     ff("-i", video, "-filter_complex", ";".join(fc), "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-crf", 20, "-pix_fmt", "yuv420p",
        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out)
-    print("teaser  -> %s (%d beats, about %d s)" % (out, len(pick), sum(min(b[1], 9.0) for b in pick)))
+    print("teaser  -> %s (%d beats, about %d s)" % (out, len(pick), sum(min(b[1], cap) if cap else b[1] for b in pick)))
 
 
 def vertical(video, out):
@@ -101,6 +105,7 @@ def main():
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--only", nargs="*", choices=("poster", "teaser", "vertical", "gif"))
     ap.add_argument("--teaser-len", type=float, default=30.0)
+    ap.add_argument("--teaser-beats", help="comma-separated 1-based beat numbers to use instead of the automatic pick, e.g. 1,3,4,9,11")
     ap.add_argument("--poster-at", type=float, default=None)
     ap.add_argument("--poster-title", action="store_true", help="lay the storyboard title on a band across the poster (needs Pillow)")
     ap.add_argument("--gif-at", type=float, default=None, help="start second (default: the first spotlight beat)")
@@ -116,7 +121,8 @@ def main():
         poster(a.video, os.path.join(out, base + "-poster.jpg"), beats, script, a.poster_at, a.poster_title)
     if "teaser" in todo:
         if beats and a.script:
-            teaser(a.video, os.path.join(out, base + "-teaser.mp4"), beats, script, a.teaser_len)
+            chosen = [int(x) for x in a.teaser_beats.split(",")] if a.teaser_beats else None
+            teaser(a.video, os.path.join(out, base + "-teaser.mp4"), beats, script, a.teaser_len, chosen)
         else:
             print("teaser skipped: pass --work and --script")
     if "vertical" in todo:

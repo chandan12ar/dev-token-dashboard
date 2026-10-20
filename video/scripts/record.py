@@ -148,17 +148,19 @@ class Recorder:
 
 async def record(script, durations, url, frames_dir, chromium=None, size=(1600, 900), init_js="", config_js="",
                  sidebar_px=0, color_scheme="light", captions=True, badge="", data_line="", log=print,
-                 storage_state=None, http_credentials=None, brand=None, blur=None, word_times=None):
+                 storage_state=None, http_credentials=None, brand=None, blur=None, word_times=None, scale=1):
     """Returns {"frames": [(ts, path)], "t_end": ts, "beats": [{"start": ts, "dur": s, "i": n}]}."""
     os.makedirs(frames_dir, exist_ok=True)
     stages = script["stages"]
     W, H = size
     async with async_playwright() as pw:
-        launch = {"headless": True, "args": ["--hide-scrollbars", "--force-device-scale-factor=1"]}
+        launch = {"headless": True, "args": ["--hide-scrollbars", "--force-device-scale-factor=%s" % scale]}
         if chromium:
             launch["executable_path"] = chromium
         browser = await pw.chromium.launch(**launch)
-        ctx_args = {"viewport": {"width": W, "height": H}, "device_scale_factor": 1, "color_scheme": color_scheme}
+        # size is the layout size in CSS pixels; scale renders it at a higher pixel density (sharper text in a
+        # phone-width layout, e.g. 540x960 at scale 1.5 -> 810x1440 frames)
+        ctx_args = {"viewport": {"width": W, "height": H}, "device_scale_factor": scale, "color_scheme": color_scheme}
         if storage_state:                              # saved login (scripts/save_login.py)
             ctx_args["storage_state"] = storage_state
         if http_credentials:                           # {"username": ..., "password": ...} for HTTP basic auth
@@ -201,7 +203,7 @@ async def record(script, durations, url, frames_dir, chromium=None, size=(1600, 
             t = asyncio.ensure_future(on_frame(ev)); pending.add(t); t.add_done_callback(pending.discard)
 
         cdp.on("Page.screencastFrame", handler)
-        await cdp.send("Page.startScreencast", {"format": "jpeg", "quality": 92, "maxWidth": W, "maxHeight": H,
+        await cdp.send("Page.startScreencast", {"format": "jpeg", "quality": 92, "maxWidth": round(W * scale), "maxHeight": round(H * scale),
                                                 "everyNthFrame": 1})
         await asyncio.sleep(0.3)
 

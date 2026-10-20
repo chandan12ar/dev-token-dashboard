@@ -33,7 +33,7 @@
     font-weight:650;font-size:15px;letter-spacing:.01em;box-shadow:0 6px 20px rgba(0,0,0,.28);opacity:0;
     transition:opacity .3s ease;white-space:nowrap}
   #v-label.on{opacity:1}
-  #v-cap{font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;position:fixed;left:50%;bottom:30px;transform:translate(-50%,14px);z-index:2147483400;max-width:1040px;width:max-content;
+  #v-cap{font-family:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;position:fixed;left:50%;bottom:30px;transform:translate(-50%,14px);z-index:2147483400;max-width:min(1040px,calc(100vw - 32px));width:max-content;
     padding:13px 26px;border-radius:16px;background:rgba(14,16,22,.82);backdrop-filter:blur(8px);color:#fff;
     font-size:21px;line-height:1.4;text-align:center;font-weight:500;opacity:0;transition:opacity .3s ease,transform .3s ease;
     box-shadow:0 10px 40px rgba(0,0,0,.35)}

@@ -26,6 +26,26 @@ python video/scripts/build_video.py --script video/script.json \
   --badge "SAMPLE DATA" --engine kokoro --voice af_heart --out video/out/ai-fluency-insights.mp4
 ```
 
+## Teaser and vertical (LinkedIn) cuts
+
+The ~37 s teaser is cut from the finished video, whole sentences only: the hook, what it is,
+Overview, Advisor and the closing card. The vertical cut is recorded again at phone width
+(`script-vertical.json`: same narration, shots re-framed for the one-column layout), so text
+stays large on a phone. Both land in `video/out/extras/`.
+
+```
+python video/scripts/make_extras.py video/out/ai-fluency-insights.mp4 --work <build --work dir> \
+  --script video/script.json --only teaser poster --teaser-beats 1,3,4,9,11
+python video/scripts/build_video.py --script video/script-vertical.json \
+  --serve-cmd "python video/serve_for_recording.py --dir /tmp/sample-claude/projects --port 8799" \
+  --url http://127.0.0.1:8799/ --config-js video/cfg.js --brand video/brand.json \
+  --size 540x960 --scale 1.5 --video-size 1080x1920 \
+  --badge "SAMPLE DATA" --engine kokoro --voice af_heart --out video/out/extras/ai-fluency-insights-vertical.mp4
+```
+
+`--scale 1.5` is deliberate: at 2 the browser captures only ~18 frames a second while scrolling,
+so motion stutters; 1.5 captures ~30 and is upscaled to 1080x1920.
+
 ## Real-data cut (on your own machine)
 
 Drop `--dir` so it reads your own `~/.claude/projects`, drop `--badge`, and use the

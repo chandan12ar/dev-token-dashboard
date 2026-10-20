@@ -25,6 +25,11 @@ window.V_CONFIG = {
         return h && h.textContent.trim().toLowerCase() === want;
       });
     },
-    nav: function (want) { return document.querySelector('#nav button[data-s="' + want + '"]'); }
+    nav: function (want) {
+      var b = document.querySelector('#nav button[data-s="' + want + '"]');
+      // At phone width the nav is a sideways-scrolling bar; bring the tab on screen before it is clicked.
+      if (b) b.scrollIntoView({ block: 'nearest', inline: 'center' });
+      return b;
+    }
   }
 };

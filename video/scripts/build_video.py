@@ -108,7 +108,10 @@ def main():
     ap.add_argument("--voice", default=None, help="voice name for the engine")
     ap.add_argument("--rate", default=None, help="speaking rate, e.g. -10%% or +8%%. Default is per engine (kokoro -20%%, edge -4%%) to land near 160 words/min")
     ap.add_argument("--out", default="out/video.mp4")
-    ap.add_argument("--size", default="1600x900")
+    ap.add_argument("--size", default="1600x900", help="layout size in CSS pixels")
+    ap.add_argument("--scale", type=float, default=1, help="pixel density: --size 540x960 --scale 1.5 records a phone-width layout at 810x1440 "
+                    "(2 is sharper but captures only ~18 fps, so motion stutters)")
+    ap.add_argument("--video-size", default=None, help="final video size, e.g. 1080x1920 (default: --size times --scale)")
     ap.add_argument("--chromium", default=os.environ.get("CHROMIUM_PATH"), help="path to a Chromium/Chrome binary (default: Playwright's)")
     ap.add_argument("--no-captions", action="store_true", help="do not burn captions into the picture")
     ap.add_argument("--only", type=int, default=0, help="debug: only the first N beats")
@@ -119,6 +122,8 @@ def main():
         if not shutil.which(tool):
             sys.exit("%s not found on PATH" % tool)
     W, H = (int(x) for x in a.size.lower().split("x"))
+    VW_VH = (tuple(int(x) for x in a.video_size.lower().split("x")) if a.video_size
+             else (round(W * a.scale) // 2 * 2, round(H * a.scale) // 2 * 2))
     work = a.work or tempfile.mkdtemp(prefix="narrated-video-")
     os.makedirs(work, exist_ok=True)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -166,7 +171,7 @@ def main():
         frames_dir = os.path.join(work, "frames")
         shutil.rmtree(frames_dir, ignore_errors=True)
         print("recording...")
-        rec = asyncio.run(record(script, durations, url, frames_dir, chromium=a.chromium, size=(W, H),
+        rec = asyncio.run(record(script, durations, url, frames_dir, chromium=a.chromium, size=(W, H), scale=a.scale,
                                  init_js=rd(a.init_js), config_js=rd(a.config_js), sidebar_px=a.sidebar_px,
                                  color_scheme=a.scheme, captions=not a.no_captions, badge=a.badge, data_line=data_line,
                                  storage_state=a.storage_state, word_times=word_times,
@@ -187,7 +192,7 @@ def main():
     narr = os.path.join(work, "narration.wav")
     mix_narration(narr, total + 0.5, [(max(0.0, bt["start"] - t0 + LEAD), wavs[bt["i"]]) for bt in rec["beats"]])
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
-                    "-i", narr, "-vf", "fps=%d,format=yuv420p" % FPS, "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                    "-i", narr, "-vf", "fps=%d,scale=%d:%d:flags=lanczos,format=yuv420p" % ((FPS,) + VW_VH), "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                     "-af", "loudnorm=I=-16:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
                     "-shortest", a.out], check=True)
 
