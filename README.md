@@ -202,6 +202,7 @@ Your prompts and logs never leave your disk.
 
 ## Docs
 
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — **the blueprint**: runtime architecture and diagrams, the 15-second refresh cycle, the notification pipeline and setup workflow, HTTP API, performance, security, and a register of known issues
 - [docs/PROJECT_REPORT.md](docs/PROJECT_REPORT.md) — **the story**: the problem this solves, what every page does, how the scores work, how it helps a developer, and the roadmap
 - [docs/DASHBOARD_GUIDE.md](docs/DASHBOARD_GUIDE.md) — **the tour**: every
   section explained in plain language — what it tells you, how the data
