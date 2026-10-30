@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><title>AI Fluency Insights</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<script src="/static/vendor/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/css/app.css">
+</head><body>
+<div class="shell">
+
+<aside class="side">
+  <div class="ident">
+    <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></div>
+    <div class="txt"><div class="nm">AI Fluency Insights</div><div class="sub">Claude Code analytics</div></div>
+  </div>
+
+  <nav class="nav" id="nav" aria-label="Sections">
+    <span class="thumb" id="navThumb"></span>
+    <button data-s="overview" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Overview</button>
+    <button data-s="focus"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Time &amp; Focus</button>
+    <button data-s="tools"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0 5 5l-10 10a2.8 2.8 0 0 1-4-4z"/><path d="m17 3 4 4"/></svg>Tools &amp; Models</button>
+    <button data-s="projects"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg>Projects</button>
+    <button data-s="weekly"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2.5"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>Weekly Report</button>
+    <button data-s="adoption"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="6"/><path d="M15.5 13.5 17 22l-5-3-5 3 1.5-8.5"/></svg>My Adoption</button>
+    <div class="navgrp">Engineering insight</div>
+    <button data-s="flow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg>Flow</button>
+    <button data-s="quality"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>Quality</button>
+    <button data-s="value"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>Value</button>
+    <button data-s="advisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1 1.5 1 2.5h6c0-1 .2-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg>Advisor</button>
+    <button data-s="health"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>Data Health</button>
+  </nav>
+
+  <div class="sidefoot">
+    <span class="chip hideable" title="Reads the logs Claude Code already writes locally &mdash; makes no API calls"><span class="dot"></span>Live &middot; 0 tokens</span>
+    <span class="chip hideable"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Updated <span id="upd">&hellip;</span></span>
+    <button class="themebtn" id="themeBtn" title="Switch appearance"><span id="themeIcon"></span><span id="themeLabel">System</span></button>
+  </div>
+</aside>
+
+<main class="main">
+<header class="topbar">
+  <div class="barin">
+    <div class="titles"><h1 id="secTitle">Overview</h1><p id="secSub">&hellip;</p></div>
+    <div class="acts">
+
+      <div id="actsData" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div class="seg" id="range" role="group" aria-label="Date range">
+          <span class="thumb" id="rangeThumb"></span>
+          <button data-d="7">7d</button><button data-d="30" class="on">30d</button>
+          <button data-d="90">90d</button><button data-d="0">All</button>
+        </div>
+        <div class="pop-wrap">
+          <button class="btn icon" id="cBtn" title="Custom date range" aria-haspopup="dialog"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2.5"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></button>
+          <div class="pop" id="cPop" role="dialog" aria-label="Custom date range">
+            <div class="row">
+              <div><label for="cFrom">From</label><input type="date" id="cFrom"></div>
+              <span class="dash">&ndash;</span>
+              <div><label for="cTo">To</label><input type="date" id="cTo"></div>
+            </div>
+            <div class="foot"><button class="btn" id="cClear">Clear</button><button class="btn accent" id="cApply">Apply</button></div>
+          </div>
+        </div>
+        <button class="btn icon" id="expCopy" title="Copy a text summary to the clipboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+        <button class="btn icon" id="expCsv" title="Download the daily table as CSV"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"/></svg></button>
+        <button class="btn icon" id="expJson" title="Download the full stats payload as JSON"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>
+      </div>
+
+      <div id="actsWeek" class="wknav" style="display:none">
+        <button class="btn icon" id="wPrev" title="Previous week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+        <button class="btn icon" id="wNext" title="Next week"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+        <button class="btn" id="wCopy"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy Markdown</button>
+        <button class="btn accent" id="wAI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>AI summary</button>
+      </div>
+
+    </div>
+  </div>
+  <div class="edge"></div>
+</header>
+
+<div class="content">
+<div id="alerts"></div>
+
+<!-- ══════════════ Overview ══════════════ -->
+<section id="s-overview" class="stack">
+  <div class="card flat" id="momCard" style="display:none;--i:0"><div class="mom" id="mom"></div></div>
+  <div class="card flat" id="planCard" style="display:none;--i:0"><div id="planUsage"></div></div>
+  <div class="kgrid" id="kpis" style="--i:1"></div>
+  <div class="card" style="--i:2"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8" rx="1"/><rect x="12" y="6" width="3" height="12" rx="1"/><rect x="17" y="13" width="3" height="5" rx="1"/></svg></span>
+    <h3>Daily tokens</h3><span class="hint">input &middot; output &middot; cache read</span></div>
+    <div class="cvs"><canvas id="cTokens"></canvas></div></div>
+  <div class="card" style="--i:3"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-9 4 18 3-9h4"/></svg></span>
+    <h3>You vs Claude</h3><span class="hint">tokens you typed vs Claude produced &middot; log scale</span></div>
+    <div class="cvs"><canvas id="cBalance"></canvas></div></div>
+  <div class="row" style="--i:4">
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg></span>
+      <h3>Lines of code / day</h3><span class="hint">written by Claude</span></div>
+      <div class="cvs mini"><canvas id="cLoc"></canvas></div></div>
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 3 8 21M16 3l-3 18M4 9h16M3 15h16"/></svg></span>
+      <h3>Exploration vs building</h3><span class="hint">tool calls / day</span></div>
+      <div class="cvs mini"><canvas id="cRW"></canvas></div></div>
+  </div>
+</section>
+
+<!-- ══════════════ Time & Focus ══════════════ -->
+<section id="s-focus" class="stack" hidden>
+  <div class="card" style="--i:0"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>
+    <h3>Time &amp; wellness</h3><span class="hint">active time from 10-min buckets &middot; quiet hours 23:00&ndash;06:00</span></div>
+    <div class="facts" id="wellFacts"></div>
+    <div class="cvs short"><canvas id="cActive"></canvas></div></div>
+  <div class="card" style="--i:1"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2.5"/><path d="M3 9h18M9 21V9"/></svg></span>
+    <h3>Activity heatmap</h3><span class="hint">messages by weekday &times; hour</span></div>
+    <div class="scrollx"><div class="hm" id="heat"></div></div>
+    <div class="hleg">Less<i id="lg1"></i><i id="lg2"></i><i id="lg3"></i><i id="lg4"></i>More</div></div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></span>
+      <h3>Task mix / day</h3><span class="hint">sessions classified by title</span></div>
+      <div class="cvs mini"><canvas id="cTaskMix"></canvas></div></div>
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span>
+      <h3>Friction / day</h3><span class="hint">interruptions &amp; tool errors</span></div>
+      <div class="cvs mini"><canvas id="cFrict"></canvas></div></div>
+  </div>
+</section>
+
+<!-- ══════════════ Tools & Models ══════════════ -->
+<section id="s-tools" class="stack" hidden>
+  <div class="row" style="--i:0">
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg></span>
+      <h3>Model usage</h3><span class="hint">output tokens</span></div>
+      <div class="cvs mini"><canvas id="cModels"></canvas></div></div>
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg></span>
+      <h3>Model breakdown</h3></div>
+      <div class="scrollx"><table class="tbl" id="tModels"><thead><tr><th>Model</th><th class="num">Msgs</th><th class="num">In</th><th class="num">Out</th><th class="num">Est. $</th></tr></thead><tbody></tbody></table></div></div>
+  </div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span>
+      <h3>Autonomy mode</h3><span class="hint">how much you let Claude act without asking</span></div>
+      <div class="cvs mini"><canvas id="cAutonomy"></canvas></div></div>
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 9v6M9 6h4a5 5 0 0 1 5 5"/></svg></span>
+      <h3>Delegation</h3><span class="hint">subagents spawned, by type</span></div>
+      <div class="cvs mini"><canvas id="cDelegation"></canvas></div></div>
+  </div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h7v7M4 20 21 4M4 4l16 16"/></svg></span>
+      <h3>Tool usage</h3><span class="hint">calls in range</span></div>
+      <div class="cvs"><canvas id="cTools"></canvas></div></div>
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6 3 12l6 6M15 6l6 6-6 6"/></svg></span>
+      <h3>Slash commands</h3><span class="hint">invocations in range</span></div>
+      <div class="cvs"><canvas id="cSlash"></canvas></div></div>
+  </div>
+</section>
+
+<!-- ══════════════ Projects ══════════════ -->
+<section id="s-projects" class="stack" hidden>
+  <div class="card" style="--i:0"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 7 9-4 9 4-9 4-9-4z"/><path d="m3 12 9 4 9-4M3 17l9 4 9-4"/></svg></span>
+    <h3>Projects</h3><span class="hint">select a row for the deep dive</span></div>
+    <div class="scrollx"><table class="tbl" id="tProj"><thead><tr><th>Project</th><th class="num">In</th><th class="num">Out</th><th class="num">LoC</th><th class="num">Est. $</th><th title="Has a CLAUDE.md or AGENTS.md">Instructions</th><th></th></tr></thead><tbody></tbody></table></div></div>
+  <div class="row half" style="--i:1">
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="8" r="3"/><path d="M6 9v6M18 11c0 4-6 3-6 7"/></svg></span>
+      <h3>Git branches</h3></div>
+      <div class="scrollx"><table class="tbl" id="tBranch"><thead><tr><th>Branch</th><th class="num">Msgs</th><th class="num">Out</th><th class="num">LoC</th></tr></thead><tbody></tbody></table></div></div>
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>
+      <h3>Most-edited files</h3><span class="hint">by LoC written</span></div>
+      <div class="scrollx"><table class="tbl" id="tFiles"><thead><tr><th>File</th><th class="num">LoC written</th></tr></thead><tbody></tbody></table></div></div>
+  </div>
+  <div class="card" style="--i:2"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+    <h3>Longest prompts</h3><span class="hint">your most detailed briefs</span></div>
+    <ul class="plist" id="lPrompts"></ul></div>
+</section>
+
+<!-- ══════════════ Weekly Report ══════════════ -->
+<section id="s-weekly" class="stack" hidden>
+  <div class="kgrid" id="wKpis" style="--i:0"></div>
+  <div class="card" style="--i:1"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span>
+    <h3>What you worked on</h3></div>
+    <div class="worklist" id="wWork"></div></div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/></svg></span>
+      <h3>Exploration vs building</h3></div>
+      <div class="cvs mini"><canvas id="cSplit"></canvas></div></div>
+    <div class="card"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8" rx="1"/><rect x="14" y="6" width="3" height="12" rx="1"/></svg></span>
+      <h3>Day by day</h3><span class="hint">output tokens &amp; LoC</span></div>
+      <div class="cvs mini"><canvas id="cWeekDays"></canvas></div></div>
+  </div>
+  <div class="card" style="--i:3"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg></span>
+    <h3>AI Fluency report</h3><span class="hint">delegation &middot; description &middot; discernment &middot; diligence</span></div>
+    <div class="flgrid"><div class="flchart"><canvas id="cFluency"></canvas></div><div id="flList"></div></div>
+    <div class="note">Heuristic scores computed locally from your logs, adapted for coding from Anthropic&rsquo;s 4D AI-fluency framework. Formulas in <code>docs/METRICS.md</code>.</div></div>
+  <div class="card" style="--i:4"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1 1.5 1 2.5h6c0-1 .2-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg></span>
+    <h3>Reflection</h3><span class="hint">a question this week&rsquo;s data raises</span></div>
+    <div class="reflq" id="reflQ">&hellip;</div>
+    <button class="btn accent" id="reflBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>Discuss with Claude</button>
+    <div class="aiout" id="reflOut" style="margin-top:14px"></div>
+    <div class="note">Discussing runs <code>claude -p</code> locally &mdash; like the AI summary, it costs tokens only when you press the button.</div></div>
+  <div class="card" id="wAIcard" style="display:none;--i:5"><div class="chead">
+    <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg></span>
+    <h3>AI-written summary</h3></div>
+    <div class="aiout" id="wAItext"></div>
+    <div class="note">Generated locally via <code>claude -p</code> &mdash; the only dashboard feature that consumes tokens, and only when you press the button.</div></div>
+</section>
+
+<!-- ══════════════ My Adoption ══════════════ -->
+<section id="s-adoption" class="stack" hidden>
+  <div class="card" id="adoEmpty" hidden style="--i:0"></div>
+  <div class="stack" id="adoFull">
+    <div class="card ad-hero" id="adoHero" style="--i:0"></div>
+    <div class="row" style="--i:1">
+      <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg></span><h3>What changed lately</h3><span class="hint">vs the 4 weeks before</span></div>
+        <ul class="ad-hl" id="adoHl"></ul></div>
+      <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 9v6M9 6h4a5 5 0 0 1 5 5"/></svg></span><h3>Your adoption journey</h3><span class="hint">four stages, each with its evidence</span></div>
+        <div class="ad-funnel" id="adoFunnel"></div></div>
+    </div>
+    <div class="card" style="--i:1"><div class="chead">
+      <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></span><h3>Your next 3 moves</h3><span class="hint">picked from your own data</span></div>
+      <div class="ad-coach" id="adoCoach"></div></div>
+    <div class="row" style="--i:2">
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2.5"/><path d="M16 2v4M8 2v4M3 10h18"/></svg></span><h3>Habit</h3><span class="hint">how regularly you show up</span></div>
+        <div class="ad-facts" id="adoHabitFacts"></div>
+        <div class="ad-cal" id="adoCal"></div>
+        <div class="hleg" style="justify-content:flex-start;margin-top:12px">Less<i id="adg1"></i><i id="adg2"></i><i id="adg3"></i><i id="adg4"></i>More active time</div>
+        <div class="eyebrow" style="margin:18px 0 8px">Active days per week</div>
+        <div class="cvs" style="height:120px"><canvas id="cAdoWeeks"></canvas></div></div>
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Range</h3><span class="hint" id="adoRangeHint">features you use</span></div>
+        <div class="ad-feats" id="adoFeats"></div></div>
+    </div>
+    <div class="row" style="--i:3">
+      <div class="card ad-craft"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg></span><h3>Craft</h3><span class="hint">how well you work with Claude</span></div>
+        <div id="adoCraft"></div>
+        <div class="note">The same four AI-fluency skills as the Weekly Report, measured over the last 4 weeks.</div></div>
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg></span><h3>Impact</h3><span class="hint">what Claude gets done for you</span></div>
+        <div class="ad-facts" id="adoImpactFacts"></div>
+        <div class="cvs short"><canvas id="cAdoLoc"></canvas></div>
+        <div class="note">Lines Claude wrote for you each week, over the last 12 weeks.</div></div>
+    </div>
+    <div class="row" style="--i:4">
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/></svg></span><h3>Your adoption over time</h3><span class="hint">score as of each week, 4-week window</span></div>
+        <div class="cvs short"><canvas id="cAdoTrend"></canvas></div></div>
+      <div class="card"><div class="chead">
+        <span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/></svg></span><h3>Healthy habits</h3><span class="hint">sustainable beats intense</span></div>
+        <div class="ad-facts" id="adoWell"></div>
+        <div class="ad-allgood" id="adoWellNote"></div></div>
+    </div>
+    <details class="card ad-how" style="--i:5"><summary><span class="gl" style="width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:var(--acc-soft);color:var(--acc)"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg></span>How your score is worked out</summary>
+      <div class="body" id="adoHow"></div></details>
+  </div>
+</section>
+
+<!-- ══════════════ Flow ══════════════ -->
+<section id="s-flow" class="stack" hidden>
+  <div class="card ins-hero" id="flowHero" style="--i:0"></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span><h3>Turn time</h3><span class="hint">prompt to finished answer, per day</span></div>
+      <div class="cvs short"><canvas id="cFlowTurn"></canvas></div>
+      <div class="note">Includes any time spent waiting for you to approve an action. <span id="cbTurn"></span></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><h3>Clean first-pass turns</h3><span class="hint">no error, interruption or correction</span></div>
+      <div class="cvs short"><canvas id="cFlowClean"></canvas></div>
+      <div class="note"><span id="cbClean"></span></div></div>
+  </div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0 5 5l-10 10a2.8 2.8 0 0 1-4-4z"/></svg></span><h3>Where tool time goes</h3><span class="hint">share of time between a tool call and its result</span></div>
+      <div class="cvs mini"><canvas id="cFlowTools"></canvas></div>
+      <div class="note" id="flowToolNote"></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Slowest tools and commands</h3><span id="cbTool"></span></div>
+      <div class="scrollx"><table class="tbl" id="tFlowTools"><thead><tr><th>Tool or command</th><th class="num">Calls</th><th class="num">Median</th><th class="num">90th pct</th><th class="num">Slowest</th><th class="num">Share</th></tr></thead><tbody></tbody></table></div></div>
+  </div>
+  <div class="row" style="--i:3">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>Failures and recovery</h3><span id="cbRec" class="hint"></span></div>
+      <div class="ad-facts" id="flowRecFacts"></div><div class="chips" id="flowFailTools"></div>
+      <div class="note">An episode is the same tool failing; it counts as recovered when that tool later succeeds in the same session. Three failures in a row is a stuck loop.</div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 9v6M9 6h4a5 5 0 0 1 5 5"/></svg></span><h3>Session shape</h3><span class="hint">how your sessions run</span></div>
+      <div class="ad-facts" id="flowShapeFacts"></div>
+      <div class="eyebrow" style="margin:6px 0 4px">Effort level of Claude's responses</div>
+      <div class="mbar" id="flowEffortBar"></div><div class="chips" id="flowEffortChips"></div></div>
+  </div>
+</section>
+
+<!-- ══════════════ Quality ══════════════ -->
+<section id="s-quality" class="stack" hidden>
+  <div class="card ins-hero" id="qualHero" style="--i:0"></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><h3>Verification loop</h3><span class="hint">tests, builds and lint after edits</span></div>
+      <div class="scrollx"><table class="tbl" id="tQRuns"><thead><tr><th>Check</th><th class="num">Runs</th><th class="num">Failed</th><th class="num">First run passed</th><th class="num">Fail → fixed</th></tr></thead><tbody></tbody></table></div>
+      <div class="eyebrow" style="margin:16px 0 8px">Edit sessions that ended with a check, by week</div>
+      <div class="cvs" style="height:140px"><canvas id="cQVerified"></canvas></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><h3>Rework hotspots</h3><span id="cbHot" class="hint"></span></div>
+      <div class="ad-facts" id="qualReFacts"></div>
+      <div class="scrollx"><table class="tbl" id="tQHot"><thead><tr><th>File</th><th class="num">Edits</th><th class="num">Days</th><th class="num">Sessions</th></tr></thead><tbody></tbody></table></div><div class="note" id="qualHotNote"></div></div>
+  </div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>Friction</h3><span id="cbFric" class="hint"></span></div>
+      <div class="ad-facts" id="qualFricFacts"></div>
+      <div class="note">A failed command is often a normal step, so look at the trend rather than the number.</div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg></span><h3>Safety signals</h3><span id="cbSafe" class="hint"></span></div>
+      <div id="qualSafety"></div>
+      <div class="eyebrow" style="margin:16px 0 8px">How actions were permitted</div>
+      <div class="chips" id="qualPerms"></div></div>
+  </div>
+</section>
+
+<!-- ══════════════ Value ══════════════ -->
+<section id="s-value" class="stack" hidden>
+  <div class="card ins-hero" id="valHero" style="--i:0"></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span><h3>Daily cost</h3><span class="hint">estimated at list prices; spikes in red</span></div>
+      <div class="cvs short"><canvas id="cValDaily"></canvas></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/></svg></span><h3>Cost per 100 lines</h3><span class="hint">by week; lower is better</span></div>
+      <div class="cvs short"><canvas id="cValWeekly"></canvas></div></div>
+  </div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span><h3>Caching</h3><span id="cbCache" class="hint"></span></div>
+      <div class="ad-facts" id="valCacheFacts"></div>
+      <div class="note">Savings assume you would otherwise have sent the same tokens uncached, at list prices.</div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Model mix</h3><span id="cbMix" class="hint"></span></div>
+      <div class="scrollx"><table class="tbl" id="tValModels"><thead><tr><th>Model</th><th class="num">Cost</th><th class="num">Share</th><th class="num">Sessions</th></tr></thead><tbody></tbody></table></div><div class="note" id="valMixNote"></div></div>
+  </div>
+  <div class="card" id="valSpikeCard" style="--i:3"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>Cost spikes</h3><span id="cbSpike" class="hint"></span></div>
+    <ul class="plist" id="valSpikes"></ul></div>
+  <div class="note" style="margin-top:-8px">No score on this tab by design: a dollar figure has no universal "good". Each number is compared with your own previous period.</div>
+</section>
+
+<!-- ══════════════ Advisor ══════════════ -->
+<section id="s-advisor" class="stack" hidden>
+  <div class="card" style="--i:0"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-4 10.5c.8.7 1 1.5 1 2.5h6c0-1 .2-1.8 1-2.5A6 6 0 0 0 12 3z"/></svg></span><h3>Your top moves</h3><span class="hint" id="advWindow"></span></div>
+    <div class="ad-coach" id="advRecs"></div></div>
+  <div class="card" id="advExpCard" style="--i:1"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/></svg></span><h3>Your experiment</h3><span class="hint">try one change, check it next week</span></div>
+    <div id="advExp"></div></div>
+  <div class="row" style="--i:2">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg></span><h3>What is going well</h3></div><ul class="lim good" id="advWins"></ul></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Also noticed</h3><span class="hint">lower priority</span></div><div id="advMore"></div></div>
+  </div>
+  <div class="note">Everything here is rule-based and computed locally from your logs, with the numbers shown. No AI is called and no tokens are used.</div>
+</section>
+
+<!-- ══════════════ Data Health ══════════════ -->
+<section id="s-health" class="stack" hidden>
+  <div class="card" style="--i:0"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span><h3>What your logs let us measure</h3><span class="hint">green = available, amber = partial, grey = not in your logs</span></div>
+    <div class="cap" id="healthCaps"></div></div>
+  <div class="row" style="--i:1">
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><h3>Log inventory</h3></div>
+      <div class="chips" id="healthMeta" style="margin-bottom:14px"></div>
+      <div class="scrollx"><table class="tbl" id="tHealth"><thead><tr><th>Log entry type</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></div>
+    <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>What these logs cannot tell us</h3></div>
+      <ul class="lim" id="healthLimits"></ul>
+      <div class="chead" style="margin:22px 0 12px"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><h3>Privacy</h3></div>
+      <div class="privrow"><button class="btn" id="privBtn"></button>
+        <span class="note" style="margin:0">Hides session titles, prompt previews and file names on screen. Everything stays on your machine either way. This dashboard is for your own reflection, not for ranking people or performance reviews.</span></div></div>
+  </div>
+  <div class="card" style="--i:2"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 17 10 5 10-5M2 12l10 5 10-5"/></svg></span><h3>Metric catalog</h3>
+    <select class="sel" id="catTab" style="margin-left:auto"><option value="">All tabs</option></select></div>
+    <div class="chips" style="margin-bottom:12px">
+      <span class="cb observed">Observed</span><span class="chip2" style="background:none;padding:0">read straight from the log</span>
+      <span class="cb derived">Derived</span><span class="chip2" style="background:none;padding:0">computed with a stated formula</span>
+      <span class="cb proxy">Proxy</span><span class="chip2" style="background:none;padding:0">an indirect signal</span>
+      <span class="cb estimated">Estimated</span><span class="chip2" style="background:none;padding:0">depends on list prices or a model</span></div>
+    <div class="scrollx"><table class="tbl" id="tCat"><thead><tr><th>Metric</th><th>Tab</th><th>Confidence</th><th>How it is computed</th><th>Limitation</th></tr></thead><tbody></tbody></table></div></div>
+</section>
+
+<footer>100% local &middot; reads Claude Code logs from <code id="root">~/.claude/projects</code> &middot; auto-refreshes every 15s.<br>
+Costs are estimates at public API pricing (incl. cache read/write rates) &mdash; on a subscription plan the real marginal cost is $0. Edit the <code>PRICING</code> table in config.py to tune.</footer>
+</div>
+</main>
+</div>
+
+<div id="scrim"></div>
+<div id="sheet" role="dialog" aria-modal="true" aria-labelledby="sTitle"><div class="sbox" id="sBox">
+  <div class="sgrab" id="sGrab"><div class="handle"></div>
+    <button id="sClose" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    <h2 id="sTitle"></h2><div class="ssub" id="sSub"></div>
+  </div>
+  <div class="sbody">
+    <div class="cvs short"><canvas id="cProj"></canvas></div>
+    <h3 class="sh">Sessions</h3><ul class="plist" id="sSess"></ul>
+    <h3 class="sh">Top files</h3>
+    <div class="scrollx"><table class="tbl" id="sFiles"><thead><tr><th>File</th><th class="num">LoC written</th></tr></thead><tbody></tbody></table></div>
+  </div>
+</div></div>
+<script src="/static/js/app.js"></script></body></html>

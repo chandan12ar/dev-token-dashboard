@@ -11,6 +11,13 @@ Thumbs.db
 AIFluencyInsights-Startup.vbs
 DevTokenDashboard-Startup.vbs
 
-# Notification threshold-tracking state (local runtime data)
+# Notification state written next to the script before v2.0 (now in the per-user data dir)
 .notify_state.json
 .notify_state.json.tmp
+
+# Packaging / tooling output
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

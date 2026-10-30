@@ -9,7 +9,8 @@
 |---|---|
 | **Document version** | 1.0 |
 | **Describes** | application **v1.4** at commit `690fe71` (2026-10-14), branch `main` |
-| **Document date** | 2026-10-28 |
+| **Document date** | 2026-10-28; code-layout sections updated 2026-10-30 for **v2.0** |
+| **v2.0 note** | v2.0 split the single script into a package with no behaviour change. §1, §3 (source map), §7, §9–§11 and §14 describe the v2.0 layout. Line numbers elsewhere still refer to the v1.4 file at `690fe71`; the source map in §3 shows which module each line range moved to |
 | **Audience** | Maintainers, reviewers, and anyone who needs to understand how the system works end to end |
 | **Companion docs** | [PROJECT_REPORT.md](PROJECT_REPORT.md) (why it exists), [METRICS.md](METRICS.md) (the math), [DASHBOARD_GUIDE.md](DASHBOARD_GUIDE.md) (page tour), [HOW_IT_WORKS.md](HOW_IT_WORKS.md) (short overview) |
 
@@ -28,7 +29,7 @@ strength of the evidence:
 | Tag | Meaning |
 |---|---|
 | **[S]** | Read directly from the source code (line numbers refer to commit `690fe71`) |
-| **[T]** | Also covered by the project's unit tests (all 144 pass: `python -m unittest test_ai_fluency_insights`) |
+| **[T]** | Also covered by the project's unit tests (all 144 pass: `python -m pytest`) |
 | **[P]** | Observed by running the real server against synthetic Claude Code logs and a simulated statusline capture, and for the banner behaviour, in headless Chromium, during this review |
 | **[D]** | Stated by the project's own docs or by Claude Code's behaviour; **not** independently verifiable in this review |
 
@@ -70,14 +71,14 @@ and raises usage notifications (Windows toast plus an in-page banner).
 
 | Characteristic | Value |
 |---|---|
-| Implementation | One Python file, `ai_fluency_insights.py` (5,548 lines: ≈3,400 Python, ≈2,200 embedded HTML/CSS/JS) |
-| Dependencies | Python 3.8+ standard library only. Chart.js 4.4.3 is bundled as `chart.umd.min.js`. Node is needed only for the optional statusline hook, and Claude Code already requires it |
+| Implementation | Python package `ai_fluency_insights` under `src/` (≈30 modules, ≈3,400 lines of Python) plus the web UI as static files (`web/index.html`, `app.css`, `app.js`; ≈2,200 lines) |
+| Dependencies | Python 3.8+ standard library only. Chart.js 4.4.3 is bundled at `web/static/vendor/chart.umd.min.js`. Node is needed only for the optional statusline hook, and Claude Code already requires it |
 | Server | `ThreadingHTTPServer` bound to `127.0.0.1:8787` (no auth, no TLS, GET only) |
 | Pages | 11 (Overview, Time & Focus, Tools & Models, Projects, Weekly Report, My Adoption, Flow, Quality, Value, Advisor, Data Health) |
-| Routes | 5: `/` (the page), `/chart.umd.min.js`, `/api/stats`, and `/api/ai_summary` + `/api/reflect` (the last two run `claude -p`) |
-| State | No database. Logs are the source of truth; the server rebuilds all stats in memory on every request. The only file it writes is `.notify_state.json` |
+| Routes | 5: `/` (the page), `/static/*` (CSS, JS, Chart.js), `/api/stats`, and `/api/ai_summary` + `/api/reflect` (the last two run `claude -p`) |
+| State | No database. Logs are the source of truth; the server rebuilds all stats in memory on every request. The only file it writes is `notify_state.json` in the per-user data directory |
 | Token spend | $0, except two explicit buttons that run `claude -p` |
-| Tests | 144 unit tests, ≈0.13 s. No HTTP-layer or browser tests |
+| Tests | 144 unit tests under `tests/`, ≈0.6 s with pytest. No HTTP-layer or browser tests |
 | Platforms | Windows, macOS, Linux. Toast popups are **Windows-only**; in-page banners work everywhere |
 
 ### The design in one paragraph
@@ -103,7 +104,7 @@ flowchart LR
     rl[("~/.claude/rate_limits_latest.json")]
     settings[("~/.claude/settings.json")]
     dash["AI Fluency Insights<br/>Python process<br/>127.0.0.1:8787"]
-    state[(".notify_state.json<br/>next to the script")]
+    state[("notify_state.json<br/>per-user data dir")]
     browser["Browser tab<br/>single-page dashboard"]
     toast["Windows toast<br/>PowerShell + WinRT"]
     claudep["claude -p<br/>optional, button press only"]
@@ -137,7 +138,7 @@ that script drops them into a local JSON file. The dashboard only reads that fil
 | `~/.claude/rate_limits_latest.json` | read | `{"rate_limits": {...}, "captured_at": <epoch s>}` | statusline script |
 | `~/.claude/settings.json` | read/write (setup wizard only) | JSON, `statusLine` block | Claude Code / wizard |
 | `~/.claude/ai_fluency_insights_statusline.js` | write (setup wizard only) | Node script | wizard |
-| `.notify_state.json` (next to the script) | read/write | JSON | dashboard |
+| `notify_state.json` (per-user data dir, see §11.2) | read/write | JSON | dashboard |
 | `http://127.0.0.1:8787` | serve | HTTP/1.0, JSON + HTML | dashboard |
 | `powershell.exe` | spawn (Windows) | WinRT toast | dashboard |
 | `claude -p "<prompt>"` | spawn (button press) | stdout text, 300 s timeout | Claude Code CLI |
@@ -149,7 +150,7 @@ that script drops them into a local JSON file. The dashboard only reads that fil
 
 ```mermaid
 flowchart TB
-  subgraph proc["Python process: ai_fluency_insights.py"]
+  subgraph proc["Python process: ai_fluency_insights"]
     main["Main thread<br/>ThreadingHTTPServer.serve_forever"]
     req["Request threads, one per connection<br/>Handler.do_GET"]
     notif["Notification thread (daemon)<br/>loop: poll_once, then sleep 5 s"]
@@ -166,7 +167,7 @@ flowchart TB
   req -->|reads recent_events<br/>and plan_window_snapshot| watcher
   watcher -->|Popen, fire and forget| ps["powershell.exe toast"]
   req -->|subprocess.run, up to 300 s| cl["claude -p"]
-  watcher <-->|atomic tmp + os.replace| st[(".notify_state.json")]
+  watcher <-->|atomic tmp + os.replace| st[("notify_state.json")]
   watcher -->|read| rl[("rate_limits_latest.json")]
   req -->|read| rl
   scanner -->|os.walk, read changed files| fs[("~/.claude/projects")]
@@ -189,28 +190,41 @@ a benign race, since it reads small scalars. **[S]**
 
 ### Source map
 
-The whole application is one file. This map is the quickest way to navigate it (commit `690fe71`).
+Since v2.0 the code is a package under `src/ai_fluency_insights/`. Imports only point down the
+layers (entry points → integrations / notifications → analytics → core → config / paths); the rules
+are in [CONTRIBUTING.md](../CONTRIBUTING.md#layering-rules). The last column maps the v1.4 line
+numbers used elsewhere in this document to their new home.
 
-| Lines | Block | Responsibility |
+| Module | Responsibility | v1.4 lines |
 |---|---|---|
-| 33–126 | Configuration constants | `PRICING`, `GOALS`, `ADOPTION`, `ADOPTION_LEVELS`, `NOTIFY`, `MILESTONES`, `OFFICIAL_MILESTONES`, `should_run_notifications` |
-| 128–335 | Parsing vocabulary | tool sets, command classifiers (test/build/lint/risky), `ADOPTION_FEATURES`, `QUIET_START/END`, `price_for`, `count_lines` |
-| 341–498 | `Stats` data model | per-day, per-project, per-session, per-turn, per-tool records; `_begin_turn`, `_end_turn`, `_handle_tool_results` |
-| 500–787 | `parse_entry` | the single log-line parser |
-| 794–853 | `Scanner` | incremental file cache and `build_stats` |
-| 856–1063 | Notification primitives | `milestones_crossed`, `steps_crossed`, `weighted_tokens`, `SessionTokenTracker`, rate-limit file loaders, `PlanWindowTracker`, state load/save |
-| 1065–1103 | Toast delivery | `send_windows_toast` |
-| 1106–1430 | `NotificationWatcher` | polling, replay, firing, snapshot, persistence |
-| 1438–1580 | Classification and weekly | `classify_session`, `longest_focus`, `build_weeks`, `active_streak` |
-| 1582–2027 | Flow / Quality / Value / Health | engines and `METRIC_CATALOG` |
-| 2030–2174 | Advisor | rule-based recommendations |
-| 2177–2636 | Fluency and Adoption | 4D fluency, pillars, levels, coach, funnel |
-| 2639–2780 | `stats_to_json` | range-scoped payload builder |
-| 2788–2863 | AI helpers | `_run_claude`, `ai_week_summary`, `ai_reflection` |
-| 2870–5048 | `HTML` | the entire SPA: CSS, markup, JavaScript |
-| 5051–5187 | `Handler` | HTTP routing |
-| 5190–5445 | Setup wizard | statusline classify/merge/backup/write, `startup_hint` |
-| 5447–5548 | `main()` | CLI, server, thread start |
+| `config.py` | `PRICING`, `GOALS`, `ADOPTION`, `ADOPTION_LEVELS`, `LEVEL_GATES`, `NOTIFY`, `MILESTONES`, `OFFICIAL_MILESTONES`, `QUIET_START/END`, `should_run_notifications` | 33–126, 309–311 |
+| `paths.py` | Claude Code dirs, bundled resource lookup, per-user data dir, legacy state migration | 5447–5452 |
+| `core/taxonomy.py` | tool sets, `TOOL_FEATURES`, `ADOPTION_FEATURES`, command classifiers (test/build/lint/risky) | 128–250, 285–307 |
+| `core/pricing.py` | `price_for` | 323–329 |
+| `core/stats.py` | the `Stats` data model | 341–430 |
+| `core/parser.py` | `parse_entry` and its turn / tool-result helpers, `CMD_RE`, `CORRECT_RE`, `count_lines` | 252–284, 313–335, 431–789 |
+| `core/scanner.py` | `Scanner`: incremental file cache and `build_stats` | 790–855 |
+| `notifications/thresholds.py` | `milestones_crossed`, `steps_crossed`, `weighted_tokens`, `SessionTokenTracker` | 856–944 |
+| `notifications/plan_usage.py` | rate-limit file loaders, `PlanWindowTracker` | 945–1049 |
+| `notifications/state.py` | state load/save | 1050–1064 |
+| `notifications/toast.py` | `send_windows_toast` | 1074–1105 |
+| `notifications/watcher.py` | `NotificationWatcher`: polling, replay, firing, snapshot, persistence | 1065–1073, 1106–1432 |
+| `analytics/sessions.py`, `weekly.py` | `classify_session`, `longest_focus`, `build_weeks`, `active_streak` | 1433–1581 |
+| `analytics/common.py` | shared helpers (`_in`, `_median`, `_rate`, `_rnd`, ...) | 1582–1639, 2183–2186 |
+| `analytics/flow.py`, `quality.py`, `value.py`, `health.py` | the four engines | 1640–1951 |
+| `analytics/catalog.py` | `METRIC_CATALOG` | 1952–2029 |
+| `analytics/advisor.py` | rule-based recommendations | 2030–2176 |
+| `analytics/fluency.py`, `adoption.py` | 4D fluency; pillars, levels, coach, funnel | 2177–2638 |
+| `analytics/summary.py` | `stats_to_json`, the range-scoped payload builder | 2639–2782 |
+| `integrations/claude_cli.py` | `_run_claude`, `ai_week_summary`, `ai_reflection` | 2783–2865 |
+| `integrations/statusline.py` | setup wizard: classify / merge / backup / write, `startup_hint` | 5190–5446 |
+| `integrations/startup.py` | Windows logon task (`--install-startup`) | from `main()` |
+| `web/` | the SPA: `index.html`, `static/css/app.css`, `static/js/app.js`, `static/vendor/` | 2866–5049 |
+| `resources/statusline.js` | the Node hook the wizard writes | inside 5190–5446 |
+| `server/api.py` | `/api/*` payload assembly (was inline in `do_GET`) | 5051–5189 |
+| `server/handler.py` | HTTP routing and static files | 5051–5189 |
+| `server/app.py` | server start-up and the notify thread | from `main()` |
+| `cli.py`, `__main__.py` | argument parsing and dispatch | 5454–5548 |
 
 ---
 
@@ -696,8 +710,9 @@ stateDiagram-v2
 
 ### 6.7 Persistence and restart safety
 
-`.notify_state.json`, next to the script (git-ignored), written atomically (`.tmp` + `os.replace`)
-at the end of every poll. A failed write (e.g. read-only install directory) is swallowed, so the
+`notify_state.json` in the per-user data directory (§11.2), written atomically (`.tmp` + `os.replace`)
+at the end of every poll. Before v2.0 it lived next to the script as `.notify_state.json`; that file
+is copied over once on first run. A failed write is swallowed, so the
 subsystem keeps working but loses restart-safety. **[S][T]**
 
 ```json
@@ -747,11 +762,11 @@ describes an outdated 30-minute fallback; **F7** on reload every retained event 
 
 | Stage | Command / action | What happens |
 |---|---|---|
-| Install | `git clone` (or copy `ai_fluency_insights.py` + `chart.umd.min.js`) | Nothing to build; the two files are the whole app |
-| First run | `python ai_fluency_insights.py` | Checks the log directory exists (else exits with a hint), builds `Scanner`, `NotificationWatcher`, starts the server on `127.0.0.1:8787`, starts the notify thread, opens the browser after 0.8 s. On **Windows** with neither a capture file nor the managed script, prints the one-line hint to run `--setup-notifications` |
-| Enable accurate numbers | `python ai_fluency_insights.py --setup-notifications` | Runs the wizard (7.2); handled **before** the server starts and exits |
+| Install | `git clone`, then `pip install .` | Installs the package and the `ai-fluency-insights` command; downloads nothing |
+| First run | `ai-fluency-insights` | Checks the log directory exists (else exits with a hint), builds `Scanner`, `NotificationWatcher`, starts the server on `127.0.0.1:8787`, starts the notify thread, opens the browser after 0.8 s. On **Windows** with neither a capture file nor the managed script, prints the one-line hint to run `--setup-notifications` |
+| Enable accurate numbers | `ai-fluency-insights --setup-notifications` | Runs the wizard (7.2); handled **before** the server starts and exits |
 | Steady state | server + notify thread | Page polls every 15 s; watcher polls every 5 s |
-| Restart after editing code | Windows: `Restart-Insights.bat` | Stops every copy (see 7.4), relaunches one hidden instance, opens the browser |
+| Restart after editing code | Windows: `scripts\windows\Restart-Insights.bat` | Stops every copy (see 7.4), relaunches one hidden instance, opens the browser |
 | Auto-start | Windows `--install-startup`; macOS cron/launchd; Linux systemd user unit | See 7.3 |
 | Upgrade from the old name | re-run `--setup-notifications`; `--install-startup` | Repoints the legacy statusline marker and replaces the old logon task |
 | Uninstall | `--uninstall-startup`; delete the folder; optionally remove the `statusLine` block | Removes both the current and legacy Windows tasks |
@@ -812,15 +827,17 @@ hook is not wired in yet.
 | `--dump` | Print the range-less stats JSON and exit (no server, no notify thread) |
 | `--setup-notifications` | Run the wizard and exit |
 | `--dry-run` | With the wizard: preview only |
-| `--install-startup` / `--uninstall-startup` | Windows Task Scheduler: `schtasks /Create /TN AIFluencyInsights /SC ONLOGON` running `pythonw.exe … --no-browser --port N`; also deletes the legacy `DevTokenDashboard` task |
+| `--install-startup` / `--uninstall-startup` | Windows Task Scheduler: `schtasks /Create /TN AIFluencyInsights /SC ONLOGON` running `pythonw.exe -m ai_fluency_insights --no-browser --port N` (or the `.exe` itself when packaged); refuses if the package isn't installed; also deletes the legacy `DevTokenDashboard` task |
+| `--version` | Print the version and exit |
 
-### 7.4 `Restart-Insights.ps1`
+### 7.4 `scripts/windows/Restart-Insights.ps1`
 
 1. Stops every `python*/pythonw*` process whose command line contains `ai_fluency_insights` **or**
-   `dev_token_dashboard`, then stops **whatever is listening on port 8787** (Windows lets several
+   `dev_token_dashboard`, any `AIFluencyInsights.exe`, then stops **whatever is listening on port 8787** (Windows lets several
    sockets share a port, so stale copies can survive otherwise).
-2. Waits 0.7 s, starts one hidden `pythonw.exe` (falls back to `python.exe`) with
-   `--no-browser --port 8787`.
+2. Waits 0.7 s, starts one hidden `pythonw.exe` (falls back to `python.exe`) running
+   `-m ai_fluency_insights --no-browser --port 8787` with `PYTHONPATH` set to the checkout's `src`,
+   so edits take effect without reinstalling.
 3. Waits 2 s, `GET /` to confirm HTTP 200, opens the browser.
 
 The port is hard-coded to 8787, and step 1 will stop any unrelated process that owns it.
@@ -979,7 +996,7 @@ Transport: HTTP/1.0 (connection closes after each response), `127.0.0.1` only, *
 | Route | Parameters | Response |
 |---|---|---|
 | `GET /` | — | the single-page app (`text/html`) |
-| `GET /chart.umd.min.js` | — | local Chart.js bundle (`application/javascript`); if the file is missing, **302 to the jsDelivr CDN** (Finding F6) |
+| `GET /static/<path>` | — | files under the package's `web/static/` (CSS, JS, Chart.js), content type by extension; anything resolving outside that directory → 404. If `vendor/chart.umd.min.js` is missing, **302 to the jsDelivr CDN** (Finding F6) |
 | `GET /api/stats` | `days` (int, default 30; `0` = all time; invalid → 30), or `from` and/or `to` (`YYYY-MM-DD`, overrides `days`) | the snapshot described below (`application/json`) |
 | `GET /api/ai_summary` | `week` (ISO week key such as `2026-W41`) | `{"ok": true, "text": "…"}` or `{"ok": false, "error": "…"}`. Runs `claude -p`, up to 300 s |
 | `GET /api/reflect` | `week`, `q` (reflection question, truncated to 500 chars) | same shape as above |
@@ -1019,8 +1036,9 @@ handler thread blocks while the subprocess runs, but other requests are still se
 
 ## 10. Frontend architecture
 
-The entire UI is one Python string, `HTML` (lines 2870–5048): CSS design tokens, markup for 11
-`<section id="s-…">` elements, and vanilla JavaScript. No framework, no build step, no network
+The UI lives in `src/ai_fluency_insights/web/`: `index.html` (markup for 11 `<section id="s-…">`
+elements), `static/css/app.css` (design tokens and styles) and `static/js/app.js` (vanilla
+JavaScript). Until v2.0 all three were one Python string, `HTML` (v1.4 lines 2870–5048). No framework, no build step, no network
 requests apart from same-origin `/api/*` and the bundled Chart.js 4.4.3.
 
 ```mermaid
@@ -1055,8 +1073,8 @@ flowchart TD
 
 ### 11.1 Source-level configuration
 
-There is no config file. Tunables are constants at the top of `ai_fluency_insights.py` (edit, then
-restart):
+There is no config file. Tunables are constants in `src/ai_fluency_insights/config.py` (edit, then
+restart); the rate-limit and window constants below live in `notifications/plan_usage.py`:
 
 | Constant | Default | Effect |
 |---|---|---|
@@ -1076,6 +1094,7 @@ restart):
 | `QUIET_START`, `QUIET_END` | `23`, `6` | wellness quiet hours |
 
 Environment: `CLAUDE_CONFIG_DIR` relocates the log root and the wizard's targets (but see Finding F8).
+`AFI_DATA_DIR` overrides the per-user data directory.
 CLI flags are in §7.3.
 
 ### 11.2 Every file the program touches
@@ -1087,8 +1106,9 @@ CLI flags are in §7.3.
 | `~/.claude/settings.json` | ✔ | wizard only | backed up first |
 | `~/.claude/settings.json.bak-<unix>` | — | wizard only | one per write |
 | `~/.claude/ai_fluency_insights_statusline.js` | — | wizard only | only under this namespaced name |
-| `<script dir>/.notify_state.json` and `.tmp` | ✔ | ✔ every poll | git-ignored |
-| `<script dir>/chart.umd.min.js` | ✔ | — | served locally |
+| `<data dir>/notify_state.json` and `.tmp` | ✔ | ✔ every poll | data dir: `%LOCALAPPDATA%\AIFluencyInsights` (Windows), `~/Library/Application Support/AIFluencyInsights` (macOS), `$XDG_STATE_HOME/ai-fluency-insights` or `~/.local/state/ai-fluency-insights` (Linux), or `AFI_DATA_DIR` |
+| `<repo>/.notify_state.json` | ✔ once | — | pre-v2.0 location, copied to the data dir on first run |
+| `<package>/web/**`, `<package>/resources/statusline.js` | ✔ | — | bundled with the package |
 | Windows Task Scheduler task `AIFluencyInsights` | — | `--install-startup` | legacy `DevTokenDashboard` removed |
 
 ---
@@ -1142,8 +1162,8 @@ time curl -s "http://127.0.0.1:8787/api/stats?days=30" -o /dev/null
 ### 13.1 Privacy properties
 
 - **No outbound network from the app itself.** No telemetry, no analytics, no API calls. **[S]**
-- Chart.js is bundled; the only external reference is the CDN **fallback** if `chart.umd.min.js` is
-  missing (Finding F6).
+- Chart.js is bundled; the only external reference is the CDN **fallback** if
+  `web/static/vendor/chart.umd.min.js` is missing (Finding F6).
 - The server binds `127.0.0.1` only, so other machines on the network cannot reach it. **[S][P]**
 - The only things that ever reach Anthropic are what Claude Code itself sends, plus the two
   button-triggered `claude -p` runs (a prompt built from session titles, project names and weekly
@@ -1167,8 +1187,11 @@ time curl -s "http://127.0.0.1:8787/api/stats?days=30" -o /dev/null
 
 ## 14. Testing
 
-**144 tests, all passing, ≈0.13 s**, standard-library `unittest`, no network, no real filesystem
-state (temp directories). Run: `python -m unittest test_ai_fluency_insights -v`.
+**144 tests, all passing**, written with standard-library `unittest`, no network, no real filesystem
+state (temp directories; `tests/__init__.py` points `AFI_DATA_DIR` at one). Run: `python -m pytest`
+(or `python -m unittest discover -s tests -t .` with `src` on `PYTHONPATH`). Files mirror the package:
+`tests/core`, `tests/analytics`, `tests/notifications`, `tests/integrations`. CI runs them on
+Windows and Linux.
 
 | Subsystem | Test classes (count) |
 |---|---|
@@ -1183,7 +1206,7 @@ state (temp directories). Run: `python -m unittest test_ai_fluency_insights -v`.
 **Gaps.** Nothing exercises the HTTP handler (routing, `days`/`from`/`to`, previous-window
 logic, error paths), the browser code (render, polling, banner de-duplication), `parse_entry` against
 raw edge-case lines outside the engine fixtures, `send_windows_toast`'s real behaviour, or
-`Restart-Insights.ps1`. Finding F1 sits in exactly that untested layer. The probes used for this
+`scripts/windows/Restart-Insights.ps1`. Finding F1 sits in exactly that untested layer. The probes used for this
 document (a synthetic-log generator, a server driver and a headless-Chromium script) are described in
 Appendix C and would be a sensible starting point for an integration suite.
 
@@ -1194,9 +1217,9 @@ Appendix C and would be a sensible starting point for an integration suite.
 | Symptom | Likely cause | Check / fix |
 |---|---|---|
 | "Log directory not found" at start | Claude Code never run here, or logs elsewhere | `--dir <path>`; check `$CLAUDE_CONFIG_DIR` |
-| Page shows "Can't reach the dashboard server — retrying every 15s" | Process stopped or port changed | Restart; `Restart-Insights.bat` on Windows |
+| Page shows "Can't reach the dashboard server — retrying every 15s" | Process stopped or port changed | Restart; `scripts\windows\Restart-Insights.bat` on Windows |
 | Port already in use | Another copy is running | Open `http://localhost:8787`, or `--port 9000` |
-| Charts blank | Stale cache, or `chart.umd.min.js` deleted (CDN fallback needs internet once) | Hard refresh (`Ctrl+F5`) |
+| Charts blank | Stale cache, or `web/static/vendor/chart.umd.min.js` missing (CDN fallback needs internet once) | Hard refresh (`Ctrl+F5`) |
 | Plan card says "(estimate)" | No capture file has ever existed | Run `--setup-notifications` |
 | Plan card shows ⚠ "last updated N ago, may be behind" | No Claude Code activity writing captures | Use Claude Code in any window; refreshing the browser cannot help (the file is the same) |
 | No toast pop-ups | Not Windows, or `NOTIFY["enabled"]` is `False` (startup prints "Toast notifications: OFF"), or capture older than 30 min | See §6; in-page banners still work on every OS |
@@ -1222,10 +1245,10 @@ Severity is the author's judgement. Evidence tags follow the legend at the top.
 | **F3** | Low | Docs | `DASHBOARD_GUIDE.md` (§Plan usage limits) says a capture older than 30 min makes the card fall back to the estimate. Since `3d56f44` the card keeps the last real capture, flagged with its age and zeroed after its window resets; only a never-written or corrupt file falls back | **[S][T][P]** | Update the guide text; this document describes the code |
 | **F4** | Medium | Performance | Every `/api/stats` re-parses **all** cached entries, twice for ranged views, holding the scanner lock. 80k entries / 27 MB → 3.3–3.8 s per request and ≈ 220 MB RSS | **[P]** §12 | Memoise `Stats` per scanner generation; derive ranges from the full records |
 | **F5** | Medium | Security | No `Host` / `Origin` validation, and GET endpoints with side effects (`claude -p`). Any visited web page can trigger token-spending runs and choose the `q` text; a DNS-rebinding page could read `/api/stats`. See also F13 | **[S][P]** headers accepted; exploit not attempted | Reject unexpected `Host`; require a per-process token or non-GET for the AI routes; serialise or rate-limit them |
-| **F6** | Low | Privacy claim | "Zero external requests" has one exception: if `chart.umd.min.js` is missing, `/chart.umd.min.js` replies **302 to jsDelivr** | **[S]** | Fail loudly, or embed the library |
+| **F6** | Low | Privacy claim | "Zero external requests" has one exception: if `chart.umd.min.js` is missing, `/static/vendor/chart.umd.min.js` replies **302 to jsDelivr** | **[S]** | Fail loudly, or embed the library |
 | **F7** | Low | Notifications | On every page load, all retained events (up to 20, no age filter) are shown again as banners, however old | **[P]** | Filter by `ts`, or remember seen ids in `sessionStorage` |
 | **F8** | Low | Config | `CLAUDE_CONFIG_DIR` is honoured for the log root and the wizard's targets, but `RATE_LIMITS_PATH` and the Node hook hard-code `~/.claude`. Reader and writer agree, so it works, but with `CLAUDE_CONFIG_DIR` set and no `~/.claude` directory the hook's write fails silently | **[S]** | Resolve the capture path from one place and pass it to the hook |
-| **F9** | Low | Maintainability | Fluency formulas duplicated in Python and JavaScript; the wizard's reference script is also embedded as a string | **[S]** | Compute weekly fluency server-side; keep one source |
+| **F9** | Low | Maintainability | Fluency formulas duplicated in Python and JavaScript (the wizard's reference script, also flagged here, became `resources/statusline.js` in v2.0) | **[S]** | Compute weekly fluency server-side; keep one source |
 | **F10** | Low | Reliability | The 15 s poll has no in-flight guard and does not pause for hidden tabs | **[S]** | Skip when busy; honour `document.hidden` |
 | **F11** | Info | Accuracy | The estimate is approximate by construction: one-point ceiling calibration, a window anchored to the first event seen rather than Anthropic's boundary, and a silent baseline that excludes pre-existing sessions | **[S]** | Prefer the official path; treat the estimate as a fallback only |
 | **F12** | Info | Quality | No HTTP-layer or browser tests (see §14) | **[S]** | Add an integration suite from the Appendix C probes |

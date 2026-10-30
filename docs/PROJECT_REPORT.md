@@ -32,14 +32,14 @@ doing. Today, almost nobody can.
 each developer's machine into a private, personal view of how they use it:
 how much, how well, and what to try next.**
 
-- **100 % local.** One Python file, standard library only. It never calls an
+- **100 % local.** Standard library only, no third-party dependencies. It never calls an
   API, uses no tokens, and sends nothing anywhere. It works offline.
 - **One place instead of many.** Claude Code shows usage through about ten
   separate commands and screens, most of them one-session snapshots. This puts
   usage, cost, habits, quality and history in a single dashboard with one date
   range and one set of definitions ([section 2](#2-the-problem)).
-- **Zero setup cost.** `python ai_fluency_insights.py` and open
-  `http://localhost:8787`. No installs, no accounts, no admin rights.
+- **Zero setup cost.** `pip install .`, then `ai-fluency-insights`, and open
+  `http://localhost:8787`. No third-party packages, no accounts, no admin rights.
 - **Built for the developer first.** It compares a person only with their own
   past. It never ranks people against each other.
 - **Honest about its numbers.** Every metric on the newer pages carries a
@@ -399,7 +399,7 @@ pages marked "Yes". Everything, including the project detail view, respects it.
 - **Plan usage limits:** your real 5-hour and 7-day plan usage, the same
   percentages Claude Code reports, shown beside your history instead of only in
   the moment. They are captured through Claude Code's status-line hook (set up
-  once with `python ai_fluency_insights.py --setup-notifications`) and are
+  once with `ai-fluency-insights --setup-notifications`) and are
   available on Pro and Max plans. The card flags a stale reading, and falls back
   to a clearly labelled estimate when none exists. On Windows, optional toast
   notifications can warn you as you cross usage milestones.
@@ -707,7 +707,7 @@ Quality = 40% verified + 20% tests alongside + 20% low rework + 20% first-run pa
 Things worth stating plainly:
 
 - The weights and targets are hand-chosen and sit in one table at the top of
-  the script (`ADOPTION`), so they can be tuned.
+  `config.py` (`ADOPTION`), so they can be tuned.
 - The levels are **motivational labels, not a standard.** The trend matters
   more than the exact number.
 - With fewer than 3 active days in the window, the page shows "Building your

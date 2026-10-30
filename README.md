@@ -2,7 +2,7 @@
 
 > *Formerly "Dev Token Dashboard".* Renamed because it measures far more than
 > tokens: fluency, flow, quality and value. Existing installs keep working —
-> re-run `python ai_fluency_insights.py --setup-notifications` once to move the
+> re-run `ai-fluency-insights --setup-notifications` once to move the
 > statusline hook to the new script name, and `--install-startup` to replace the
 > old Windows logon task.
 
@@ -12,7 +12,7 @@ your machine and turns them into live charts, developer insights, a
 ready-to-paste **weekly update**, a personal **adoption scorecard**, and
 **flow / quality / value** analysis with evidence-based advice.
 
-One Python file, standard library only, no pip installs, works offline.
+Standard library only, no third-party dependencies, works offline.
 
 ![Dashboard overview](docs/screenshots/overview.png)
 
@@ -29,13 +29,30 @@ Estimated. And it needs no Node/npm: just Python, which you already have.
 ```
 git clone https://github.com/chandan12ar/ai-fluency-insights.git
 cd ai-fluency-insights
-python ai_fluency_insights.py
+pip install .
+ai-fluency-insights
 ```
 
 Opens http://localhost:8787. Requires Python 3.8+ and a machine where
 Claude Code has been used (it reads `~/.claude/projects/`).
 
 Full instructions, auto-start at logon, and troubleshooting: **[SETUP.md](SETUP.md)**
+
+## What's new (v2.0) — enterprise-ready codebase
+
+Same dashboard, rebuilt as a proper package. Nothing you see changes (every API
+response was checked byte-for-byte against v1.4), but the code is now ready for
+a team to own:
+
+- **Modular package** under `src/ai_fluency_insights/`: `core` (log parsing),
+  `analytics` (one module per tab), `notifications`, `integrations`, `server`, and
+  `web` with the UI as real HTML/CSS/JS files
+- **Installable** with `pip install .`; run it as `ai-fluency-insights`
+- **Tests per area** under `tests/`, plus **CI** on Windows and Linux
+- Runtime state lives in your per-user data folder, not next to the code
+
+Upgrading: see [CHANGELOG.md](CHANGELOG.md#upgrading-from-1x). Code layout and
+dev setup: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## What's new (v1.4) — the "Engineering insight" update
 
@@ -193,7 +210,7 @@ Your prompts and logs never leave your disk.
 ## Notes
 
 - Cost is an *estimate* at public API pricing — on a subscription plan your
-  real marginal cost is $0. Tune the `PRICING` table at the top of the script.
+  real marginal cost is $0. Tune the `PRICING` table in `src/ai_fluency_insights/config.py`.
 - Token totals are **deduplicated per API response**, which is why they're
   lower (and more accurate) than the official Claude Code panel's count —
   the full analysis is in [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md).
@@ -208,6 +225,8 @@ Your prompts and logs never leave your disk.
   section explained in plain language — what it tells you, how the data
   becomes the number, and how to read it (great for showing your team)
 - [SETUP.md](SETUP.md) — install, run, auto-start on Windows/macOS/Linux
+- [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, code layout and layering rules
+- [CHANGELOG.md](CHANGELOG.md) — release history and upgrade notes
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — architecture and every panel explained
 - [docs/METRICS.md](docs/METRICS.md) — **the math**: exact formula behind every metric, what each dashboard section means, and the known approximations
 - [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md) — why our token counting is the correct one

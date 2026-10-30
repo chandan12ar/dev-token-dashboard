@@ -5,27 +5,29 @@ Get AI Fluency Insights running on your machine in under two minutes.
 ## Prerequisites
 
 - **Python 3.8+** — check with `python --version`. Nothing else: the
-  dashboard uses only the standard library, no `pip install` needed.
+  dashboard uses only the standard library, so `pip install` below downloads
+  nothing; it just installs the app and its `ai-fluency-insights` command.
 - **Claude Code** installed and used at least once (the dashboard reads the
   session logs Claude Code writes locally; with no logs there is nothing to
   show).
 - Any OS — Windows, macOS, or Linux. Auto-start instructions differ per OS
   (see below); everything else is identical.
 
-## 1. Get the code
+## 1. Get the code and install it
 
 ```
 git clone <this-repo-url>
 cd ai-fluency-insights
+pip install .
 ```
 
-(or just download `ai_fluency_insights.py` and `chart.umd.min.js` into a
-folder — those two files are the entire app.)
+Use `pip install -e .` instead if you plan to edit the code (see
+[CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## 2. Run it
 
 ```
-python ai_fluency_insights.py
+ai-fluency-insights
 ```
 
 That's it. Your browser opens http://localhost:8787 with your stats. The
@@ -49,15 +51,15 @@ The script auto-detects this (it also honors the `CLAUDE_CONFIG_DIR`
 environment variable). If your logs live somewhere unusual:
 
 ```
-python ai_fluency_insights.py --dir "D:\path\to\.claude\projects"
+ai-fluency-insights --dir "D:\path\to\.claude\projects"
 ```
 
 ### Options
 
 ```
-python ai_fluency_insights.py --port 9000      # different port
-python ai_fluency_insights.py --no-browser     # don't auto-open the browser
-python ai_fluency_insights.py --dump           # print raw stats JSON and exit
+ai-fluency-insights --port 9000      # different port
+ai-fluency-insights --no-browser     # don't auto-open the browser
+ai-fluency-insights --dump           # print raw stats JSON and exit
 ```
 
 ## 3. Optional: start automatically at logon
@@ -65,21 +67,21 @@ python ai_fluency_insights.py --dump           # print raw stats JSON and exit
 ### Windows — option A: Task Scheduler (needs an Administrator terminal)
 
 ```
-python ai_fluency_insights.py --install-startup     # install
-python ai_fluency_insights.py --uninstall-startup   # remove
+ai-fluency-insights --install-startup     # install
+ai-fluency-insights --uninstall-startup   # remove
 ```
 
 ### Windows — option B: Startup folder (no admin needed)
 
 Create a shortcut in your Startup folder pointing at `pythonw.exe` (the
-console-less Python), with the script path as argument. In PowerShell:
+console-less Python you installed the app into), running the package. In PowerShell:
 
 ```powershell
 $pyw = (Get-Command pythonw.exe).Source
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut("$([Environment]::GetFolderPath('Startup'))\AI Fluency Insights.lnk")
 $lnk.TargetPath = $pyw
-$lnk.Arguments = '"C:\full\path\to\ai_fluency_insights.py" --no-browser'
+$lnk.Arguments = '-m ai_fluency_insights --no-browser'
 $lnk.Save()
 ```
 
@@ -90,7 +92,7 @@ Delete the shortcut (`Win+R` → `shell:startup`) to remove auto-start.
 ```
 crontab -e
 # add:
-@reboot /usr/bin/python3 /full/path/to/ai_fluency_insights.py --no-browser
+@reboot /usr/bin/python3 -m ai_fluency_insights --no-browser
 ```
 
 (or create a `launchd` user agent if you prefer.)
@@ -103,7 +105,7 @@ crontab -e
 Description=AI Fluency Insights
 
 [Service]
-ExecStart=/usr/bin/python3 /full/path/to/ai_fluency_insights.py --no-browser
+ExecStart=/usr/bin/python3 -m ai_fluency_insights --no-browser
 
 [Install]
 WantedBy=default.target
@@ -120,7 +122,7 @@ local estimate. To get Anthropic's real 5-hour/7-day numbers (and, on
 Windows, toast pop-ups as you cross usage milestones), run:
 
 ```
-python ai_fluency_insights.py --setup-notifications
+ai-fluency-insights --setup-notifications
 ```
 
 It wires up a Claude Code `statusLine` hook for you and shows exactly
@@ -148,11 +150,11 @@ only when you press the button — everything else is free forever.
 |---|---|
 | `Log directory not found` | You haven't used Claude Code on this machine yet, or logs are elsewhere — pass `--dir` explicitly. |
 | Port already in use | Another instance is running (check http://localhost:8787), or pass `--port 9000`. |
-| Page loads but charts are empty | Hard-refresh (`Ctrl+F5`); if you deleted `chart.umd.min.js` the page falls back to the CDN and needs internet once. |
+| Page loads but charts are empty | Hard-refresh (`Ctrl+F5`); if `web/static/vendor/chart.umd.min.js` is missing from the install the page falls back to the CDN and needs internet once. |
 | Task Scheduler install fails | Run the terminal as Administrator, or use the Startup-folder method (option B). |
 | A new tab says "Not enough data yet" | Flow needs 5 timed turns and Quality needs 3 sessions where Claude edited files, within the selected date range. Widen the range (30d or 90d). My Adoption needs 3 active days in the last 4 weeks. |
 | A metric is missing or shows "not in your logs" | Open the **Data Health** tab. It lists which signals your Claude Code version writes (for example permission decisions or thinking time). Missing signals are shown as missing, never as zero. |
-| Cost card looks wrong | It's an estimate at public API pricing; edit the `PRICING` table at the top of the script. On a subscription your real marginal cost is $0. |
+| Cost card looks wrong | It's an estimate at public API pricing; edit the `PRICING` table in `src/ai_fluency_insights/config.py`. On a subscription your real marginal cost is $0. |
 
 ## What next
 

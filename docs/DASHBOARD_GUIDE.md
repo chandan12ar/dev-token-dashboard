@@ -41,7 +41,7 @@ For the code architecture, see [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
   The web page — Chart.js renders it; auto-refreshes every 15 seconds
 ```
 
-One Python file, standard library only, served at `http://localhost:8787`,
+A standard-library-only Python package, served at `http://localhost:8787`,
 bound to your machine only (`127.0.0.1`). The page makes zero external
 requests — even Chart.js is bundled locally.
 
@@ -64,7 +64,7 @@ requests — even Chart.js is bundled locally.
 | **Day streak** | consecutive days you've used Claude Code, counted back from your most recent active day | calendar days that have at least one logged message |
 | **Best streak** | your longest-ever run | same, over all history |
 | **Active days** | total days you've ever used it | count of days with activity |
-| **Goal bars** | progress toward personal targets (daily LoC, token budgets) | optional — set in the `GOALS` dict at the top of the script |
+| **Goal bars** | progress toward personal targets (daily LoC, token budgets) | optional — set in the `GOALS` dict in `config.py` |
 
 *How to read it:* purely motivational — a GitHub-style contribution
 streak for AI-assisted work.
@@ -88,7 +88,7 @@ one) writes Anthropic's real rate-limit numbers to
 just reads that file — it never calls the Anthropic API itself, so this
 stays free.
 
-*Setting it up:* run `python ai_fluency_insights.py --setup-notifications`
+*Setting it up:* run `ai-fluency-insights --setup-notifications`
 (add `--dry-run` to preview first) — it configures the `statusLine` hook
 for you and won't touch an existing custom one. See
 [SETUP.md](../SETUP.md#3b-optional-accurate-plan-usage-numbers-and-toast-notifications).
@@ -149,7 +149,7 @@ The "am I working sustainably" panel.
 | **Active time** | every message timestamp lands in a 10-minute bucket; active time = buckets × 10 min. Much closer to real hands-on time than session wall-clock (which includes idle time) |
 | **Avg per active day** | active time ÷ days that had any activity |
 | **Longest focus block** | longest unbroken run of consecutive 10-min buckets in a single day |
-| **Quiet hours %** | share of messages between 23:00 and 06:00 (tunable in the script) |
+| **Quiet hours %** | share of messages between 23:00 and 06:00 (tunable in `config.py`) |
 | **Weekends %** | share of messages on Sat/Sun |
 
 The bar chart below shows active minutes per day — bars turn **red** on

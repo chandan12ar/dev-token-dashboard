@@ -36,7 +36,7 @@ over these files. Nothing leaves the machine.
    re-renders every 15 seconds.
 
 Requires only Python 3.8+ — standard library, no pip installs. Chart.js is
-bundled locally (`chart.umd.min.js`), so the page makes **no external
+bundled locally (`web/static/vendor/chart.umd.min.js`), so the page makes **no external
 requests at all** and works fully offline.
 
 ## What it shows
@@ -45,7 +45,7 @@ requests at all** and works fully offline.
 - Input / output tokens (deduplicated, per API response)
 - Cache read tokens + cache hit %
 - Estimated API cost (public API pricing; on a subscription the real
-  marginal cost is $0 — edit the `PRICING` table in the script to tune)
+  marginal cost is $0 — edit the `PRICING` table in `config.py` to tune)
 - Lines of code Claude wrote
 - Prompt count + average prompt length
 - Sessions + average session duration
@@ -69,7 +69,7 @@ charts, tables, and the project deep-dive — and KPI cards show a Δ vs the
 previous equal-length window.
 
 **Momentum bar**: current & best day streak, all-time active days, and
-optional goal progress bars (configure the `GOALS` dict in the script).
+optional goal progress bars (configure the `GOALS` dict in `config.py`).
 
 **Exports**: copy a text summary to the clipboard, download the daily table
 as CSV, or the full `/api/stats` payload as JSON.
@@ -139,13 +139,13 @@ every metric's confidence badge, formula and limitation.
 ## Running it
 
 ```
-python ai_fluency_insights.py               # serves http://localhost:8787
-python ai_fluency_insights.py --port 9000   # different port
-python ai_fluency_insights.py --dir <path>  # custom logs location
-python ai_fluency_insights.py --dump        # print raw stats JSON and exit
+ai-fluency-insights               # serves http://localhost:8787
+ai-fluency-insights --port 9000   # different port
+ai-fluency-insights --dir <path>  # custom logs location
+ai-fluency-insights --dump        # print raw stats JSON and exit
 ```
 
-On Windows, after editing the script, `Restart-Insights.bat` stops every
+On Windows, after editing the code, `scripts\windows\Restart-Insights.bat` stops every
 running copy (matched by command line *and* by whoever owns port 8787) and
 relaunches one fresh windowless instance, then opens the browser.
 

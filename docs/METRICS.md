@@ -114,7 +114,7 @@ longer, warm ones.
 
 ## 3. Estimated API cost
 
-Per unique response, using the `PRICING` table at the top of the script
+Per unique response, using the `PRICING` table in `config.py`
 (USD per 1M tokens, editable):
 
 ```
@@ -279,7 +279,7 @@ Over all-time active days:
 
 ### Goals (progress bars)
 
-Set personal targets in the `GOALS` dict at the top of the script:
+Set personal targets in the `GOALS` dict in `config.py`:
 
 ```python
 GOALS = {
@@ -365,7 +365,7 @@ authors. All computed locally:
 
 **Corrections** are prompts that *start* with correction language
 ("no", "wrong", "actually", "that's not", "undo", "revert",
-"you missed"…, case-insensitive regex `CORRECT_RE` in the script).
+"you missed"…, case-insensitive regex `CORRECT_RE` in `core/parser.py`).
 Note the deliberate tension: corrections lower Description (the first
 prompt didn't land) but raise Discernment (you caught it).
 
@@ -387,7 +387,7 @@ A personal scorecard on its own tab. Everything is measured over a rolling
 **28-day window ending on your most recent active day**, compared with the 28
 days before it, and always uses full history (the range filter does not apply).
 It compares you with *your own past* only. It never ranks you against anyone.
-Targets and weights live in the `ADOPTION` table at the top of the script.
+Targets and weights live in the `ADOPTION` table in `config.py`.
 
 Fewer than 3 active days in the window → the tab shows "Building your
 baseline" instead of a score.
@@ -576,7 +576,7 @@ activity, timestamps, session titles), the log entry types and counts, the Claud
 Code versions seen, parse failures and duplicate lines dropped. A metric whose
 signal is missing says so instead of showing zero. The **metric catalog** on that
 tab lists every metric's formula and limitation (single source: `METRIC_CATALOG`
-in the script). **Privacy mode** hides session titles, prompt previews and file
+in `analytics/catalog.py`). **Privacy mode** hides session titles, prompt previews and file
 names on screen.
 
 **Considered and rejected after checking real logs:** the `edited_text_file`
