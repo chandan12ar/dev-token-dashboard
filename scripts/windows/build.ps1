@@ -50,17 +50,18 @@ $nuitkaArgs = @(
     '--standalone',
     '--assume-yes-for-downloads',
     '--windows-console-mode=disable',          # no black window on normal launch
-    '--company-name',  $Company,
-    '--product-name',  $Product,
-    '--file-version',  $Version,
-    '--product-version', $Version,
-    '--file-description', 'Local Claude Code usage dashboard',
-    '--copyright', $Copyright,
+    # Nuitka requires the --option=value form for these (not space-separated).
+    "--company-name=$Company",
+    "--product-name=$Product",
+    "--file-version=$Version",
+    "--product-version=$Version",
+    '--file-description=Local Claude Code usage dashboard',
+    "--copyright=$Copyright",
     '--include-package=ai_fluency_insights',
     '--include-module=ai_fluency_insights.server.app',   # imported lazily in cli.main
     "--include-data-dir=$pkg\web=ai_fluency_insights\web",
     "--include-data-dir=$pkg\resources=ai_fluency_insights\resources",
-    '--output-dir', $distDir,
+    "--output-dir=$distDir",
     '--output-filename=AIFluencyInsights.exe',
     '--remove-output'
 )
