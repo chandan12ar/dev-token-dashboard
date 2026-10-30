@@ -233,6 +233,7 @@ Your prompts and logs never leave your disk.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, code layout and layering rules
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [docs/PACKAGING.md](docs/PACKAGING.md) — build the single Windows `.exe` for distribution
+- [docs/ROLLOUT.md](docs/ROLLOUT.md) — sign and distribute the `.exe` (for IT)
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — architecture and every panel explained
 - [docs/METRICS.md](docs/METRICS.md) — **the math**: exact formula behind every metric, what each dashboard section means, and the known approximations
 - [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md) — why our token counting is the correct one
