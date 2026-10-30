@@ -5,12 +5,40 @@ import json
 import os
 import sys
 
-from . import __version__
+from . import __version__, config
 from .analytics.summary import stats_to_json
 from .core.scanner import Scanner
 from .integrations.startup import install_startup, uninstall_startup
 from .integrations.statusline import run_setup_notifications
 from .paths import default_root
+
+# Flags whose output a user needs to read. In a windowless packaged build there
+# is no console attached, so for these we attach one (see _ensure_console).
+_CONSOLE_FLAGS = {"-h", "--help", "--version", "--setup-notifications", "--dry-run",
+                  "--dump", "--install-startup", "--uninstall-startup"}
+
+
+def _ensure_console(argv):
+    """On Windows, give console-style commands somewhere to print.
+
+    The dashboard is built windowless (no console) so normal double-click use
+    shows no black window. But `--version`, `--setup-notifications` and friends
+    print text the user must see: attach to the calling terminal if there is
+    one, otherwise open a fresh console. A no-op off Windows or when a console
+    already exists, and never fatal."""
+    if os.name != "nt" or not any(a in _CONSOLE_FLAGS for a in argv):
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        ATTACH_PARENT_PROCESS = -1
+        if not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+            kernel32.AllocConsole()
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+        sys.stdin = open("CONIN$", "r", encoding="utf-8")
+    except Exception:
+        pass
 
 
 def build_parser():
@@ -35,6 +63,11 @@ def build_parser():
 
 
 def main(argv=None):
+    raw = sys.argv[1:] if argv is None else list(argv)
+    _ensure_console(raw)
+    # Apply any per-user settings.json overrides before stats or notifications
+    # read the defaults (no effect if the file is absent; see config.py).
+    config.load_user_settings()
     args = build_parser().parse_args(argv)
 
     if args.setup_notifications:

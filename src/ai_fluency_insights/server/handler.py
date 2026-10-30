@@ -15,6 +15,24 @@ STATIC_DIR = os.path.join(WEB_DIR, "static")
 CHART_JS_CDN = "https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"
 _TYPES = {".js": "application/javascript", ".css": "text/css; charset=utf-8",
           ".html": "text/html; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
+# Only requests whose Host/Origin name the loopback interface are served. This
+# blocks DNS-rebinding: a page on evil.com whose domain is repointed at
+# 127.0.0.1 still sends "Host: evil.com", and another site's fetch to us
+# carries its own "Origin:" — both are rejected, so no web page can read your
+# stats or trigger the token-spending `claude -p` routes. (Finding F5.)
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _hostname(value):
+    """The host part of a Host/authority or an Origin URL, lowercased, no port."""
+    if not value:
+        return ""
+    v = value.strip().lower()
+    if "://" in v:
+        v = urlparse(v).netloc
+    if v.startswith("["):            # [::1]:8787  ->  ::1
+        return v[1:].split("]", 1)[0]
+    return v.rsplit(":", 1)[0] if ":" in v else v
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -22,7 +40,20 @@ class Handler(BaseHTTPRequestHandler):
     root: str = ""
     watcher = None
 
+    def _local_only(self):
+        """True if this request is same-origin/loopback; else answers 403."""
+        if _hostname(self.headers.get("Host")) not in _LOCAL_HOSTS:
+            self._send(403, "text/plain", b"forbidden")
+            return False
+        origin = self.headers.get("Origin")
+        if origin and _hostname(origin) not in _LOCAL_HOSTS:
+            self._send(403, "text/plain", b"forbidden")
+            return False
+        return True
+
     def do_GET(self):
+        if not self._local_only():
+            return
         parsed = urlparse(self.path)
         q = parse_qs(parsed.query)
         if parsed.path == "/":

@@ -45,7 +45,7 @@ requests at all** and works fully offline.
 - Input / output tokens (deduplicated, per API response)
 - Cache read tokens + cache hit %
 - Estimated API cost (public API pricing; on a subscription the real
-  marginal cost is $0 — edit the `PRICING` table in `config.py` to tune)
+  marginal cost is $0 — override `PRICING` via `settings.json`, or edit `config.py` from source)
 - Lines of code Claude wrote
 - Prompt count + average prompt length
 - Sessions + average session duration
@@ -69,7 +69,7 @@ charts, tables, and the project deep-dive — and KPI cards show a Δ vs the
 previous equal-length window.
 
 **Momentum bar**: current & best day streak, all-time active days, and
-optional goal progress bars (configure the `GOALS` dict in `config.py`).
+optional goal progress bars (set `GOALS` via `settings.json`, or in `config.py`).
 
 **Exports**: copy a text summary to the clipboard, download the daily table
 as CSV, or the full `/api/stats` payload as JSON.

@@ -38,23 +38,28 @@ Claude Code has been used (it reads `~/.claude/projects/`).
 
 Full instructions, auto-start at logon, and troubleshooting: **[SETUP.md](SETUP.md)**
 
-## What's new (v2.0) — enterprise-ready codebase
+## The codebase
 
-Same dashboard, rebuilt as a proper package. Nothing you see changes (every API
-response was checked byte-for-byte against v1.4), but the code is now ready for
-a team to own:
+A modular, standard-library-only Python package a team can own and ship:
 
-- **Modular package** under `src/ai_fluency_insights/`: `core` (log parsing),
+- **Package** under `src/ai_fluency_insights/`: `core` (log parsing),
   `analytics` (one module per tab), `notifications`, `integrations`, `server`, and
   `web` with the UI as real HTML/CSS/JS files
 - **Installable** with `pip install .`; run it as `ai-fluency-insights`
+- **Distributable as a single Windows `.exe`** with no source and no Python
+  install needed — see [docs/PACKAGING.md](docs/PACKAGING.md)
+- **Per-user `settings.json`** to override pricing, goals and thresholds without
+  touching the code — see [SETUP.md](SETUP.md#custom-settings)
 - **Tests per area** under `tests/`, plus **CI** on Windows and Linux
 - Runtime state lives in your per-user data folder, not next to the code
 
-Upgrading: see [CHANGELOG.md](CHANGELOG.md#upgrading-from-1x). Code layout and
-dev setup: [CONTRIBUTING.md](CONTRIBUTING.md).
+Code layout and dev setup: [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## What's new (v1.4) — the "Engineering insight" update
+## Feature history
+
+The sections below describe the dashboard's features, in the order they were added.
+
+## The "Engineering insight" update
 
 Five new tabs, all from the same local logs. No Jira, GitHub or CI needed.
 
@@ -70,7 +75,7 @@ Five new tabs, all from the same local logs. No Jira, GitHub or CI needed.
 
 Formulas in [docs/METRICS.md](docs/METRICS.md#13-flow-tab-v14).
 
-## What's new (v1.3) — the "My Adoption" tab
+## The "My Adoption" tab
 
 A personal scorecard for *you*: how deeply you use Claude Code and whether
 you are getting better at it. Compared only with your own past, 100 % local.
@@ -85,7 +90,7 @@ Formulas in [docs/METRICS.md](docs/METRICS.md#12-my-adoption-v13-extended-in-v14
 
 ![My Adoption tab](docs/screenshots/my-adoption.png)
 
-## What's new (v1.2) — the "Reflect" update
+## The "Reflect" update
 
 Inspired by Anthropic's [Reflect with Claude](https://www.anthropic.com/news/reflect-with-claude)
 (which covers claude.ai chat but *not* Claude Code — that's what this fills):
@@ -107,7 +112,7 @@ Inspired by Anthropic's [Reflect with Claude](https://www.anthropic.com/news/ref
 
 All of it 100% local and zero-token, except the two explicit `claude -p` buttons.
 
-## What's new (v1.1)
+## The UI redesign and custom ranges
 
 - **Complete UI redesign** — sticky glass header, icon KPI cards with accent
   colors, gradient charts, dark theme polish, responsive layout, and a live
@@ -210,7 +215,7 @@ Your prompts and logs never leave your disk.
 ## Notes
 
 - Cost is an *estimate* at public API pricing — on a subscription plan your
-  real marginal cost is $0. Tune the `PRICING` table in `src/ai_fluency_insights/config.py`.
+  real marginal cost is $0. Override the `PRICING` table via a `settings.json` ([SETUP.md](SETUP.md#custom-settings)), or edit `src/ai_fluency_insights/config.py` if building from source.
 - Token totals are **deduplicated per API response**, which is why they're
   lower (and more accurate) than the official Claude Code panel's count —
   the full analysis is in [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md).
@@ -226,7 +231,8 @@ Your prompts and logs never leave your disk.
   becomes the number, and how to read it (great for showing your team)
 - [SETUP.md](SETUP.md) — install, run, auto-start on Windows/macOS/Linux
 - [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, code layout and layering rules
-- [CHANGELOG.md](CHANGELOG.md) — release history and upgrade notes
+- [CHANGELOG.md](CHANGELOG.md) — release history
+- [docs/PACKAGING.md](docs/PACKAGING.md) — build the single Windows `.exe` for distribution
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — architecture and every panel explained
 - [docs/METRICS.md](docs/METRICS.md) — **the math**: exact formula behind every metric, what each dashboard section means, and the known approximations
 - [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md) — why our token counting is the correct one

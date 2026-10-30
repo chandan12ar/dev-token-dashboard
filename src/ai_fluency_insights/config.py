@@ -99,3 +99,74 @@ def should_run_notifications(notify=None):
 # Quiet hours for the wellness panel (24h clock, wraps midnight): messages with
 # a timestamp >= QUIET_START or < QUIET_END count as late-night activity.
 QUIET_START, QUIET_END = 23, 6
+
+
+# ---------------------------------------------------------------------------
+# Optional per-user overrides.
+#
+# The settings above are the built-in defaults. In a packaged build they are
+# compiled into the executable and cannot be edited, so a user (or a company's
+# IT team) can override any of them by dropping a `settings.json` in the
+# per-user data directory (paths.app_data_dir(); set AFI_DATA_DIR to relocate
+# it). Everything is optional — a missing or broken file leaves the defaults
+# untouched, and only the keys actually present are changed.
+#
+# Example settings.json:
+#   {
+#     "pricing":  {"opus": {"in": 15, "out": 75}, "sonnet": {"in": 2, "out": 10}},
+#     "goals":    {"daily_loc": 300},
+#     "notify":   {"enabled": false, "window_ceiling": 30000000},
+#     "adoption": {"window_days": 14}
+#   }
+# ---------------------------------------------------------------------------
+SETTINGS_FILENAME = "settings.json"
+
+
+def _merge_dict(target, overrides):
+    """Shallow per-key update of a dict in place; ignores non-dict overrides."""
+    if isinstance(overrides, dict):
+        target.update(overrides)
+
+
+def apply_overrides(data):
+    """Apply an already-parsed settings mapping onto the module's defaults.
+
+    Separate from reading the file so it can be unit-tested without disk I/O.
+    Unknown top-level keys are ignored; a malformed section is skipped rather
+    than raising, so one bad entry never takes the dashboard down."""
+    if not isinstance(data, dict):
+        return
+    pricing = data.get("pricing")
+    if isinstance(pricing, dict):
+        # PRICING is an ordered list of (substring, price) pairs. Update the
+        # price for a model already listed, append any new model name.
+        by_key = {k: p for k, p in PRICING}
+        for name, price in pricing.items():
+            if isinstance(price, dict) and {"in", "out"} <= price.keys():
+                if name in by_key:
+                    by_key[name].update(price)
+                else:
+                    PRICING.append((name, dict(price)))
+    _merge_dict(DEFAULT_PRICE, data.get("default_price"))
+    _merge_dict(GOALS, data.get("goals"))
+    _merge_dict(NOTIFY, data.get("notify"))
+    _merge_dict(ADOPTION, data.get("adoption"))
+
+
+def load_user_settings():
+    """Read and apply <data dir>/settings.json if present. Best-effort."""
+    try:
+        import json
+        import os
+
+        from .paths import app_data_dir
+        path = os.path.join(app_data_dir(), SETTINGS_FILENAME)
+        if not os.path.isfile(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        apply_overrides(data)
+        return path
+    except Exception:
+        # A broken override file must never stop the app from starting.
+        return None

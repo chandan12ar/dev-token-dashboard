@@ -144,6 +144,37 @@ the **Claude Code CLI on your PATH** (if you can type `claude` in a
 terminal, it works). This is the single feature that consumes tokens, and
 only when you press the button — everything else is free forever.
 
+## Custom settings
+
+Pricing, personal goals and notification thresholds have sensible defaults, so
+most people never touch them. To change them — especially in the packaged
+`.exe`, where there is no source to edit — drop a `settings.json` in your
+per-user data directory. Only the keys you list are changed; everything else
+keeps its default, and a missing or malformed file is ignored.
+
+Data directory:
+
+| OS | Location |
+|---|---|
+| Windows | `%LOCALAPPDATA%\AIFluencyInsights\settings.json` |
+| macOS | `~/Library/Application Support/AIFluencyInsights/settings.json` |
+| Linux | `~/.local/state/ai-fluency-insights/settings.json` |
+
+(Set the `AFI_DATA_DIR` environment variable to put it somewhere else.)
+
+Example `settings.json` (a copy is in the download as `settings.example.json`):
+
+```json
+{
+  "pricing": { "opus": { "in": 15, "out": 75 }, "sonnet": { "in": 2, "out": 10 } },
+  "goals":   { "daily_loc": 300 },
+  "notify":  { "enabled": true, "window_ceiling": 30000000 },
+  "adoption":{ "window_days": 28 }
+}
+```
+
+Restart the dashboard after editing it.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -154,7 +185,7 @@ only when you press the button — everything else is free forever.
 | Task Scheduler install fails | Run the terminal as Administrator, or use the Startup-folder method (option B). |
 | A new tab says "Not enough data yet" | Flow needs 5 timed turns and Quality needs 3 sessions where Claude edited files, within the selected date range. Widen the range (30d or 90d). My Adoption needs 3 active days in the last 4 weeks. |
 | A metric is missing or shows "not in your logs" | Open the **Data Health** tab. It lists which signals your Claude Code version writes (for example permission decisions or thinking time). Missing signals are shown as missing, never as zero. |
-| Cost card looks wrong | It's an estimate at public API pricing; edit the `PRICING` table in `src/ai_fluency_insights/config.py`. On a subscription your real marginal cost is $0. |
+| Cost card looks wrong | It's an estimate at public API pricing; override the `PRICING` table via `settings.json` (see Custom settings). On a subscription your real marginal cost is $0. |
 
 ## What next
 

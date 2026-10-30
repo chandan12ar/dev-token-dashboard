@@ -1,0 +1,29 @@
+{
+  "_comment": "Optional overrides. Copy this file to your per-user data directory as settings.json and keep only the keys you want to change. See SETUP.md (Custom settings) for the exact location on each OS. A missing or malformed file is ignored.",
+
+  "pricing": {
+    "opus":   { "in": 15.0, "out": 75.0 },
+    "sonnet": { "in": 2.0,  "out": 10.0 },
+    "haiku":  { "in": 1.0,  "out": 5.0 }
+  },
+  "default_price": { "in": 3.0, "out": 15.0 },
+
+  "goals": {
+    "daily_loc": 500,
+    "daily_tokens": 0,
+    "weekly_tokens": 0
+  },
+
+  "notify": {
+    "enabled": true,
+    "window_ceiling": 26000000,
+    "poll_seconds": 5,
+    "active_window_min": 15
+  },
+
+  "adoption": {
+    "window_days": 28,
+    "target_days": 12,
+    "loc_target": 300
+  }
+}

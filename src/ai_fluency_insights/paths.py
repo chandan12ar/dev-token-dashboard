@@ -10,7 +10,7 @@ import sys
 
 APP_DIR_NAME = "AIFluencyInsights"
 PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Before v2.0 the app was a single script and kept its state next to itself.
+# Earlier single-file builds kept their state next to the script; see notify_state_path().
 _LEGACY_STATE_FILE = ".notify_state.json"
 
 
@@ -47,8 +47,8 @@ def app_data_dir():
 def notify_state_path():
     """Where NotificationWatcher persists its progress; created on first use.
 
-    Carries over the state file a pre-v2.0 source checkout kept at the repo root,
-    so upgrading does not re-fire milestones that already went off."""
+    Carries over the state file an earlier single-file checkout kept at the repo
+    root, so upgrading does not re-fire milestones that already went off."""
     data_dir = app_data_dir()
     path = os.path.join(data_dir, "notify_state.json")
     try:

@@ -10,7 +10,7 @@
 | **Document version** | 1.0 |
 | **Describes** | application **v1.4** at commit `690fe71` (2026-10-14), branch `main` |
 | **Document date** | 2026-10-28; code-layout sections updated 2026-10-30 for **v2.0** |
-| **v2.0 note** | v2.0 split the single script into a package with no behaviour change. §1, §3 (source map), §7, §9–§11 and §14 describe the v2.0 layout. Line numbers elsewhere still refer to the v1.4 file at `690fe71`; the source map in §3 shows which module each line range moved to |
+| **Version labels** | The packaged product is **v1.0.0**. In this document "v1.4" and "v2.0" name the code *generations* only: **v1.4** = the original single file, **v2.0** = the restructure into the current package. §1, §3 (source map), §7, §9–§11 and §14 describe the current (package) layout; line numbers elsewhere refer to the v1.4 file at `690fe71`, and the §3 source map shows where each range moved |
 | **Audience** | Maintainers, reviewers, and anyone who needs to understand how the system works end to end |
 | **Companion docs** | [PROJECT_REPORT.md](PROJECT_REPORT.md) (why it exists), [METRICS.md](METRICS.md) (the math), [DASHBOARD_GUIDE.md](DASHBOARD_GUIDE.md) (page tour), [HOW_IT_WORKS.md](HOW_IT_WORKS.md) (short overview) |
 
@@ -29,7 +29,7 @@ strength of the evidence:
 | Tag | Meaning |
 |---|---|
 | **[S]** | Read directly from the source code (line numbers refer to commit `690fe71`) |
-| **[T]** | Also covered by the project's unit tests (all 144 pass: `python -m pytest`) |
+| **[T]** | Also covered by the project's unit tests (all 160 pass: `python -m pytest`) |
 | **[P]** | Observed by running the real server against synthetic Claude Code logs and a simulated statusline capture, and for the banner behaviour, in headless Chromium, during this review |
 | **[D]** | Stated by the project's own docs or by Claude Code's behaviour; **not** independently verifiable in this review |
 
@@ -78,7 +78,7 @@ and raises usage notifications (Windows toast plus an in-page banner).
 | Routes | 5: `/` (the page), `/static/*` (CSS, JS, Chart.js), `/api/stats`, and `/api/ai_summary` + `/api/reflect` (the last two run `claude -p`) |
 | State | No database. Logs are the source of truth; the server rebuilds all stats in memory on every request. The only file it writes is `notify_state.json` in the per-user data directory |
 | Token spend | $0, except two explicit buttons that run `claude -p` |
-| Tests | 144 unit tests under `tests/`, ≈0.6 s with pytest. No HTTP-layer or browser tests |
+| Tests | 160 unit tests under `tests/` (incl. a live HTTP test of the loopback guard). No browser tests |
 | Platforms | Windows, macOS, Linux. Toast popups are **Windows-only**; in-page banners work everywhere |
 
 ### The design in one paragraph
@@ -1176,7 +1176,7 @@ time curl -s "http://127.0.0.1:8787/api/stats?days=30" -o /dev/null
 
 | Boundary | Observation | Risk |
 |---|---|---|
-| Browser tab ↔ server | No auth; **no `Host` or `Origin` validation**. A request with `Host: evil.example`, `Origin: https://evil.example` and `Sec-Fetch-Site: cross-site` returned `200` **[P]** | Any web page the user visits can issue GETs to `localhost:8787`. Side effect: `/api/ai_summary` / `/api/reflect` start `claude -p` (token spend). Reading the response is blocked by the browser (no CORS headers), but a DNS-rebinding page could read `/api/stats` (prompt previews, project paths). Not exploited here; assessed from behaviour (Finding F5) |
+| Browser tab ↔ server | No auth, but **every request's `Host` and `Origin` must name the loopback interface** (`localhost`/`127.0.0.1`/`::1`), else `403` — see `server/handler.py` `_local_only`. A request with `Host: evil.example` or a cross-site `Origin` is refused **[S][T]** | A foreign web page cannot read `/api/stats` or trigger the `claude -p` routes, and DNS-rebinding (which sends the attacker's own `Host`) is blocked. Fixed in v1.0.0 (Finding F5) |
 | Server → PowerShell | Toast text is passed via environment variables, never concatenated into the script **[S]** | Low |
 | Server → `claude -p` | The prompt (aggregates, session titles, and the reflection question ≤ 500 chars) is passed as one argv element with no shell, **except** on Windows when `claude` resolves to a `.cmd`/`.bat` shim (e.g. an npm global install): the call is then wrapped in `cmd /c`, and cmd.exe re-parses the command line **[S]** | Elsewhere low. On the Windows shim path this is the well-known batch-file argument-injection class. **Not reproduced** (needs Windows); see Finding F13 |
 | Wizard → `settings.json` | Invalid JSON aborts; backup first; atomic write; foreign scripts never touched **[S][T]** | Low |
@@ -1187,7 +1187,7 @@ time curl -s "http://127.0.0.1:8787/api/stats?days=30" -o /dev/null
 
 ## 14. Testing
 
-**144 tests, all passing**, written with standard-library `unittest`, no network, no real filesystem
+**160 tests, all passing**, written with standard-library `unittest`, almost no network (one spins up a loopback server), no real filesystem
 state (temp directories; `tests/__init__.py` points `AFI_DATA_DIR` at one). Run: `python -m pytest`
 (or `python -m unittest discover -s tests -t .` with `src` on `PYTHONPATH`). Files mirror the package:
 `tests/core`, `tests/analytics`, `tests/notifications`, `tests/integrations`. CI runs them on
@@ -1244,7 +1244,7 @@ Severity is the author's judgement. Evidence tags follow the legend at the top.
 | **F2** | Low–Med | Notifications | **Estimate and official alerts can both fire.** `poll_once` always runs the plan-window estimator and fires its alert, even when a fresh official capture exists. The `PlanWindowTracker` docstring says it is "used only as a fallback". With the hook installed a user can receive two differently-numbered toasts ("Current session 100 % used (30.0M / 26.0M tokens, est.)" and "Current 5h session 85 % used (official)") | **[S][P]** row 8 in §6.8 | Skip `_fire_plan` when `load_rate_limits()` returns a capture |
 | **F3** | Low | Docs | `DASHBOARD_GUIDE.md` (§Plan usage limits) says a capture older than 30 min makes the card fall back to the estimate. Since `3d56f44` the card keeps the last real capture, flagged with its age and zeroed after its window resets; only a never-written or corrupt file falls back | **[S][T][P]** | Update the guide text; this document describes the code |
 | **F4** | Medium | Performance | Every `/api/stats` re-parses **all** cached entries, twice for ranged views, holding the scanner lock. 80k entries / 27 MB → 3.3–3.8 s per request and ≈ 220 MB RSS | **[P]** §12 | Memoise `Stats` per scanner generation; derive ranges from the full records |
-| **F5** | Medium | Security | No `Host` / `Origin` validation, and GET endpoints with side effects (`claude -p`). Any visited web page can trigger token-spending runs and choose the `q` text; a DNS-rebinding page could read `/api/stats`. See also F13 | **[S][P]** headers accepted; exploit not attempted | Reject unexpected `Host`; require a per-process token or non-GET for the AI routes; serialise or rate-limit them |
+| **F5** | ~~Medium~~ **Fixed (v1.0.0)** | Security | A loopback-only guard now rejects any request whose `Host` or `Origin` is not `localhost`/`127.0.0.1`/`::1` (`server/handler.py` `_local_only`), covered by a live HTTP test. Foreign pages can no longer reach `/api/stats` or the `claude -p` routes, and DNS-rebinding is blocked | **[S][T]** | Done. (A per-process token could still be added as defence in depth) |
 | **F6** | Low | Privacy claim | "Zero external requests" has one exception: if `chart.umd.min.js` is missing, `/static/vendor/chart.umd.min.js` replies **302 to jsDelivr** | **[S]** | Fail loudly, or embed the library |
 | **F7** | Low | Notifications | On every page load, all retained events (up to 20, no age filter) are shown again as banners, however old | **[P]** | Filter by `ts`, or remember seen ids in `sessionStorage` |
 | **F8** | Low | Config | `CLAUDE_CONFIG_DIR` is honoured for the log root and the wizard's targets, but `RATE_LIMITS_PATH` and the Node hook hard-code `~/.claude`. Reader and writer agree, so it works, but with `CLAUDE_CONFIG_DIR` set and no `~/.claude` directory the hook's write fails silently | **[S]** | Resolve the capture path from one place and pass it to the hook |
@@ -1252,7 +1252,7 @@ Severity is the author's judgement. Evidence tags follow the legend at the top.
 | **F10** | Low | Reliability | The 15 s poll has no in-flight guard and does not pause for hidden tabs | **[S]** | Skip when busy; honour `document.hidden` |
 | **F11** | Info | Accuracy | The estimate is approximate by construction: one-point ceiling calibration, a window anchored to the first event seen rather than Anthropic's boundary, and a silent baseline that excludes pre-existing sessions | **[S]** | Prefer the official path; treat the estimate as a fallback only |
 | **F12** | Info | Quality | No HTTP-layer or browser tests (see §14) | **[S]** | Add an integration suite from the Appendix C probes |
-| **F13** | Medium–High *if confirmed* | Security (Windows) | **Possible command injection through `cmd /c`.** `_run_claude` wraps `claude` in `cmd /c` when `shutil.which` returns a `.cmd`/`.bat` path (the usual result of an npm install on Windows). cmd.exe re-parses the command line, and Python's quoting escapes `"` in a way cmd.exe does not honour, so a `"` followed by `&` inside the prompt can start a second command. The prompt includes the reflection question (`q`), which per F5 a visited web page can set, and session titles from the logs | **[S]** code path read; **not reproduced** (Linux sandbox) | Do not route untrusted text through `cmd /c`: feed the prompt on stdin, or call the shim's underlying `node` script directly; reject control characters in `q`; address F5 |
+| **F13** | Medium–High *if confirmed* | Security (Windows) | **Possible command injection through `cmd /c`.** `_run_claude` wraps `claude` in `cmd /c` when `shutil.which` returns a `.cmd`/`.bat` path (the usual result of an npm install on Windows). cmd.exe re-parses the command line, and Python's quoting escapes `"` in a way cmd.exe does not honour, so a `"` followed by `&` inside the prompt can start a second command. The prompt includes the reflection question (`q`) and session titles from the logs. Since F5 now blocks foreign pages, `q` is no longer remotely settable, but session titles still flow through `cmd /c` on the Windows `.cmd` shim path | **[S]** code path read; **not reproduced** (Linux sandbox) | Reduced by the F5 fix. To close fully: feed the prompt on stdin instead of argv, or call the shim's underlying `node` directly; reject control characters |
 
 ---
 

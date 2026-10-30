@@ -13,4 +13,4 @@ Package layout (dependencies only point downwards):
     config, paths      user-tunable settings and filesystem locations
 """
 
-__version__ = "2.0.0"
+__version__ = "1.0.0"
