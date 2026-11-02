@@ -203,11 +203,11 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 ### Phase 1: Sentinel and quick wins (answers Q1)
 | Item | Status |
 |---|---|
-| **F3** Fix the always-true "Tokens and cost" health check (measure tokens present, not assistant/assistant) | ☐ |
-| **F4** Count JSON decode errors separately: torn final line vs mid-file | ☐ |
-| **F1** Skip `*.orphaned-*` / `*.superseded-*` set-aside copies (or dedupe them) so counters do not inflate | ☐ |
-| **F2** Attribute `<session>/subagents/*.jsonl` to the parent project, not `subagents` | ☐ |
-| Count and list unknown entry types and unknown top-level keys (**F5** decision: report, do not parse) | ☐ |
+| **F3** Fix the always-true "Tokens and cost" health check: now counts responses with all four token counters and names the missing ones | ☑ |
+| **F4** Count JSON decode errors separately: torn final line vs mid-file (mid-file ones feed `parse_errors`; torn ones do not) | ☑ |
+| **F1** Skip `*.orphaned-*` / `*.superseded-*` set-aside copies so counters do not inflate; the count is shown in Data Health. **Trade-off:** a set-aside file could hold messages the live file lacks; the Phase 2 archive must keep them raw | ☑ |
+| **F2** Attribute `<session>/subagents/*.jsonl` to the parent project, not `subagents` (`project_label()`, also used by the notification watcher) | ☑ |
+| Classify entry types as handled / ignored / **new** and show them in Data Health (**F5**: report, do not parse). Unknown top-level *keys* still to do | ◐ |
 | Startup warning: oldest log age vs retention setting; say when it is pinned by managed settings | ☐ |
 | Schema census + `schema/claude_code_known.json` + diff classifier | ☐ |
 | `requires=[paths]` on `METRIC_CATALOG`; degrade metrics instead of showing 0 | ☐ |
@@ -267,4 +267,5 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 | Date | Change |
 |---|---|
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
+| 2026-11-02 | Phase 1 quick fixes F1 to F4 and entry-type classification shipped with 8 new tests (152 total passing). Live log confirmed append-only over the session. |
 | 2026-11-02 | Phase 0: census tool, `SCHEMA_NOTES.md`, docs verified, findings F1 to F5 recorded. Phase 1 items added. |

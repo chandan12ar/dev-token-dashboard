@@ -248,8 +248,10 @@ Scanner._entries : path -> list[dict]       # every parsed line of that file
 `scan()` walks the root with `os.walk`, and for each `*.jsonl`:
 
 1. `os.stat` the file. If `(mtime, size)` equals the cached key, **skip**.
-2. Otherwise re-read the **whole file** (not just the tail), `json.loads` each line, silently dropping
-   undecodable lines, and replace `_entries[path]`.
+2. Otherwise re-read the **whole file** (not just the tail), `json.loads` each line, and replace `_entries[path]`.
+   Undecodable lines are skipped and counted: a bad *last* line with no trailing newline is a write in flight
+   (`decode_errors_torn`), any other is `decode_errors_mid` and also raises `parse_errors`.
+   Files named `*.orphaned-*` / `*.superseded-*` (copies Claude Code sets aside) are not read; they are counted in Data Health.
 3. Afterwards, drop cache entries for files that no longer exist. **[S]**
 
 This makes unchanged files cost one `stat` call. It does **not** avoid re-parsing: `build_stats()`

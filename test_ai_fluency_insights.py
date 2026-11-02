@@ -1656,6 +1656,111 @@ class ValueEngineTests(_LogFixture):
         self.assertAlmostEqual(v["per_100_loc"], v["cost"] / 50 * 100, places=2)
 
 
+class LogResilienceTests(_LogFixture):
+    """Phase 1 of docs/LOG_RESILIENCE_ROADMAP.md: findings F1-F5 from docs/SCHEMA_NOTES.md."""
+
+    def _write(self, rel, entries, trailer="\n"):
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(afi.json.dumps(e) for e in entries) + trailer)
+        return path
+
+    def _one_session(self):
+        self.prompt("add pagination to the orders list")
+        self.end_turn()
+        return list(self.entries)
+
+    # F1 ---------------------------------------------------------------
+    def test_set_aside_copy_is_not_double_counted(self):
+        ents = self._one_session()
+        self._write("proj/s1.jsonl", ents)
+        self._write("proj/s1.orphaned-1730000000-abc.jsonl", ents)
+        st = afi.Scanner(self.root).build_stats()
+        base = afi.Scanner(self._clone_without_copy(ents)).build_stats()
+        self.assertEqual(sum(d["messages"] for d in st.days.values()),
+                         sum(d["messages"] for d in base.days.values()))
+        self.assertEqual(st.hc["set_aside_files"], 1)
+
+    def _clone_without_copy(self, ents):
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
+        p = os.path.join(other, "proj")
+        os.makedirs(p)
+        with open(os.path.join(p, "s1.jsonl"), "w", encoding="utf-8") as f:
+            f.write("\n".join(afi.json.dumps(e) for e in ents) + "\n")
+        return other
+
+    # F2 ---------------------------------------------------------------
+    def test_subagent_files_belong_to_the_parent_project(self):
+        ents = self._one_session()
+        self._write("-home-u-proj/s1.jsonl", ents)
+        sub = [dict(e, isSidechain=True, uuid=str(e.get("uuid", "")) + "x") for e in ents]
+        for e in sub:
+            if "message" in e and isinstance(e["message"], dict) and e["message"].get("id"):
+                e["message"] = dict(e["message"], id=e["message"]["id"] + "x")
+        self._write("-home-u-proj/s1/subagents/agent-1.jsonl", sub)
+        st = afi.Scanner(self.root).build_stats()
+        self.assertNotIn("subagents", st.projects)
+        self.assertEqual(list(st.projects), ["home/u/proj"])
+
+    def test_project_label_layouts(self):
+        r = os.path.join("x", "projects")
+        self.assertEqual(afi.project_label(r, os.path.join(r, "-home-u-p", "s.jsonl")), "home/u/p")
+        self.assertEqual(afi.project_label(r, os.path.join(r, "-home-u-p", "s", "subagents", "a.jsonl")), "home/u/p")
+        self.assertEqual(afi.project_label(r, os.path.join(r, "s.jsonl")), "projects")
+
+    # F4 ---------------------------------------------------------------
+    def test_decode_errors_split_into_torn_tail_and_mid_file(self):
+        ents = self._one_session()
+        path = os.path.join(self.root, "proj", "s1.jsonl")
+        lines = [afi.json.dumps(e) for e in ents]
+        text = "\n".join([lines[0], "{broken mid line", lines[1]]) + "\n" + '{"type": "assi'
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        st = afi.Scanner(self.root).build_stats()
+        self.assertEqual(st.hc["decode_errors_mid"], 1)
+        self.assertEqual(st.hc["decode_errors_torn"], 1)
+        self.assertEqual(st.parse_errors, 1)        # a torn tail is expected while a session is live
+        caps = {c["id"]: c for c in afi.build_health(st)["capabilities"]}
+        self.assertEqual(caps["readable"]["status"], "partial")
+
+    def test_clean_files_report_readable(self):
+        self._one_session()
+        caps = {c["id"]: c for c in afi.build_health(self.stats())["capabilities"]}
+        self.assertEqual(caps["readable"]["status"], "ok")
+
+    # F3 ---------------------------------------------------------------
+    def test_tokens_check_can_fail_when_usage_fields_are_renamed(self):
+        self.prompt("hello there")
+        self.end_turn()
+        for e in self.entries:
+            u = e.get("message", {}).get("usage") if isinstance(e.get("message"), dict) else None
+            if u is not None:
+                u["cache_read_tokens"] = u.pop("cache_read_input_tokens")      # simulated rename
+        caps = {c["id"]: c for c in afi.build_health(self.stats())["capabilities"]}
+        self.assertNotEqual(caps["tokens"]["status"], "ok")
+        self.assertIn("cache_read_input_tokens", caps["tokens"]["detail"])
+
+    def test_tokens_check_ok_on_normal_logs(self):
+        self.prompt("hello there")
+        self.end_turn()
+        caps = {c["id"]: c for c in afi.build_health(self.stats())["capabilities"]}
+        self.assertEqual(caps["tokens"]["status"], "ok")
+
+    # F5 ---------------------------------------------------------------
+    def test_entry_types_are_classified(self):
+        self._one_session()
+        self.entries.append({"type": "queue-operation", "operation": "enqueue", "sessionId": "s1"})
+        self.entries.append({"type": "brand-new-thing", "sessionId": "s1", "x": 1})
+        h = afi.build_health(self.stats())
+        status = {t["type"]: t["status"] for t in h["entry_types"]}
+        self.assertEqual(status["assistant"], "handled")
+        self.assertEqual(status["queue-operation"], "ignored")
+        self.assertEqual(status["brand-new-thing"], "new")
+        self.assertEqual([t["type"] for t in h["unknown_entry_types"]], ["brand-new-thing"])
+
+
 class HealthAndCatalogTests(_LogFixture):
     def test_missing_signals_are_reported_not_zeroed(self):
         self.prompt("hi")

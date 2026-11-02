@@ -320,6 +320,10 @@ CORRECT_RE = re.compile(
     re.IGNORECASE)
 
 
+# The four token counters every cost and cache metric depends on (per response).
+USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
 def price_for(model: str):
     m = (model or "").lower()
     for key, p in PRICING:
@@ -402,6 +406,7 @@ class Stats:
         # --- what the log contains (all-time, for the Data Health tab)
         self.hc = Counter()
         self.entry_types = Counter()
+        self.usage_missing = Counter()     # token-usage field -> responses where it was absent/non-numeric
         self.attachment_types = Counter()
         self.versions = Counter()
         self.entrypoints = Counter()
@@ -668,6 +673,12 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
         p = price_for(model)
         cost = (i * p["in"] + o * p["out"] + cw * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1_000_000
         st.hc["assistant_msgs"] += 1
+        missing = [k for k in USAGE_KEYS
+                   if k not in usage or not isinstance(usage[k], (int, float, type(None)))]
+        if not missing:
+            st.hc["usage_complete"] += 1
+        for k in missing:
+            st.usage_missing[k] += 1
         if entry.get("effort") and day:
             st.hc["effort"] += 1
             st.efforts.append((day, str(entry["effort"])))
@@ -791,20 +802,54 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
 # Incremental scanner (re-reads only files whose mtime changed)
 # ---------------------------------------------------------------------------
 
+# Entry types we understand. "handled" ones feed metrics; "ignored" ones were seen in real logs and are
+# known not to be metric inputs (docs/SCHEMA_NOTES.md). Anything else is reported as a NEW type in Data
+# Health, so a format change is visible instead of silently dropped.
+HANDLED_ENTRY_TYPES = frozenset({"user", "assistant", "system", "attachment", "ai-title", "permission-mode"})
+IGNORED_ENTRY_TYPES = frozenset({"atis-latch", "last-prompt", "tools-used", "queue-operation"})
+
+# Claude Code sets a previous transcript aside as "<session>.orphaned-<ts>-<id>.jsonl" (and
+# "<session>.jsonl.superseded-<ts>") instead of overwriting it. Reading such a copy as a normal
+# transcript double counts everything except tokens (which are de-duplicated by message id).
+SET_ASIDE_MARKERS = (".orphaned-", ".superseded-")
+
+
+def is_set_aside(filename: str) -> bool:
+    return any(m in filename for m in SET_ASIDE_MARKERS)
+
+
+def project_label(root, path) -> str:
+    """Readable project name for a transcript path.
+
+    Layouts: <root>/<project>/<session>.jsonl and <root>/<project>/<session>/subagents/<agent>.jsonl.
+    The project is always the first directory under root, so subagent files belong to their parent."""
+    parts = os.path.relpath(path, root).split(os.sep)
+    name = parts[0] if len(parts) > 1 else os.path.basename(os.path.normpath(root))
+    name = name or "unknown"
+    # prettify: Claude Code encodes the cwd in the dir name
+    return name.lstrip("-").replace("--", "/").replace("-", "/")
+
+
 class Scanner:
     def __init__(self, root):
         self.root = root
         self._cache = {}     # path -> (mtime, size)
         self._entries = {}   # path -> list[dict]
+        self._bad = {}       # path -> (mid_file_decode_errors, torn_last_line_errors)
+        self.set_aside = set()   # set-aside copies seen on the last scan (not parsed)
         self._lock = threading.Lock()
 
     def scan(self):
         found = set()
+        set_aside = set()
         for dirpath, _dirs, files in os.walk(self.root):
             for fn in files:
                 if not fn.endswith(".jsonl"):
                     continue
                 path = os.path.join(dirpath, fn)
+                if is_set_aside(fn):
+                    set_aside.add(path)
+                    continue
                 found.add(path)
                 try:
                     stat = os.stat(path)
@@ -814,39 +859,52 @@ class Scanner:
                 if self._cache.get(path) == key:
                     continue
                 entries = []
+                mid = torn = 0
                 try:
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        for line in f:
-                            line = line.strip()
+                        for raw in f:
+                            line = raw.strip()
                             if not line:
                                 continue
                             try:
                                 entries.append(json.loads(line))
                             except json.JSONDecodeError:
-                                pass
+                                # No trailing newline on the last line = a write still in flight (expected
+                                # while a session is live). Anything else is a genuinely unreadable line.
+                                if raw.endswith("\n"):
+                                    mid += 1
+                                else:
+                                    torn += 1
                 except OSError:
                     continue
                 self._cache[path] = key
                 self._entries[path] = entries
+                self._bad[path] = (mid, torn)
+        self.set_aside = set_aside
         # drop deleted files
         for path in list(self._entries):
             if path not in found:
                 self._entries.pop(path, None)
                 self._cache.pop(path, None)
+                self._bad.pop(path, None)
 
     def build_stats(self, min_day=None, max_day=None) -> Stats:
         with self._lock:
             self.scan()
             st = Stats()
             for path, entries in self._entries.items():
-                project = os.path.basename(os.path.dirname(path)) or "unknown"
-                # prettify: Claude Code encodes the cwd in the dir name
-                project = project.lstrip("-").replace("--", "/").replace("-", "/")
+                project = project_label(self.root, path)
                 for e in entries:
                     try:
                         parse_entry(e, project, st, min_day, max_day)
                     except Exception:
                         st.parse_errors += 1
+            mid = sum(m for m, _t in self._bad.values())
+            torn = sum(t for _m, t in self._bad.values())
+            st.hc["decode_errors_mid"] = mid
+            st.hc["decode_errors_torn"] = torn
+            st.hc["set_aside_files"] = len(self.set_aside)
+            st.parse_errors += mid      # an unreadable line in the middle of a file is lost data
             if st.parse_errors:
                 print(f"[warn] {st.parse_errors} log entries could not be parsed "
                       "(log format may have changed - stats may be incomplete)")
@@ -1210,8 +1268,7 @@ class NotificationWatcher:
                 continue
             if mtime < cutoff:
                 continue
-            project = os.path.basename(os.path.dirname(path)) or "unknown"
-            project = project.lstrip("-").replace("--", "/").replace("-", "/")
+            project = project_label(self.scanner.root, path)
             self._replay(path, entries, project, known_before_poll, pending, plan_events)
         for (sid, kind), (value, total) in pending.items():
             self._fire(sid, kind, value, total)
@@ -1889,6 +1946,10 @@ def _field_status(n, d):
     return "ok" if r >= 0.9 else ("partial" if n else "missing")
 
 
+def _entry_type_status(t) -> str:
+    return "handled" if t in HANDLED_ENTRY_TYPES else ("ignored" if t in IGNORED_ENTRY_TYPES else "new")
+
+
 def build_health(st: Stats) -> dict:
     """What this machine's logs actually contain, so a metric can say 'not in your logs'
     instead of showing a misleading zero."""
@@ -1896,8 +1957,18 @@ def build_health(st: Stats) -> dict:
     perms = Counter(dec for _d, dec, _s in st.perm_decisions)
     caps = [
         ("tokens", "Tokens and cost", "tokens",
-         _field_status(hc["assistant_msgs"], hc["assistant_msgs"]),
-         "%d responses with token usage (%d duplicate log lines dropped)" % (hc["assistant_msgs"], hc["duplicate_lines"])),
+         _field_status(hc["usage_complete"], hc["assistant_msgs"]),
+         ("%d responses with token usage (%d duplicate log lines dropped)" % (hc["assistant_msgs"], hc["duplicate_lines"]))
+         if hc["usage_complete"] == hc["assistant_msgs"] else
+         ("%d of %d responses have all four token counters; missing: %s. Token and cost totals may be too low."
+          % (hc["usage_complete"], hc["assistant_msgs"],
+             ", ".join("%s (%d)" % kv for kv in st.usage_missing.most_common())))),
+        ("readable", "Log lines readable", "all",
+         "ok" if not hc["decode_errors_mid"] else "partial",
+         ("All log lines could be read" if not hc["decode_errors_mid"] else
+          "%d unreadable line%s in the middle of log files (skipped)" % (hc["decode_errors_mid"], "" if hc["decode_errors_mid"] == 1 else "s"))
+         + ("; %d half-written last line%s (normal while a session is running)" % (hc["decode_errors_torn"], "" if hc["decode_errors_torn"] == 1 else "s") if hc["decode_errors_torn"] else "")
+         + ("; %d set-aside transcript cop%s ignored" % (hc["set_aside_files"], "y" if hc["set_aside_files"] == 1 else "ies") if hc["set_aside_files"] else "")),
         ("turns", "Turn timing", "flow",
          "ok" if len(st.turns) else "missing",
          "%d turns timed from your prompt to Claude finishing" % len(st.turns)),
@@ -1933,7 +2004,9 @@ def build_health(st: Stats) -> dict:
                  "%d of %d sessions have an AI title" % (titled, len(st.sessions))))
     return {
         "capabilities": [{"id": i, "label": l, "tab": t, "status": s, "detail": d} for i, l, t, s, d in caps],
-        "entry_types": [{"type": str(k), "n": v} for k, v in st.entry_types.most_common()],
+        "entry_types": [{"type": str(k), "n": v, "status": _entry_type_status(k)} for k, v in st.entry_types.most_common()],
+        "unknown_entry_types": [{"type": str(k), "n": v} for k, v in st.entry_types.most_common()
+                                if _entry_type_status(k) == "new"],
         "versions": [{"version": k, "n": v} for k, v in st.versions.most_common(6)],
         "entrypoints": [{"name": k, "n": v} for k, v in st.entrypoints.most_common(6)],
         "parse_errors": st.parse_errors, "duplicate_lines": hc["duplicate_lines"],
@@ -3841,7 +3914,7 @@ background:var(--fill)}
   <div class="row" style="--i:1">
     <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><h3>Log inventory</h3></div>
       <div class="chips" id="healthMeta" style="margin-bottom:14px"></div>
-      <div class="scrollx"><table class="tbl" id="tHealth"><thead><tr><th>Log entry type</th><th class="num">Count</th></tr></thead><tbody></tbody></table></div></div>
+      <div class="scrollx"><table class="tbl" id="tHealth"><thead><tr><th>Log entry type</th><th class="num">Count</th><th>Read by this dashboard</th></tr></thead><tbody></tbody></table></div></div>
     <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></span><h3>What these logs cannot tell us</h3></div>
       <ul class="lim" id="healthLimits"></ul>
       <div class="chead" style="margin:22px 0 12px"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><h3>Privacy</h3></div>
@@ -4611,8 +4684,9 @@ function renderHealth(){
     (H.versions.length?'<span class="chip2">Claude Code '+H.versions.map(v=>'<b>'+esc(v.version)+'</b>').join(', ')+'</span>':'')+
     (H.entrypoints.length?'<span class="chip2">Via '+H.entrypoints.map(v=>'<b>'+esc(v.name)+'</b>').join(', ')+'</span>':'')+
     '<span class="chip2'+(H.parse_errors?' warn':'')+'">Unparsed lines <b>'+H.parse_errors+'</b></span>'+
-    '<span class="chip2">Duplicate lines dropped <b>'+H.duplicate_lines+'</b></span>';
-  document.querySelector('#tHealth tbody').innerHTML=H.entry_types.map(t=>'<tr><td><code>'+esc(t.type)+'</code></td><td class="num">'+t.n.toLocaleString()+'</td></tr>').join('');
+    '<span class="chip2">Duplicate lines dropped <b>'+H.duplicate_lines+'</b></span>'+
+    '<span class="chip2'+(H.unknown_entry_types.length?' warn':'')+'">New entry types <b>'+H.unknown_entry_types.length+'</b></span>';
+  document.querySelector('#tHealth tbody').innerHTML=H.entry_types.map(t=>'<tr><td><code>'+esc(t.type)+'</code></td><td class="num">'+t.n.toLocaleString()+'</td><td>'+(t.status==='handled'?'yes':t.status==='ignored'?'no (known, not needed)':'<b>new type, not read</b>')+'</td></tr>').join('');
   $('healthLimits').innerHTML=H.limits.map(l=>'<li>'+esc(l)+'</li>').join('');
   const sel=$('catTab'),tabs=[...new Set(Object.values(D.catalog).map(m=>m.tab))];
   if(sel.options.length===1)tabs.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t.charAt(0).toUpperCase()+t.slice(1);sel.appendChild(o);});

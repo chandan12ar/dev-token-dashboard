@@ -92,11 +92,11 @@ Reproduced in a scratch directory with three files: a normal transcript, an `.or
 
 | ID | Finding | Evidence | Severity |
 |---|---|---|---|
-| **F1** | Orphaned/set-aside copies (`*.orphaned-*.jsonl`) are scanned as ordinary transcripts. Token totals survive thanks to message-id dedupe, but other counters double count | 2 distinct messages produced `days[...]["messages"] == 3`; `duplicate_lines == 1` | Medium: silent inflation of message, prompt and heatmap counts |
-| **F2** | Subagent transcripts in `<session>/subagents/` are attributed to a project literally named **`subagents`**, because the project is taken from the file's parent directory name | `list(st.projects)` returned `['home/u/proj', 'subagents']` | Medium: wrong per-project tables |
-| **F3** | The "Tokens and cost" Data Health check is always `ok` when any assistant message exists (`_field_status(n, n)`) | Code read, `build_health` | High for trust: the check meant to catch drift cannot fire |
-| **F4** | JSON decode failures are skipped without being counted, and torn-last-line vs mid-file corruption are indistinguishable | Code read, `Scanner.scan` | Medium |
-| **F5** | Four entry types in real logs (`atis-latch`, `last-prompt`, `tools-used`, `queue-operation`) are never referenced anywhere in the repo | grep of `*.py`, `*.md`: 0 hits | Info: may hide usable signals, may be noise. Needs a decision, not a fix |
+| **F1** *(fixed in Phase 1)* | Orphaned/set-aside copies (`*.orphaned-*.jsonl`) are scanned as ordinary transcripts. Token totals survive thanks to message-id dedupe, but other counters double count | 2 distinct messages produced `days[...]["messages"] == 3`; `duplicate_lines == 1` | Medium: silent inflation of message, prompt and heatmap counts |
+| **F2** *(fixed in Phase 1)* | Subagent transcripts in `<session>/subagents/` are attributed to a project literally named **`subagents`**, because the project is taken from the file's parent directory name | `list(st.projects)` returned `['home/u/proj', 'subagents']` | Medium: wrong per-project tables |
+| **F3** *(fixed in Phase 1)* | The "Tokens and cost" Data Health check is always `ok` when any assistant message exists (`_field_status(n, n)`) | Code read, `build_health` | High for trust: the check meant to catch drift cannot fire |
+| **F4** *(fixed in Phase 1)* | JSON decode failures are skipped without being counted, and torn-last-line vs mid-file corruption are indistinguishable | Code read, `Scanner.scan` | Medium |
+| **F5** *(reported in Phase 1)* | Four entry types in real logs (`atis-latch`, `last-prompt`, `tools-used`, `queue-operation`) are never referenced anywhere in the repo | grep of `*.py`, `*.md`: 0 hits | Info: may hide usable signals, may be noise. Needs a decision, not a fix |
 
 Live-file behaviour: the prefix of the live transcript (first 500,000 bytes) was hashed at the start of this
 session and compared again at the end. See §4.
@@ -108,9 +108,9 @@ session and compared again at the end. See §4.
 | When | Prefix hash (first 500,000 bytes, sha256) | File size |
 |---|---|---|
 | Start of Phase 0 | `7fc663e8…dbde3fd` | 1,084,102 bytes |
-| Later | *(filled in at the end of the Phase 0 / Phase 1 work, see changelog)* | |
+| Later in the same session | `7fc663e8…dbde3fd` (identical) | 2,125,798 bytes (file roughly doubled) |
 
-A matching hash means the file only grew during this window. It does **not** prove Claude Code never rewrites a
+**Result: the live file was append-only over this window** (it doubled in size and the first 500,000 bytes were byte-identical). It does **not** prove Claude Code never rewrites a
 transcript (the documented `.superseded-` / `.orphaned-` files say it sometimes does), so checkpoint logic must still
 detect truncation and rewrites.
 
