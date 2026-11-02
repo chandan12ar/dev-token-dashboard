@@ -63,6 +63,10 @@ confirm its current shape. `permission-mode` appeared only as a `permissionMode`
 - **Several types have no `version`, no `uuid` and no `timestamp`** (`atis-latch`, `last-prompt`, `tools-used`).
   They are repeated state snapshots (12, 11 and 7 copies in one short session). An archive cannot dedupe them by
   `uuid`; it needs a content hash plus file position.
+- **`cost-state` agrees with our counts where it can** (measured on this one session, aligned to each snapshot): output
+  tokens 0.999 of Claude Code's figure in both snapshots, cache writes 0.98, cache reads 0.94, input tokens 0.07, lines
+  added 578 = 578. Its totals include calls that never appear in the transcript (a small Haiku model: ~117k input
+  tokens). The dashboard now uses it as a cross-check on output tokens ([CANONICAL_SCHEMA.md](CANONICAL_SCHEMA.md) §6).
 - **New entry types appear without a version change.** `mode` and `cost-state` first showed up in this same log, later in
   the same session, on the same Claude Code version (2.1.316). Version number alone is not a schema fingerprint.
 - **Model names are used as keys** (`modelUsage.claude-haiku-5-5`). Every new model release would look like new fields,

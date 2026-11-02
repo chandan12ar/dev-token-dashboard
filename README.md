@@ -216,6 +216,9 @@ command output), so read the notice it shows first. See [SETUP.md](SETUP.md#3c-o
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) — architecture and every panel explained
 - [docs/METRICS.md](docs/METRICS.md) — **the math**: exact formula behind every metric, what each dashboard section means, and the known approximations
 - [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md) — why our token counting is the correct one
+- [docs/LOG_RESILIENCE_ROADMAP.md](docs/LOG_RESILIENCE_ROADMAP.md) — how the dashboard copes with Claude Code's log format changing, re-scans, and log deletion (living plan and status)
+- [docs/CANONICAL_SCHEMA.md](docs/CANONICAL_SCHEMA.md) — the dashboard's own stable record format, the per-version adapters, and what to do when Claude Code changes its logs
+- [docs/SCHEMA_NOTES.md](docs/SCHEMA_NOTES.md) — what Claude Code's raw logs actually contain (observed, with confidence caveats)
 
 ## Credits
 

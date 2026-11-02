@@ -2521,7 +2521,9 @@ def kitchen_sink_logs():
 
 def stats_fingerprint(st):
     """A deterministic, JSON-able picture of everything Stats derived (see GoldenStatsTests)."""
-    skip = {"census_paths", "census_types", "retention", "archive"}
+    skip = {"census_paths", "census_types", "retention", "archive",
+            "adapters", "extras_keys",        # added by Phase 3: telemetry about the adapter, not derived metrics
+            "reconcile", "session_model_out"}
 
     def norm(v):
         if isinstance(v, dict):
@@ -2602,6 +2604,264 @@ class GoldenStatsTests(unittest.TestCase):
         self.assertGreater(len(st.episodes), 0)
         self.assertEqual(st.subagents, Counter({"reviewer": 1}))
         self.assertGreaterEqual(len(st.models), 4)               # sonnet, opus, haiku, unknown
+
+
+class CanonicalLayerTests(unittest.TestCase):
+    """Phase 3: raw line -> Record (adapter) -> Stats (projector). docs/CANONICAL_SCHEMA.md."""
+
+    def _rec(self, entry, **kw):
+        e = {"sessionId": "s", "timestamp": "2026-10-12T09:00:00.000Z", "version": "2.1.316"}
+        e.update(entry)
+        e.update(kw)
+        return afi.adapt_entry(e)
+
+    def _assistant(self, **msg):
+        m = {"id": "m1", "model": "claude-sonnet-5", "stop_reason": "end_turn", "content": []}
+        m.update(msg)
+        return {"type": "assistant", "requestId": "r1", "uuid": "a1", "message": m}
+
+    # --- adapter output --------------------------------------------------------
+    def test_assistant_becomes_one_response_plus_its_tool_calls(self):
+        r = self._rec(self._assistant(
+            usage={"input_tokens": 3, "output_tokens": 4, "cache_creation_input_tokens": 5, "cache_read_input_tokens": 6},
+            content=[{"type": "tool_use", "id": "t1", "name": "Write", "input": {"file_path": "/a.py", "content": "a\nb"}},
+                     {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "pytest"}},
+                     {"type": "tool_use", "id": "t3", "name": "Agent", "input": {"subagent_type": "reviewer"}}]),
+            thinkingDurationMs=900, effort="high")
+        self.assertEqual([e["kind"] for e in r.events], ["response", "tool_call", "tool_call", "tool_call"])
+        resp = r.events[0]
+        self.assertEqual(resp["usage"], {"input": 3, "output": 4, "cache_write": 5, "cache_read": 6})
+        self.assertEqual((resp["model"], resp["stop_reason"], resp["thinking_ms"], resp["effort"], resp["message_id"]),
+                         ("claude-sonnet-5", "end_turn", 900, "high", "m1"))
+        w, b, a = r.events[1:]
+        self.assertEqual((w["name"], w["file_path"], w["loc"]), ("Write", "/a.py", 2))
+        self.assertEqual((b["command"], b["loc"]), ("pytest", 0))
+        self.assertEqual(a["subagent_type"], "reviewer")
+        self.assertEqual((r.adapter, r.src, r.sid), ("claude-code-2", "assistant", "s"))
+
+    def test_user_lines_classify_prompts_and_tool_results(self):
+        typed = self._rec({"type": "user", "message": {"content": "add a test"}})
+        self.assertEqual(typed.events, [{"kind": "prompt", "class": "typed", "text": "add a test"}])
+        self.assertTrue(typed.human_input)
+        slash = self._rec({"type": "user", "message": {"content": "<command-name>/init</command-name>"}})
+        self.assertEqual(slash.events, [{"kind": "prompt", "class": "command", "command": "/init"}])
+        self.assertEqual(self._rec({"type": "user", "message": {"content": "<local-command-stdout>x"}}).events[0]["class"], "local_command")
+        self.assertEqual(self._rec({"type": "user", "message": {"content": "[Request interrupted by user]"}}).events[0]["class"], "interrupt")
+        res = self._rec({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "boom Exit code 2", "is_error": True},
+            {"type": "tool_result", "tool_use_id": "t2", "content": "fine"}]}})
+        self.assertEqual([(e["tool_use_id"], e["is_error"]) for e in res.events], [("t1", True), ("t2", False)])
+        self.assertIn("Exit code 2", res.events[0]["text"])
+        self.assertEqual(res.events[1]["text"], "")                    # result text is only kept for failures
+        self.assertFalse(res.human_input)                              # results alone are not a person typing
+        mixed = self._rec({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": ""}, {"type": "text", "text": "and also"}]}})
+        self.assertTrue(mixed.human_input)
+
+    def test_small_entry_kinds(self):
+        self.assertEqual(self._rec({"type": "ai-title", "aiTitle": "T"}).events, [{"kind": "title", "sid": "s", "title": "T"}])
+        self.assertEqual(self._rec({"type": "permission-mode", "permissionMode": "plan"}).events, [{"kind": "mode", "mode": "plan"}])
+        self.assertEqual(self._rec({"type": "system", "subtype": "stop_hook_summary"}).events, [{"kind": "hook_run"}])
+        self.assertEqual(self._rec({"type": "attachment", "attachment": {"type": "hook_success"}}).events,
+                         [{"kind": "attachment", "type": "hook_success"}])
+        pd = self._rec(self._assistant(), permissionDecision={"decision": "accept", "source": "user"})
+        self.assertEqual(pd.events[0], {"kind": "permission_decision", "decision": "accept", "source": "user"})
+        self.assertTrue(self._rec({"type": "user", "isMeta": True, "message": {"content": "x"}}).meta)
+        self.assertEqual(self._rec({"type": "queue-operation", "operation": "enqueue"}).events, [])
+
+    def test_unfamiliar_top_level_fields_are_kept_as_extras(self):
+        r = self._rec(self._assistant(), brandNewField={"deep": 1}, wireToolInputs={}, isSidechain=False)
+        self.assertEqual(r.extras, {"brandNewField": {"deep": 1}})
+        st = afi.Stats()
+        afi.project_record(r, "p", st)
+        self.assertEqual(st.extras_keys[("assistant", "brandNewField")], 1)
+
+    def test_timestamps_are_normalised_to_utc(self):
+        a = self._rec({"type": "user", "message": {"content": "x"}}, timestamp="2026-10-12T11:00:00+02:00")
+        self.assertEqual(a.ts.isoformat(), "2026-10-12T09:00:00+00:00")
+        self.assertEqual(a.ts_raw, "2026-10-12T11:00:00+02:00")                   # the logged text is kept verbatim
+        naive = afi.adapt_entry({"type": "user", "message": {"content": "x"}, "timestamp": "2026-10-12T09:00:00"})
+        self.assertEqual(naive.ts, afi.datetime(2026, 10, 12, 9, 0, 0).astimezone().astimezone(afi.timezone.utc))
+        self.assertIsNone(self._rec({"type": "user", "message": {"content": "x"}}, timestamp="not a time").ts)
+
+    def test_record_serialises_to_json(self):
+        r = self._rec(self._assistant(usage={"input_tokens": 1}), brandNew=1)
+        d = afi.json.loads(afi.json.dumps(r.to_dict()))
+        self.assertEqual((d["canonical_version"], d["adapter"], d["events"][0]["kind"]), (1, "claude-code-2", "response"))
+
+    # --- tolerance --------------------------------------------------------------
+    def test_a_wrong_typed_token_field_no_longer_discards_the_whole_response(self):
+        st = afi.Stats()
+        r = self._rec(self._assistant(usage={"input_tokens": 10, "output_tokens": 20, "cache_creation_input_tokens": 0,
+                                             "cache_read_input_tokens": "lots"}))
+        afi.project_record(r, "p", st)
+        self.assertEqual(st.hc["assistant_msgs"], 1)
+        self.assertEqual(sum(d["output"] for d in st.days.values()), 20)          # the readable counters still count
+        self.assertEqual((st.hc["usage_complete"], dict(st.usage_missing)), (0, {"cache_read_input_tokens": 1}))
+        self.assertEqual(r.events[0]["usage"]["cache_read"], 0)
+
+    def test_malformed_shapes_do_not_raise(self):
+        for e in ({"type": "attachment", "attachment": "x"}, {"type": "assistant", "message": "text"},
+                  {"type": "assistant", "message": {"content": "no list", "usage": [1]}},
+                  {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": "str"}]}},
+                  {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "MultiEdit",
+                                                                  "input": {"edits": "nope", "file_path": 5}}]}}):
+            afi.project_record(self._rec(e), "p", afi.Stats())
+
+    def test_a_line_that_is_not_an_object_is_counted_not_fatal(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.makedirs(os.path.join(root, "p"))
+        with open(os.path.join(root, "p", "a.jsonl"), "w", encoding="utf-8") as f:
+            f.write('123\n"text"\n{"type":"user","sessionId":"s","timestamp":"2026-10-12T09:00:00Z","message":{"content":"hi"}}\n')
+        sc = afi.Scanner(root)
+        st = sc.build_stats()
+        self.assertEqual(st.parse_errors, 2)
+        self.assertEqual(len(st.sessions), 1)
+        self.assertEqual(len(sc._records[os.path.join(root, "p", "a.jsonl")]), 3)  # records stay 1:1 with lines
+
+    # --- adapter registry -----------------------------------------------------------
+    def test_adapter_is_chosen_by_claude_code_version(self):
+        self.assertEqual(afi.adapter_for_version("2.1.316"), "claude-code-2")
+        self.assertEqual(afi.adapter_for_version("2.9"), "claude-code-2")
+        self.assertEqual(afi.adapter_for_version("3.0.1"), "fallback")
+        self.assertEqual(afi.adapter_for_version("1.0.5"), "fallback")
+        self.assertEqual(afi.adapter_for_version(None), "unversioned")
+        self.assertEqual(afi.adapter_for_version("garbage"), "unversioned")
+
+    def test_a_new_adapter_can_be_registered_for_a_new_format(self):
+        def v3(entry):
+            rec = afi.Record("user")
+            rec.sid = "s3"
+            rec.events.append({"kind": "prompt", "class": "typed", "text": "from a v3 line"})
+            return rec
+        with patch.object(afi, "ADAPTERS", afi.ADAPTERS + [("claude-code-3", lambda v: v[0] == 3, v3)]):
+            r = afi.adapt_entry({"type": "user", "version": "3.0.0", "message": {"content": "ignored"}})
+            self.assertEqual((r.adapter, r.sid, r.events[0]["text"]), ("claude-code-3", "s3", "from a v3 line"))
+            self.assertEqual(afi.adapter_for_version("3.0.0"), "claude-code-3")
+        self.assertEqual(afi.adapt_entry({"type": "user", "version": "3.0.0", "message": {"content": "x"}}).adapter, "fallback")
+
+    def test_adapter_use_is_counted_per_line(self):
+        st = afi.Stats()
+        for v in ("2.1.1", "2.1.1", "3.0.0", None):
+            e = {"type": "queue-operation"}
+            if v:
+                e["version"] = v
+            afi.project_record(afi.adapt_entry(e), "p", st)
+        self.assertEqual(dict(st.adapters), {"claude-code-2": 2, "fallback": 1, "unversioned": 1})
+
+    # --- projector is independent of the raw format ------------------------------------
+    def test_projector_works_from_a_hand_built_record(self):
+        rec = afi.Record("assistant")
+        rec.sid, rec.ts_raw, rec.adapter = "sX", "2026-10-12T09:00:00Z", "test"
+        rec.ts = afi.datetime(2026, 10, 12, 9, 0, 0, tzinfo=afi.timezone.utc)
+        rec.events = [{"kind": "response", "message_id": "m", "request_id": "r", "model": "claude-sonnet-5",
+                       "stop_reason": None, "thinking_ms": None, "effort": None,
+                       "usage": {"input": 100, "output": 50, "cache_write": 0, "cache_read": 0}, "usage_missing": []},
+                      {"kind": "tool_call", "id": "t", "name": "Write", "command": None, "file_path": "/x/a.py",
+                       "loc": 7, "subagent_type": None}]
+        st = afi.Stats()
+        afi.project_record(rec, "proj", st)
+        self.assertEqual(sum(d["output"] for d in st.days.values()), 50)
+        self.assertEqual(sum(d["loc"] for d in st.days.values()), 7)
+        self.assertEqual(st.files_touched["a.py"], 7)
+
+    # --- pricing ------------------------------------------------------------------------
+    def test_dated_prices_apply_only_to_days_before_the_change(self):
+        cheap = {"in": 1.0, "out": 5.0}
+        base = lambda key: next(p for k, p in afi.PRICING if k == key)       # noqa: E731
+        with patch.dict(afi.PRICE_HISTORY, {"sonnet": [("2026-06-01", cheap)]}):
+            self.assertEqual(afi.price_for("claude-sonnet-5", "2026-05-31"), cheap)
+            self.assertEqual(afi.price_for("claude-sonnet-5", "2026-06-01"), base("sonnet"))
+            self.assertEqual(afi.price_for("claude-sonnet-5"), base("sonnet"))
+            self.assertEqual(afi.price_for("claude-opus-5-5", "2020-01-01"), base("opus"))
+
+    # --- sentinel + health ---------------------------------------------------------------
+    def test_an_unverified_claude_code_version_is_reported(self):
+        types = Counter({("assistant", "2.1.316"): 30, ("assistant", "3.0.2"): 25, ("atis-latch", "?"): 3})
+        res = afi.analyze_schema(Counter(), types, None)
+        f = [x for x in res["findings"] if x["kind"] == "unverified_version"]
+        self.assertEqual([(x["versions"], x["severity"]) for x in f], [(["3.0.2"], "info")])
+        self.assertIn("25 log lines", f[0]["detail"])
+        known_only = afi.analyze_schema(Counter(), Counter({("assistant", "2.1.316"): 30}), None)
+        self.assertFalse([x for x in known_only["findings"] if x["kind"] == "unverified_version"])
+
+    def test_health_lists_adapters_and_unrecognised_fields(self):
+        st = afi.Stats()
+        for e in ({"type": "queue-operation", "version": "2.1.1", "oddKey": 1}, {"type": "queue-operation", "version": "9.0.0"}):
+            afi.project_record(afi.adapt_entry(e), "p", st)
+        h = afi.build_health(st)
+        self.assertEqual({a["name"]: a["n"] for a in h["adapters"]}, {"claude-code-2": 1, "fallback": 1})
+        self.assertEqual(h["extras"], [{"entry_type": "queue-operation", "key": "oddKey", "n": 1}])
+        afi.json.dumps(h)
+
+
+class CrossCheckTests(unittest.TestCase):
+    """Our output tokens vs the session totals Claude Code writes into the log (cost-state)."""
+
+    def _stats(self, ours, snapshot, model="claude-sonnet-5"):
+        st = afi.Stats()
+        for i, out in enumerate(ours):
+            e = {"type": "assistant", "sessionId": "s1", "timestamp": "2026-10-12T09:0%d:00Z" % i, "version": "2.1.316",
+                 "requestId": "r%d" % i, "uuid": "u%d" % i,
+                 "message": {"id": "m%d" % i, "model": model, "stop_reason": "end_turn", "content": [],
+                             "usage": {"input_tokens": 1, "output_tokens": out, "cache_creation_input_tokens": 0,
+                                       "cache_read_input_tokens": 0}}}
+            afi.project_record(afi.adapt_entry(e), "p", st)
+        if snapshot is not None:
+            afi.project_record(afi.adapt_entry({"type": "cost-state", "sessionId": "s1", "totalCostUSD": 1.0,
+                                                "totalLinesAdded": 5, "modelUsage": snapshot}), "p", st)
+        return st
+
+    def _cap(self, st):
+        return {c["id"]: c for c in afi.build_health(st)["capabilities"]}["crosscheck"]
+
+    @staticmethod
+    def _theirs(**by_model):
+        return {m: {"inputTokens": 1, "outputTokens": n, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                    "costUSD": 0.1} for m, n in by_model.items()}
+
+    def test_cost_state_becomes_a_session_totals_event(self):
+        r = afi.adapt_entry({"type": "cost-state", "sessionId": "s1", "totalCostUSD": 2.5, "totalLinesAdded": 7,
+                             "modelUsage": self._theirs(**{"claude-sonnet-5": 900})})
+        e = r.events[0]
+        self.assertEqual((e["kind"], e["sid"], e["cost_usd"], e["lines_added"]), ("session_totals", "s1", 2.5, 7))
+        self.assertEqual(e["models"]["claude-sonnet-5"]["output"], 900)
+        self.assertEqual(afi.adapt_entry({"type": "cost-state", "sessionId": "s1"}).events[0]["models"], {})   # tolerant
+
+    def test_matching_totals_pass(self):
+        cap = self._cap(self._stats([3000, 2500], self._theirs(**{"claude-sonnet-5": 5500})))
+        self.assertEqual(cap["status"], "ok")
+        self.assertIn("100.0%", cap["detail"])
+
+    def test_a_stale_snapshot_never_raises_a_false_alarm(self):
+        # the log kept growing after the snapshot, so we legitimately count more than Claude Code did then
+        self.assertEqual(self._cap(self._stats([3000, 2500, 4000], self._theirs(**{"claude-sonnet-5": 5500})))["status"], "ok")
+
+    def test_counting_clearly_fewer_tokens_than_claude_code_is_flagged(self):
+        cap = self._cap(self._stats([3000, 1000], self._theirs(**{"claude-sonnet-5": 5500})))
+        self.assertEqual(cap["status"], "partial")
+        self.assertIn("fewer output tokens", cap["detail"])
+        self.assertIn("73%", cap["detail"])
+
+    def test_within_tolerance_passes(self):
+        self.assertEqual(self._cap(self._stats([5400], self._theirs(**{"claude-sonnet-5": 5500})))["status"], "ok")
+
+    def test_calls_that_never_reach_the_transcript_are_not_compared(self):
+        theirs = self._theirs(**{"claude-sonnet-5": 5500, "claude-haiku-5": 90000})     # a model absent from our counts
+        self.assertEqual(self._cap(self._stats([3000, 2500], theirs))["status"], "ok")
+
+    def test_small_or_missing_snapshots_are_reported_as_unavailable(self):
+        small = self._cap(self._stats([300], self._theirs(**{"claude-sonnet-5": 400})))
+        self.assertEqual(small["status"], "missing")
+        self.assertIn("large enough", small["detail"])
+        none = self._cap(self._stats([3000], None))
+        self.assertEqual(none["status"], "missing")
+        self.assertIn("no session totals", none["detail"].lower())
+
+    def test_the_entry_type_is_now_read(self):
+        h = afi.build_health(self._stats([3000], self._theirs(**{"claude-sonnet-5": 3000})))
+        self.assertEqual({t["type"]: t["status"] for t in h["entry_types"]}["cost-state"], "handled")
 
 
 class HealthAndCatalogTests(_LogFixture):

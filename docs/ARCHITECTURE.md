@@ -290,7 +290,12 @@ Off by default and switchable only from the command line (`--archive-enable`, af
 - Measured on one real log (3.4 MB, 515 lines): 2.1 MB on disk, about 1.6x smaller than the text. Per-line compression
   is weak on this data (signatures, hashes); compressing blocks of lines would gain only ~15% here.
 
-### 4.3 Parser rules (`parse_entry`)
+### 4.3 Parser rules (adapter + projector)
+
+Since Phase 3 these rules live in two places: the **adapter** (`_adapt_claude_code_2`) knows the raw format and produces
+canonical Records, and the **projector** (`project_record`) folds Records into `Stats`. `parse_entry` remains as a thin
+wrapper. Record schema, events, adapter registry and tolerance rules: [CANONICAL_SCHEMA.md](CANONICAL_SCHEMA.md).
+The table below describes behaviour, which is unchanged (pinned by `GoldenStatsTests`).
 
 | Concern | Rule |
 |---|---|

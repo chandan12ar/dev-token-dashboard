@@ -273,22 +273,6 @@ def _tool_result_text(block) -> str:
     return ""
 
 
-def _parse_aux_entry(entry, etype, st, min_day, max_day):
-    """System and attachment lines: hooks and (for the health panel) what the log contains."""
-    ts, day = _entry_time(entry)
-    if not day:
-        return
-    if (min_day is not None and day < min_day) or (max_day is not None and day > max_day):
-        return
-    if etype == "system" and entry.get("subtype") == "stop_hook_summary":
-        st.hc["stop_hook_summary"] += 1
-        st.feature_days["hooks"].add(day)
-    elif etype == "attachment":
-        kind = (entry.get("attachment") or {}).get("type")
-        if kind:
-            st.attachment_types[kind] += 1
-
-
 # id, label, short description, how-to-start tip, usefulness weight for the coach
 ADOPTION_FEATURES = [
     ("memory", "Project memory", "A CLAUDE.md that teaches Claude your project",
@@ -331,10 +315,21 @@ CORRECT_RE = re.compile(
 USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
-def price_for(model: str):
+# Optional dated prices. PRICING holds the CURRENT rates and is used for every day by default. If a price changed,
+# say so here and older days are priced at the old rate instead of being silently re-priced at today's:
+#   PRICE_HISTORY["sonnet"] = [("2026-06-01", {"in": 3.0, "out": 15.0})]    # days before 2026-06-01
+# No history ships with the tool because there are no verified historical prices to put in it.
+PRICE_HISTORY = {}
+
+
+def price_for(model: str, day=None):
     m = (model or "").lower()
     for key, p in PRICING:
         if key in m:
+            if day:
+                for until, rates in sorted(PRICE_HISTORY.get(key, ()), key=lambda x: x[0]):
+                    if day < until:
+                        return rates
             return p
     return DEFAULT_PRICE
 
@@ -417,6 +412,10 @@ class Stats:
         self.census_types = Counter()      # (type, version) -> entries
         self.archive = None                # Archive.status() when an archive is configured (see Scanner.build_stats)
         self.retention = None              # {"days", "source"} from load_retention(), set by Scanner.build_stats
+        self.reconcile = {}                # sid -> Claude Code's own latest session totals (cost-state)
+        self.session_model_out = Counter() # (sid, model) -> output tokens we counted, to check against reconcile
+        self.adapters = Counter()          # which adapter read each log line (see ADAPTERS)
+        self.extras_keys = Counter()       # (entry type, top-level key) the adapter did not recognise
         self.usage_missing = Counter()     # token-usage field -> responses where it was absent/non-numeric
         self.attachment_types = Counter()
         self.versions = Counter()
@@ -469,67 +468,325 @@ def _end_turn(st, sess, ts):
     sess["turn"] = None
 
 
-def _handle_tool_results(content, st, sess, day, ts, side):
-    """Every tool_result block: error counts (as before), tool timing, test/build/lint
-    outcomes, and failure -> recovery episodes."""
-    for b in content:
-        if not isinstance(b, dict) or b.get("type") != "tool_result":
-            continue
-        is_err = bool(b.get("is_error"))
-        if is_err:
-            st.tool_errors += 1
-            if day:
-                st.days[day]["tool_errors"] += 1
-        st.hc["tool_results"] += 1
-        info = st.pending_tools.pop(b.get("tool_use_id"), None)
-        if not info:
-            continue
-        st.hc["tool_results_matched"] += 1
-        name = info["name"]
-        if day and ts is not None and info["ts"] is not None:
-            st.tool_calls.append((day, name, info["family"],
-                                  max(0.0, (ts - info["ts"]).total_seconds()), not is_err))
-        if is_err and name in CMD_TOOLS and EXIT_RE.search(_tool_result_text(b)):
-            st.hc["exit_code_text"] += 1
-        if day and info["kind"] in ("test", "build", "lint"):
-            st.cmd_runs.append((day, info["sid"], info["kind"], not is_err))
-        if sess is None or info["side"]:
-            continue
-        if sess["turn"] is not None and is_err:
-            sess["turn"]["err"] = True
-        oe = sess["open_err"]
-        for ep in oe.values():
-            ep["steps"] += 1
-        if is_err:
-            ep = oe.get(name)
-            if ep is None:
-                oe[name] = {"fails": 1, "steps": 0, "day": day}
-            else:
-                ep["fails"] += 1
+# ---------------------------------------------------------------------------
+# Canonical records (schema v1): raw log line -> Record -> Stats
+#
+# This is the ONLY place that knows what Claude Code's raw log lines look like. An adapter (one per range of Claude
+# Code versions) turns each raw line into a Record of normalised events; the projector (project_record) turns
+# Records into Stats and never touches a raw field. When Claude Code changes its format, a new adapter is written
+# and the metrics code stays as it is. Schema and rules: docs/CANONICAL_SCHEMA.md.
+# ---------------------------------------------------------------------------
+
+CANONICAL_VERSION = 1
+
+# Top-level keys of raw lines that the baseline (schema/claude_code_known.json) already knows. Any other key is
+# kept in Record.extras so an unfamiliar field is visible instead of silently dropped.
+_KNOWN_TOP_KEYS = frozenset((
+    "advisorModel apiBlockIndex atis attachment clientPlatform content cwd effort entrypoint gitBranch hasOutput "
+    "hasUnknownModelCost hookAdditionalContext hookCount hookErrors hookInfos isMeta isSidechain lastPrompt leafUuid "
+    "level message mode modelUsage operation origin parentUuid perTurnEffort permissionDecision permissionMode "
+    "preventedContinuation promptId promptSource rendered renderedBesideToolResult renderedRole requestId "
+    "requestedModel sandboxed serverClassifierContext serverClassifierRequest sessionId sourceToolAssistantUUID "
+    "startTime stopReason subtype thinkingDisplay thinkingDurationMs timestamp toolUseID toolUseResult tools "
+    "totalAPIDuration totalAPIDurationWithoutRetries totalCostUSD totalDuration totalLinesAdded totalLinesRemoved "
+    "totalToolDuration turnAttributionKey turnCompanion turnOrigin turnPosition type userType uuid version "
+    "wireIngestContext wireToolInputs aiTitle").split())
+
+
+class Record:
+    """One raw log line in canonical form. `events` is an ordered list of dicts, each with a `kind`:
+
+      title, mode, hook_run, attachment, permission_decision, tool_result, prompt, response, tool_call,
+      session_totals
+
+    Envelope: src (the raw `type`), sid, ts_raw (timestamp exactly as logged), ts (the same instant as an aware
+    UTC datetime, or None), meta (Claude Code marked it as not a real message), side (subagent work), cwd, branch,
+    version, entrypoint, uuid, human_input (the line carries something a person did), extras (unfamiliar top-level
+    fields), adapter (which adapter read it)."""
+    __slots__ = ("src", "sid", "ts_raw", "ts", "meta", "side", "cwd", "branch", "version", "entrypoint", "uuid",
+                 "human_input", "events", "extras", "adapter")
+
+    def __init__(self, src):
+        self.src = src
+        self.sid = self.ts = self.cwd = self.branch = self.version = self.entrypoint = self.uuid = None
+        self.ts_raw = ""
+        self.meta = self.side = self.human_input = False
+        self.events = []
+        self.extras = {}
+        self.adapter = None
+
+    def to_dict(self):
+        d = {k: getattr(self, k) for k in self.__slots__ if k != "ts"}
+        d["ts"] = self.ts.isoformat() if self.ts else None
+        d["canonical_version"] = CANONICAL_VERSION
+        return d
+
+
+def _parse_ts(raw):
+    """ISO timestamp as logged -> aware UTC datetime (a timestamp with no zone is taken as local time), or None."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return (dt if dt.tzinfo is not None else dt.astimezone()).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _num(v):
+    """A token counter: numbers pass through, None counts as 0, anything else becomes 0 and is reported missing."""
+    if v is None:
+        return 0, False
+    if isinstance(v, (int, float)):
+        return v, False
+    return 0, True
+
+
+def _adapt_claude_code_2(entry) -> Record:
+    """Adapter for Claude Code 2.x transcripts (observed 2.1.x; see docs/SCHEMA_NOTES.md)."""
+    et = entry.get("type")
+    rec = Record(et)
+    rec.version = entry.get("version") or None
+    rec.entrypoint = entry.get("entrypoint") or None
+    rec.sid = entry.get("sessionId")
+    rec.uuid = entry.get("uuid")
+    rec.extras = {k: v for k, v in entry.items() if k not in _KNOWN_TOP_KEYS}
+    ev = rec.events
+
+    if et == "ai-title":
+        title = entry.get("aiTitle")
+        if rec.sid and title:
+            ev.append({"kind": "title", "sid": rec.sid, "title": title})
+        return rec
+    if et == "permission-mode":
+        ev.append({"kind": "mode", "mode": entry.get("permissionMode") or None})
+        return rec
+
+    if et == "cost-state":
+        # Claude Code's own running totals for the session. No timestamp, so it never falls in a date range.
+        usage = entry.get("modelUsage")
+        models = {}
+        for name, u in (usage.items() if isinstance(usage, dict) else ()):
+            u = u if isinstance(u, dict) else {}
+            models[str(name)] = {"input": _num(u.get("inputTokens"))[0], "output": _num(u.get("outputTokens"))[0],
+                                 "cache_read": _num(u.get("cacheReadInputTokens"))[0],
+                                 "cache_write": _num(u.get("cacheCreationInputTokens"))[0],
+                                 "cost_usd": _num(u.get("costUSD"))[0]}
+        if rec.sid:
+            ev.append({"kind": "session_totals", "sid": rec.sid, "models": models,
+                       "cost_usd": _num(entry.get("totalCostUSD"))[0],
+                       "lines_added": _num(entry.get("totalLinesAdded"))[0]})
+        return rec
+
+    rec.ts_raw = entry.get("timestamp") or ""
+    rec.ts = _parse_ts(rec.ts_raw)
+    if et == "system":
+        if entry.get("subtype") == "stop_hook_summary":
+            ev.append({"kind": "hook_run"})
+        return rec
+    if et == "attachment":
+        att = entry.get("attachment")
+        kind = att.get("type") if isinstance(att, dict) else None
+        if kind:
+            ev.append({"kind": "attachment", "type": kind})
+        return rec
+    if et not in ("user", "assistant"):
+        return rec
+    rec.meta = bool(entry.get("isMeta"))
+    if rec.meta:
+        return rec
+
+    rec.cwd = entry.get("cwd")
+    rec.branch = entry.get("gitBranch") or None
+    rec.side = bool(entry.get("isSidechain"))
+    pdec = entry.get("permissionDecision")
+    if isinstance(pdec, dict):
+        ev.append({"kind": "permission_decision", "decision": str(pdec.get("decision")),
+                   "source": str(pdec.get("source"))})
+    msg = entry.get("message")
+    msg = msg if isinstance(msg, dict) else {}
+    content = msg.get("content")
+
+    if et == "user":
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    err = bool(b.get("is_error"))
+                    ev.append({"kind": "tool_result", "tool_use_id": b.get("tool_use_id"), "is_error": err,
+                               "text": _tool_result_text(b) if err else ""})
+            rec.human_input = bool(content) and not all(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
         else:
-            ep = oe.pop(name, None)
-            if ep:
-                st.episodes.append((ep["day"], name, ep["fails"], ep["steps"]))
+            rec.human_input = bool(content)
+        text = None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            texts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+            if texts:
+                text = "\n".join(texts)
+        if text:
+            cmd = CMD_RE.search(text)
+            if cmd:
+                ev.append({"kind": "prompt", "class": "command", "command": cmd.group(1)})
+            elif text.startswith("<local-command") or text.startswith("<command-"):
+                ev.append({"kind": "prompt", "class": "local_command"})
+            elif "[Request interrupted" in text:
+                ev.append({"kind": "prompt", "class": "interrupt"})
+            else:
+                ev.append({"kind": "prompt", "class": "typed", "text": text})
+        return rec
+
+    # assistant: one response (usage, model, stop reason...) plus its tool calls
+    usage = msg.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    td = entry.get("thinkingDurationMs")
+    resp = {"kind": "response", "message_id": msg.get("id") or entry.get("uuid"),
+            "request_id": entry.get("requestId"), "model": msg.get("model") or "unknown",
+            "stop_reason": msg.get("stop_reason") or None,
+            "thinking_ms": td if isinstance(td, (int, float)) else None,
+            "effort": str(entry["effort"]) if entry.get("effort") else None,
+            "usage": None, "usage_missing": []}
+    if usage:
+        counts = {}
+        for key, name in (("input_tokens", "input"), ("output_tokens", "output"),
+                          ("cache_creation_input_tokens", "cache_write"), ("cache_read_input_tokens", "cache_read")):
+            counts[name], bad = _num(usage.get(key, 0))
+            if key not in usage or bad:
+                resp["usage_missing"].append(key)
+        resp["usage"] = counts
+    ev.append(resp)
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            inp = block.get("input")
+            inp = inp if isinstance(inp, dict) else {}
+            name = block.get("name", "?")
+            cmd = inp.get("command")
+            fp = inp.get("file_path") or inp.get("notebook_path") or ""
+            loc = 0
+            if name in CODE_TOOLS_WRITE:
+                loc = count_lines(inp.get("content"))
+            elif name in CODE_TOOLS_EDIT:
+                loc = count_lines(inp.get("new_string"))
+            elif name == "MultiEdit":
+                edits = inp.get("edits")
+                loc = sum(count_lines(e.get("new_string")) for e in (edits if isinstance(edits, list) else [])
+                          if isinstance(e, dict))
+            elif name == "NotebookEdit":
+                loc = count_lines(inp.get("new_source"))
+            ev.append({"kind": "tool_call", "id": block.get("id"), "name": name,
+                       "command": cmd if isinstance(cmd, str) else None,
+                       "file_path": fp if isinstance(fp, str) else "", "loc": loc,
+                       "subagent_type": inp.get("subagent_type") if name == "Agent" else None})
+    return rec
 
 
+def version_tuple(v):
+    m = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", v) if isinstance(v, str) else None
+    return tuple(int(x or 0) for x in m.groups()) if m else None
 
-def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None):
-    etype = entry.get("type")
+
+# (name, does it read this Claude Code version?, adapter). First match wins. Add a new adapter when a Claude Code
+# release changes the format; keep the old one for logs written by older releases.
+ADAPTERS = [("claude-code-2", lambda v: v[0] == 2, _adapt_claude_code_2)]
+# Lines with a version no adapter claims are still read by the newest adapter, but are counted as "fallback" so the
+# dashboard can say the version has not been verified. Lines with no version (state snapshots) are "unversioned".
+FALLBACK_ADAPTER = ("fallback", _adapt_claude_code_2)
+
+
+def adapter_for_version(version) -> str:
+    v = version_tuple(version)
+    if v is None:
+        return "unversioned"
+    for name, matches, _fn in ADAPTERS:
+        if matches(v):
+            return name
+    return FALLBACK_ADAPTER[0]
+
+
+def adapt_entry(entry) -> Record:
+    """Raw log line (parsed JSON) -> Record. Raises if the line is not a JSON object."""
+    if not isinstance(entry, dict):
+        raise TypeError("log line is not a JSON object")
+    v = version_tuple(entry.get("version"))
+    name, fn = FALLBACK_ADAPTER if v is None else next(
+        ((n, f) for n, m, f in ADAPTERS if m(v)), FALLBACK_ADAPTER)
+    rec = fn(entry)
+    rec.adapter = "unversioned" if v is None else name
+    return rec
+
+
+def adapt_entries(entries):
+    """List of Records, 1:1 with `entries`; a line that cannot be adapted becomes None (counted as unparseable)."""
+    out = []
+    for e in entries:
+        try:
+            out.append(adapt_entry(e))
+        except Exception:
+            out.append(None)
+    return out
+
+
+def _handle_tool_result(e, st, sess, day, ts, side):
+    """A tool result: error counts, tool timing, test/build/lint outcomes, and failure -> recovery episodes."""
+    is_err = e["is_error"]
+    if is_err:
+        st.tool_errors += 1
+        if day:
+            st.days[day]["tool_errors"] += 1
+    st.hc["tool_results"] += 1
+    info = st.pending_tools.pop(e["tool_use_id"], None)
+    if not info:
+        return
+    st.hc["tool_results_matched"] += 1
+    name = info["name"]
+    if day and ts is not None and info["ts"] is not None:
+        st.tool_calls.append((day, name, info["family"],
+                              max(0.0, (ts - info["ts"]).total_seconds()), not is_err))
+    if is_err and name in CMD_TOOLS and EXIT_RE.search(e["text"]):
+        st.hc["exit_code_text"] += 1
+    if day and info["kind"] in ("test", "build", "lint"):
+        st.cmd_runs.append((day, info["sid"], info["kind"], not is_err))
+    if sess is None or info["side"]:
+        return
+    if sess["turn"] is not None and is_err:
+        sess["turn"]["err"] = True
+    oe = sess["open_err"]
+    for ep in oe.values():
+        ep["steps"] += 1
+    if is_err:
+        ep = oe.get(name)
+        if ep is None:
+            oe[name] = {"fails": 1, "steps": 0, "day": day}
+        else:
+            ep["fails"] += 1
+    else:
+        ep = oe.pop(name, None)
+        if ep:
+            st.episodes.append((ep["day"], name, ep["fails"], ep["steps"]))
+
+
+def project_record(rec: Record, project: str, st: Stats, min_day=None, max_day=None):
+    """Fold one Record into Stats. Reads only canonical fields, never raw ones."""
+    etype = rec.src
     st.entry_types[etype] += 1
-    if entry.get("version"):
-        st.versions[entry["version"]] += 1
-    if entry.get("entrypoint"):
-        st.entrypoints[entry["entrypoint"]] += 1
+    if rec.version:
+        st.versions[rec.version] += 1
+    if rec.entrypoint:
+        st.entrypoints[rec.entrypoint] += 1
+    st.adapters[rec.adapter] += 1
+    for k in rec.extras:
+        st.extras_keys[(etype, k)] += 1
+    ev = rec.events
 
-    # AI-generated session title lines (written by Claude Code itself)
     if etype == "ai-title":
-        sid, title = entry.get("sessionId"), entry.get("aiTitle")
-        if sid and title:
-            st.session_titles[sid] = title
+        for e in ev:
+            st.session_titles[e["sid"]] = e["title"]
         return
 
-    # permission-mode snapshots ("auto" / "default" / "acceptEdits") carry no
-    # timestamp of their own — they piggyback on the most recently seen dated
+    # permission-mode snapshots carry no timestamp of their own: they piggyback on the most recently seen dated
     # entry so they still respect the selected date range.
     if etype == "permission-mode":
         day = st.last_day
@@ -537,46 +794,53 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
             return
         if max_day is not None and (not day or day > max_day):
             return
-        st.permission_modes[entry.get("permissionMode") or "unknown"] += 1
-        if entry.get("permissionMode") == "plan" and day:
+        mode = ev[0]["mode"]
+        st.permission_modes[mode or "unknown"] += 1
+        if mode == "plan" and day:
             st.feature_days["plan"].add(day)
         return
 
+    if etype == "cost-state":
+        for e in ev:
+            st.reconcile[e["sid"]] = e                  # later snapshots of a session replace earlier ones
+        return
+
+    ts = rec.ts.astimezone() if rec.ts is not None else None       # local time: days, hours and weekdays are local
+    day = ts.strftime("%Y-%m-%d") if ts is not None else ""
+
     if etype in ("system", "attachment"):
-        _parse_aux_entry(entry, etype, st, min_day, max_day)
+        if not day:
+            return
+        if (min_day is not None and day < min_day) or (max_day is not None and day > max_day):
+            return
+        for e in ev:
+            if e["kind"] == "hook_run":
+                st.hc["stop_hook_summary"] += 1
+                st.feature_days["hooks"].add(day)
+            elif e["kind"] == "attachment":
+                st.attachment_types[e["type"]] += 1
         return
 
-    if etype not in ("user", "assistant"):
+    if etype not in ("user", "assistant") or rec.meta:
         return
-    if entry.get("isMeta"):
-        return
-
-    ts_raw = entry.get("timestamp") or ""
-    day, hour, weekday, ts = "", None, None, None
-    try:
-        ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).astimezone()
-        day = ts.strftime("%Y-%m-%d")
+    hour = weekday = None
+    if ts is not None:
         hour, weekday = ts.hour, ts.weekday()
-    except Exception:
-        pass
-    if day:
         st.last_day = day
+    if rec.cwd and project not in st.project_cwd:
+        st.project_cwd[project] = rec.cwd
 
-    cwd = entry.get("cwd")
-    if cwd and project not in st.project_cwd:
-        st.project_cwd[project] = cwd
-
-    # date-window filter (used to build a range-scoped Stats). When no window is
-    # set (all-time) undated entries are kept exactly as before.
+    # date-window filter (used to build a range-scoped Stats). When no window is set (all-time) undated entries
+    # are kept exactly as before.
     if min_day is not None and (not day or day < min_day):
         return
     if max_day is not None and (not day or day > max_day):
         return
 
-    sid = entry.get("sessionId")
-    branch = entry.get("gitBranch") or "(none)"
-    sess = st.touch_session(sid, ts_raw, project)
-    side = bool(entry.get("isSidechain"))      # subagent work, kept out of turn/verification tracking
+    sid = rec.sid
+    branch = rec.branch or "(none)"
+    sess = st.touch_session(sid, rec.ts_raw, project)
+    side = rec.side                                  # subagent work, kept out of turn/verification tracking
     st.hc["entries"] += 1
     if day:
         st.hc["entries_dated"] += 1
@@ -586,227 +850,209 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
             st.feature_days["subagents"].add(day)
     if sess is not None and ts is not None and (sess["start_dt"] is None or ts < sess["start_dt"]):
         sess["start_dt"] = ts
-    pdec = entry.get("permissionDecision")
-    if isinstance(pdec, dict) and day:
-        st.hc["permission_decisions"] += 1
-        st.perm_decisions.append((day, str(pdec.get("decision")), str(pdec.get("source"))))
     if day:
+        for e in ev:
+            if e["kind"] == "permission_decision":
+                st.hc["permission_decisions"] += 1
+                st.perm_decisions.append((day, e["decision"], e["source"]))
         st.days[day]["messages"] += 1
     if hour is not None:
         st.heatmap[(weekday, hour)] += 1
         if day:
-            # 10-minute activity buckets — the basis for "active time"
+            # 10-minute activity buckets: the basis for "active time"
             st.day_buckets[day].add(hour * 6 + ts.minute // 10)
             if hour >= QUIET_START or hour < QUIET_END:
                 st.days[day]["late_msgs"] += 1
 
-    msg = entry.get("message") or {}
-    content = msg.get("content")
-
     # ------------------------------------------------------------------ user
     if etype == "user":
-        # failed tool results ride back on user-type entries
-        if isinstance(content, list):
-            _handle_tool_results(content, st, sess, day, ts, side)
-        text = None
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            texts = [b.get("text", "") for b in content
-                     if isinstance(b, dict) and b.get("type") == "text"]
-            if texts:
-                text = "\n".join(texts)
-        if not text:
-            return
-        # slash commands
-        cmd = CMD_RE.search(text)
-        if cmd:
-            st.slash[cmd.group(1)] += 1
-            if day:
-                st.feature_days["slash"].add(day)
-            return  # command invocations aren't hand-typed prompts
-        if text.startswith("<local-command") or text.startswith("<command-"):
-            return
-        if "[Request interrupted" in text:
-            st.errors += 1
-            if day:
-                st.days[day]["interruptions"] += 1
-            if sess is not None and not side and sess["turn"] is not None:
-                sess["turn"]["intr"] = True
-            return
-        lines = count_lines(text)
-        words = len(text.split())
-        if day and CORRECT_RE.match(text.strip()):
-            st.days[day]["corrections"] += 1
-        if day:
-            st.days[day]["prompts"] += 1
-            st.days[day]["prompt_lines"] += lines
-            st.days[day]["prompt_words"] += words
-            # ~4 chars per token: estimate of tokens the human typed
-            st.days[day]["human_tokens"] += max(1, len(text) // 4)
-        if sess is not None and not side:
-            _begin_turn(st, sess, sid, day, ts, bool(CORRECT_RE.match(text.strip())))
-        st.prompt_words += words
-        st.prompt_chars += len(text)
-        st.projects[project]["prompts"] += 1
-        if sess:
-            sess["prompts"] += 1
-        preview = text.strip().replace("\n", " ")[:120]
-        st.longest_prompts.append((lines, words, preview, day))
-        st.longest_prompts.sort(key=lambda x: -x[0])
-        del st.longest_prompts[40:]   # keep a pool so range-filtering still yields 8
+        for e in ev:
+            if e["kind"] == "tool_result":
+                _handle_tool_result(e, st, sess, day, ts, side)
+        for e in ev:
+            if e["kind"] != "prompt":
+                continue
+            cls = e["class"]
+            if cls == "command":
+                st.slash[e["command"]] += 1
+                if day:
+                    st.feature_days["slash"].add(day)
+            elif cls == "interrupt":
+                st.errors += 1
+                if day:
+                    st.days[day]["interruptions"] += 1
+                if sess is not None and not side and sess["turn"] is not None:
+                    sess["turn"]["intr"] = True
+            elif cls == "typed":
+                text = e["text"]
+                lines = count_lines(text)
+                words = len(text.split())
+                correction = bool(CORRECT_RE.match(text.strip()))
+                if day and correction:
+                    st.days[day]["corrections"] += 1
+                if day:
+                    st.days[day]["prompts"] += 1
+                    st.days[day]["prompt_lines"] += lines
+                    st.days[day]["prompt_words"] += words
+                    # ~4 chars per token: estimate of tokens the human typed
+                    st.days[day]["human_tokens"] += max(1, len(text) // 4)
+                if sess is not None and not side:
+                    _begin_turn(st, sess, sid, day, ts, correction)
+                st.prompt_words += words
+                st.prompt_chars += len(text)
+                st.projects[project]["prompts"] += 1
+                if sess:
+                    sess["prompts"] += 1
+                preview = text.strip().replace("\n", " ")[:120]
+                st.longest_prompts.append((lines, words, preview, day))
+                st.longest_prompts.sort(key=lambda x: -x[0])
+                del st.longest_prompts[40:]   # keep a pool so range-filtering still yields 8
         return
 
     # -------------------------------------------------------------- assistant
-    usage = msg.get("usage") or {}
-    model = msg.get("model") or "unknown"
-    mid = msg.get("id") or entry.get("uuid")
-    dedup_key = (mid, entry.get("requestId"))
+    for e in ev:
+        if e["kind"] == "response":
+            _project_response(e, st, sess, sid, side, day, ts, project, branch)
+        elif e["kind"] == "tool_call":
+            _project_tool_call(e, st, sess, sid, side, day, ts, project, branch)
+
+
+def _project_response(e, st, sess, sid, side, day, ts, project, branch):
+    model, mid = e["model"], e["message_id"]
+    usage = e["usage"]
+    dedup_key = (mid, e["request_id"])
     st.hc["assistant_lines"] += 1
-    if msg.get("stop_reason"):
+    if e["stop_reason"]:
         st.hc["stop_reason"] += 1
-        if msg.get("stop_reason") == "end_turn" and sess is not None and not side:
+        if e["stop_reason"] == "end_turn" and sess is not None and not side:
             _end_turn(st, sess, ts)
-    td = entry.get("thinkingDurationMs")
-    if isinstance(td, (int, float)) and day and (mid, "think") not in st.seen_msg_ids:
+    if e["thinking_ms"] is not None and day and (mid, "think") not in st.seen_msg_ids:
         st.seen_msg_ids.add((mid, "think"))
         st.hc["thinking"] += 1
-        st.thinking.append((day, td))
+        st.thinking.append((day, e["thinking_ms"]))
 
-    if usage and dedup_key in st.seen_msg_ids:
+    if usage is not None and dedup_key in st.seen_msg_ids:
         st.hc["duplicate_lines"] += 1
-    if usage and dedup_key not in st.seen_msg_ids:
-        st.seen_msg_ids.add(dedup_key)
-        i = usage.get("input_tokens", 0) or 0
-        o = usage.get("output_tokens", 0) or 0
-        cw = usage.get("cache_creation_input_tokens", 0) or 0
-        cr = usage.get("cache_read_input_tokens", 0) or 0
-        p = price_for(model)
-        cost = (i * p["in"] + o * p["out"] + cw * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1_000_000
-        st.hc["assistant_msgs"] += 1
-        missing = [k for k in USAGE_KEYS
-                   if k not in usage or not isinstance(usage[k], (int, float, type(None)))]
-        if not missing:
-            st.hc["usage_complete"] += 1
-        for k in missing:
-            st.usage_missing[k] += 1
-        if entry.get("effort") and day:
-            st.hc["effort"] += 1
-            st.efforts.append((day, str(entry["effort"])))
-        if day:
-            d = st.days[day]
-            d["input"] += i; d["output"] += o
-            d["cache_read"] += cr; d["cache_write"] += cw
-            d["cost"] += cost
-            # what caching saved: reads billed at 10% instead of 100%, minus the 25% write premium
-            d["cache_savings"] += (cr * 0.90 - cw * 0.25) * p["in"] / 1_000_000
-        m = st.models[model]
-        m["msgs"] += 1; m["input"] += i; m["output"] += o
-        m["cache_read"] += cr; m["cache_write"] += cw; m["cost"] += cost
-        pr = st.projects[project]
-        pr["input"] += i; pr["output"] += o; pr["cost"] += cost
-        if day:
-            pr["days"][day]["output"] += o
-        if sid:
-            pr["sessions"].add(sid)
-        if sess:
-            sess["output"] += o
-            sess["cost"] += cost
-            sess["model_cost"][model] += cost
-            if sess["api_calls"] == 0:
-                sess["first_call_cost"] = cost
-            elif cw > cr:
-                sess["cache_resets"] += 1
-            sess["api_calls"] += 1
-        b = st.branches[branch]
-        b["msgs"] += 1; b["output"] += o
+    if usage is None or dedup_key in st.seen_msg_ids:
+        return
+    st.seen_msg_ids.add(dedup_key)
+    i, o, cw, cr = usage["input"], usage["output"], usage["cache_write"], usage["cache_read"]
+    p = price_for(model, day)
+    cost = (i * p["in"] + o * p["out"] + cw * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1_000_000
+    st.hc["assistant_msgs"] += 1
+    if sid:
+        st.session_model_out[(sid, model)] += o
+    if not e["usage_missing"]:
+        st.hc["usage_complete"] += 1
+    for k in e["usage_missing"]:
+        st.usage_missing[k] += 1
+    if e["effort"] and day:
+        st.hc["effort"] += 1
+        st.efforts.append((day, e["effort"]))
+    if day:
+        d = st.days[day]
+        d["input"] += i; d["output"] += o
+        d["cache_read"] += cr; d["cache_write"] += cw
+        d["cost"] += cost
+        # what caching saved: reads billed at 10% instead of 100%, minus the 25% write premium
+        d["cache_savings"] += (cr * 0.90 - cw * 0.25) * p["in"] / 1_000_000
+    m = st.models[model]
+    m["msgs"] += 1; m["input"] += i; m["output"] += o
+    m["cache_read"] += cr; m["cache_write"] += cw; m["cost"] += cost
+    pr = st.projects[project]
+    pr["input"] += i; pr["output"] += o; pr["cost"] += cost
+    if day:
+        pr["days"][day]["output"] += o
+    if sid:
+        pr["sessions"].add(sid)
+    if sess:
+        sess["output"] += o
+        sess["cost"] += cost
+        sess["model_cost"][model] += cost
+        if sess["api_calls"] == 0:
+            sess["first_call_cost"] = cost
+        elif cw > cr:
+            sess["cache_resets"] += 1
+        sess["api_calls"] += 1
+    b = st.branches[branch]
+    b["msgs"] += 1; b["output"] += o
 
-    # tool calls + lines of code
-    if isinstance(content, list):
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
-                continue
-            tid = block.get("id")
-            if tid:
-                if tid in st.seen_tool_ids:
-                    continue
-                st.seen_tool_ids.add(tid)
-            name = block.get("name", "?")
-            st.tools[name] += 1
-            feat = "mcp" if name.startswith("mcp__") else TOOL_FEATURES.get(name)
-            if feat and day:
-                st.feature_days[feat].add(day)
-            if name in READ_TOOLS:
+
+def _project_tool_call(e, st, sess, sid, side, day, ts, project, branch):
+    tid = e["id"]
+    if tid:
+        if tid in st.seen_tool_ids:
+            return
+        st.seen_tool_ids.add(tid)
+    name = e["name"]
+    st.tools[name] += 1
+    feat = "mcp" if name.startswith("mcp__") else TOOL_FEATURES.get(name)
+    if feat and day:
+        st.feature_days[feat].add(day)
+    if name in READ_TOOLS:
+        if day:
+            st.days[day]["reads"] += 1
+        if sess:
+            sess["reads"] += 1
+    elif name in WRITE_TOOLS:
+        if day:
+            st.days[day]["writes"] += 1
+        if sess:
+            sess["writes"] += 1
+    elif name in CMD_TOOLS:
+        if sess:
+            sess["bash"] += 1
+    elif name == "Agent":
+        st.subagents[e["subagent_type"] or "unknown"] += 1
+    st.hc["tool_uses"] += 1
+    is_cmd = name in CMD_TOOLS
+    cmd = e["command"] if is_cmd else None
+    kind = classify_cmd(cmd) if is_cmd else None
+    if tid:
+        st.pending_tools[tid] = {
+            "name": name, "ts": ts, "sid": sid, "side": side, "kind": kind,
+            "family": cmd_family(cmd) if is_cmd else name}
+    fp0 = e["file_path"]
+    if day and is_cmd and isinstance(cmd, str):
+        for cat in risky_categories(cmd):
+            st.safety.append((day, cat))
+    if day and fp0 and (name in WRITE_TOOLS or name == "Read") and SECRET_PATH_RE.search(fp0):
+        st.safety.append((day, "secret_file_touched"))
+    if sess is not None and not side:
+        sess["seq"] += 1
+        if name in WRITE_TOOLS:
+            sess["last_write_seq"] = sess["seq"]
+            if sess["first_edit_s"] is None and ts is not None and sess["start_dt"] is not None:
+                sess["first_edit_s"] = max(0.0, (ts - sess["start_dt"]).total_seconds())
+            if fp0:
                 if day:
-                    st.days[day]["reads"] += 1
-                if sess:
-                    sess["reads"] += 1
-            elif name in WRITE_TOOLS:
-                if day:
-                    st.days[day]["writes"] += 1
-                if sess:
-                    sess["writes"] += 1
-            elif name in CMD_TOOLS:
-                if sess:
-                    sess["bash"] += 1
-            elif name == "Agent":
-                inp0 = block.get("input") or {}
-                st.subagents[inp0.get("subagent_type") or "unknown"] += 1
-            inp = block.get("input") or {}
-            st.hc["tool_uses"] += 1
-            is_cmd = name in CMD_TOOLS
-            cmd = inp.get("command") if is_cmd else None
-            kind = classify_cmd(cmd) if is_cmd else None
-            if tid:
-                st.pending_tools[tid] = {
-                    "name": name, "ts": ts, "sid": sid, "side": side, "kind": kind,
-                    "family": cmd_family(cmd) if is_cmd else name}
-            fp0 = inp.get("file_path") or inp.get("notebook_path") or ""
-            if day and is_cmd and isinstance(cmd, str):
-                for cat in risky_categories(cmd):
-                    st.safety.append((day, cat))
-            if day and fp0 and (name in WRITE_TOOLS or name == "Read") and SECRET_PATH_RE.search(fp0):
-                st.safety.append((day, "secret_file_touched"))
-            if sess is not None and not side:
-                sess["seq"] += 1
-                if name in WRITE_TOOLS:
-                    sess["last_write_seq"] = sess["seq"]
-                    if sess["first_edit_s"] is None and ts is not None and sess["start_dt"] is not None:
-                        sess["first_edit_s"] = max(0.0, (ts - sess["start_dt"]).total_seconds())
-                    if fp0:
-                        if day:
-                            st.edits.append((day, sid, fp0, project))
-                        if TEST_FILE_RE.search(fp0):
-                            sess["test_files"] += 1
-                elif is_cmd:
-                    sess["last_cmd_seq"] = sess["seq"]
-                    if kind in ("test", "build", "lint"):
-                        sess["last_verify_seq"] = sess["seq"]
-                if sess["turn"] is not None:
-                    sess["turn"]["steps"] += 1
-            loc = 0
-            if name in CODE_TOOLS_WRITE:
-                loc = count_lines(inp.get("content"))
-            elif name in CODE_TOOLS_EDIT:
-                loc = count_lines(inp.get("new_string"))
-            elif name == "MultiEdit":
-                loc = sum(count_lines(e.get("new_string")) for e in inp.get("edits", [])
-                          if isinstance(e, dict))
-            elif name == "NotebookEdit":
-                loc = count_lines(inp.get("new_source"))
-            if loc:
-                if day:
-                    st.days[day]["loc"] += loc
-                st.projects[project]["loc"] += loc
-                if day:
-                    st.projects[project]["days"][day]["loc"] += loc
-                st.branches[branch]["loc"] += loc
-                if sess:
-                    sess["loc"] += loc
-                fp = inp.get("file_path") or inp.get("notebook_path")
-                if fp:
-                    st.files_touched[os.path.basename(fp)] += loc
-                    st.projects[project]["files"][os.path.basename(fp)] += loc
+                    st.edits.append((day, sid, fp0, project))
+                if TEST_FILE_RE.search(fp0):
+                    sess["test_files"] += 1
+        elif is_cmd:
+            sess["last_cmd_seq"] = sess["seq"]
+            if kind in ("test", "build", "lint"):
+                sess["last_verify_seq"] = sess["seq"]
+        if sess["turn"] is not None:
+            sess["turn"]["steps"] += 1
+    loc = e["loc"]
+    if loc:
+        if day:
+            st.days[day]["loc"] += loc
+        st.projects[project]["loc"] += loc
+        if day:
+            st.projects[project]["days"][day]["loc"] += loc
+        st.branches[branch]["loc"] += loc
+        if sess:
+            sess["loc"] += loc
+        if fp0:
+            st.files_touched[os.path.basename(fp0)] += loc
+            st.projects[project]["files"][os.path.basename(fp0)] += loc
+
+
+def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None):
+    """Raw log line -> Stats (adapter + projector). Kept for callers that have a raw line, not a Record."""
+    project_record(adapt_entry(entry), project, st, min_day, max_day)
 
 
 # ---------------------------------------------------------------------------
@@ -816,10 +1062,9 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
 # Entry types we understand. "handled" ones feed metrics; "ignored" ones were seen in real logs and are
 # known not to be metric inputs (docs/SCHEMA_NOTES.md). Anything else is reported as a NEW type in Data
 # Health, so a format change is visible instead of silently dropped.
-HANDLED_ENTRY_TYPES = frozenset({"user", "assistant", "system", "attachment", "ai-title", "permission-mode"})
-# "cost-state" is Claude Code's own running totals for a session (cost, tokens per model, lines added): not read
-# yet, but a candidate independent cross-check for our numbers (docs/SCHEMA_NOTES.md).
-IGNORED_ENTRY_TYPES = frozenset({"atis-latch", "last-prompt", "tools-used", "queue-operation", "mode", "cost-state"})
+HANDLED_ENTRY_TYPES = frozenset({"user", "assistant", "system", "attachment", "ai-title", "permission-mode",
+                                 "cost-state"})
+IGNORED_ENTRY_TYPES = frozenset({"atis-latch", "last-prompt", "tools-used", "queue-operation", "mode"})
 
 # Claude Code sets a previous transcript aside as "<session>.orphaned-<ts>-<id>.jsonl" (and
 # "<session>.jsonl.superseded-<ts>") instead of overwriting it. Reading such a copy as a normal
@@ -913,7 +1158,8 @@ class Scanner:
         self.restored = set()    # paths served from the archive on the last scan (the original file is gone)
         self._from_archive = set()
         self._cache = {}     # path -> (mtime, size)
-        self._entries = {}   # path -> list[dict]
+        self._entries = {}   # path -> list[dict]: raw lines
+        self._records = {}   # path -> list[Record|None]: the same lines in canonical form (1:1 with _entries)
         self._tail = {}      # path -> read_tail checkpoint
         self._bad = {}       # path -> (mid_file_decode_errors, torn_last_line_errors)
         self.bytes_read = 0      # bytes read from transcripts by this scanner (for tests and the status line)
@@ -954,13 +1200,16 @@ class Scanner:
                     continue
                 self.bytes_read += state["offset"] - (0 if (rewritten or not prev) else prev["offset"])
                 new, bad = decode_lines(lines)
+                recs = adapt_entries(new)
                 if rewritten or path not in self._entries or path in self._from_archive:
                     self._from_archive.discard(path)
                     self._entries[path] = new
+                    self._records[path] = recs
                     self._census[path] = census_entries(new)
                     mid = bad
                 else:
                     self._entries[path].extend(new)
+                    self._records[path].extend(recs)
                     np_, nt = census_entries(new)
                     self._census[path][0].update(np_)
                     self._census[path][1].update(nt)
@@ -985,6 +1234,7 @@ class Scanner:
                     continue
                 new, bad = decode_lines(self.archive.load_lines(src["id"]))
                 self._entries[path] = new
+                self._records[path] = adapt_entries(new)
                 self._census[path] = census_entries(new)
                 self._tail.pop(path, None)
                 self._bad[path] = (bad, 0)
@@ -997,6 +1247,7 @@ class Scanner:
             if path not in found:
                 self._from_archive.discard(path)
                 self._entries.pop(path, None)
+                self._records.pop(path, None)
                 self._cache.pop(path, None)
                 self._tail.pop(path, None)
                 self._bad.pop(path, None)
@@ -1017,11 +1268,14 @@ class Scanner:
         with self._lock:
             self.scan()
             st = Stats()
-            for path, entries in self._entries.items():
+            for path, records in self._records.items():
                 project = project_label(self.root, path)
-                for e in entries:
+                for rec in records:
+                    if rec is None:                 # the line could not be adapted (not a JSON object)
+                        st.parse_errors += 1
+                        continue
                     try:
-                        parse_entry(e, project, st, min_day, max_day)
+                        project_record(rec, project, st, min_day, max_day)
                     except Exception:
                         st.parse_errors += 1
             mid = sum(m for m, _t in self._bad.values())
@@ -1491,6 +1745,20 @@ def analyze_schema(paths, types, manifest=None, min_entries=SCHEMA_MIN_ENTRIES) 
                  "`%s` on %s entries is present in other versions but missing here. Numbers built on it may be wrong "
                  "for the sessions recorded with those versions." % (path, et), metrics, gone)
 
+    # Lines written by a Claude Code version none of the adapters claims are still read (by the newest adapter),
+    # but nobody has checked that they mean what the dashboard assumes.
+    unverified = Counter()
+    for (_et, ver), n in types.items():
+        if ver != "?" and adapter_for_version(ver) == FALLBACK_ADAPTER[0]:
+            unverified[ver] += n
+    for ver, n in sorted(unverified.items()):
+        findings.append({"id": "unverified_version:%s" % ver, "kind": "unverified_version", "severity": "info",
+                         "entry_type": "*", "path": "version", "metrics": [], "versions": [ver],
+                         "title": "Claude Code %s has not been verified" % ver,
+                         "detail": "%d log lines come from a version this dashboard has no adapter for (it knows: %s). "
+                                   "They are read like the newest known format; check the numbers they feed."
+                                   % (n, ", ".join(a[0] for a in ADAPTERS))})
+
     if manifest:
         known = manifest["entry_types"]
         new_by_type, retyped = defaultdict(list), defaultdict(list)
@@ -1928,24 +2196,12 @@ class NotificationWatcher:
             self.trackers[sid] = t
         return t
 
-    @staticmethod
-    def _is_real_user_text(content):
-        # Failed tool results ride back on "user"-type entries (see
-        # parse_entry) — a block-list made up entirely of tool_result isn't
-        # a real user message and shouldn't reset the per-task counter.
-        if isinstance(content, list):
-            if content and all(isinstance(b, dict) and b.get("type") == "tool_result"
-                                for b in content):
-                return False
-            return True
-        return bool(content)
-
     def poll_once(self):
         if not self.notify.get("enabled"):
             return
         with self.scanner._lock:
             self.scanner.scan()
-            entries_by_path = dict(self.scanner._entries)
+            records_by_path = dict(self.scanner._records)
         cutoff = time.time() - self.notify["active_window_min"] * 60
         # Snapshot which sessions we already knew about *before* this poll
         # cycle touches anything — a session's logs can span multiple files,
@@ -1963,7 +2219,7 @@ class NotificationWatcher:
         # session — the plan window is account-wide, not per session, so it
         # has to see all of them merged in true chronological order.
         plan_events = []
-        for path, entries in entries_by_path.items():
+        for path, records in records_by_path.items():
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
@@ -1971,7 +2227,7 @@ class NotificationWatcher:
             if mtime < cutoff:
                 continue
             project = project_label(self.scanner.root, path)
-            self._replay(path, entries, project, known_before_poll, pending, plan_events)
+            self._replay(path, records, project, known_before_poll, pending, plan_events)
         for (sid, kind), (value, total) in pending.items():
             self._fire(sid, kind, value, total)
         plan_events.sort(key=lambda e: e[0])
@@ -2017,40 +2273,36 @@ class NotificationWatcher:
                 fired.update(m for m in milestones if pct >= m)
             self._official_prev[kind] = pct
 
-    def _replay(self, path, entries, project, known_before_poll, pending, plan_events):
+    def _replay(self, path, records, project, known_before_poll, pending, plan_events):
         seen = self._seen_counts.get(path, 0)
-        new_entries = entries[seen:]
-        self._seen_counts[path] = len(entries)
-        if not new_entries:
+        new_records = [r for r in records[seen:] if r is not None]
+        self._seen_counts[path] = len(records)
+        if not new_records:
             return
-        baseline_sids = ({e.get("sessionId") for e in new_entries if e.get("sessionId")}
-                          - known_before_poll)
-        for entry in new_entries:
-            etype = entry.get("type")
-            sid = entry.get("sessionId")
-            if etype == "ai-title" and sid:
-                title = entry.get("aiTitle")
-                if title:
-                    self.meta.setdefault(sid, {})["title"] = title
+        baseline_sids = {r.sid for r in new_records if r.sid} - known_before_poll
+        for rec in new_records:
+            sid = rec.sid
+            if rec.src == "ai-title" and sid:
+                for e in rec.events:
+                    if e["kind"] == "title":
+                        self.meta.setdefault(sid, {})["title"] = e["title"]
                 continue
-            if etype not in ("user", "assistant") or entry.get("isMeta") or not sid:
+            if rec.src not in ("user", "assistant") or rec.meta or not sid:
                 continue
             meta = self.meta.setdefault(sid, {})
             meta.setdefault("project", project)
             tracker = self._tracker_for(sid)
-            if etype == "user":
-                content = (entry.get("message") or {}).get("content")
-                if self._is_real_user_text(content):
+            if rec.src == "user":
+                # failed tool results ride back on "user" entries; a block-list made up only of tool results
+                # is not a real user message and must not reset the per-task counter
+                if rec.human_input:
                     tracker.on_user_message()
                 continue
-            usage = (entry.get("message") or {}).get("usage") or {}
-            if not usage:
+            resp = next((e for e in rec.events if e["kind"] == "response"), None)
+            usage = resp["usage"] if resp else None
+            if usage is None:
                 continue
-            input_tokens = usage.get("input_tokens", 0) or 0
-            output_tokens = usage.get("output_tokens", 0) or 0
-            cache_write = usage.get("cache_creation_input_tokens", 0) or 0
-            cache_read = usage.get("cache_read_input_tokens", 0) or 0
-            events = tracker.on_usage(input_tokens, output_tokens, cache_write, cache_read)
+            events = tracker.on_usage(usage["input"], usage["output"], usage["cache_write"], usage["cache_read"])
             if sid in baseline_sids:
                 continue
             for kind, value, total in events:
@@ -2059,13 +2311,10 @@ class NotificationWatcher:
             # window too — same reasoning as baseline_sids above, otherwise
             # reopening the dashboard mid-session would dump that session's
             # entire history into the account-wide total in one shot.
-            try:
-                ts_epoch = datetime.fromisoformat(
-                    (entry.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
-            except ValueError:
+            if rec.ts is None:
                 continue
-            plan_events.append((ts_epoch, weighted_tokens(
-                input_tokens, output_tokens, cache_write, cache_read)))
+            plan_events.append((rec.ts.timestamp(), weighted_tokens(
+                usage["input"], usage["output"], usage["cache_write"], usage["cache_read"])))
 
     def _fire(self, sid, kind, value, total):
         meta = self.meta.get(sid, {})
@@ -2652,6 +2901,53 @@ def _entry_type_status(t) -> str:
     return "handled" if t in HANDLED_ENTRY_TYPES else ("ignored" if t in IGNORED_ENTRY_TYPES else "new")
 
 
+CROSSCHECK_MIN_TOKENS = 1000      # sessions with fewer output tokens than this are too small to compare
+CROSSCHECK_TOLERANCE = 0.03       # we may count up to 3% fewer output tokens than Claude Code recorded
+
+
+def crosscheck(st: Stats) -> dict:
+    """Compare our output-token counts with the session totals Claude Code writes into the log itself (cost-state).
+
+    One-sided on purpose: a snapshot can be older than the end of the log, and subagent files are read after the main
+    file, so we may legitimately count MORE than a snapshot; counting clearly FEWER means we are missing tokens.
+    Only models that appear in our own per-session counts are compared: Claude Code's totals also include calls
+    that never appear in the transcript (measured: a small Haiku model), and input/cache counters and cost are not
+    comparable for the same reason, so they are deliberately not checked."""
+    rows = []
+    for sid, snap in st.reconcile.items():
+        theirs = ours = 0
+        for model, u in snap["models"].items():
+            if (sid, model) in st.session_model_out:
+                theirs += u["output"]
+                ours += st.session_model_out[(sid, model)]
+        if theirs >= CROSSCHECK_MIN_TOKENS:
+            rows.append({"sid": sid, "ours": ours, "theirs": theirs, "ratio": ours / theirs,
+                         "ok": ours >= theirs * (1 - CROSSCHECK_TOLERANCE)})
+    return {"snapshots": len(st.reconcile), "compared": len(rows), "bad": [r for r in rows if not r["ok"]],
+            "worst": min((r["ratio"] for r in rows), default=None),
+            "best": max((r["ratio"] for r in rows), default=None),
+            "median": _median([r["ratio"] for r in rows]) if rows else None}
+
+
+def _crosscheck_capability(st: Stats):
+    c = crosscheck(st)
+    if not c["snapshots"]:
+        return ("crosscheck", "Cross-check with Claude Code's totals", "all", "missing",
+                "These logs carry no session totals from Claude Code, so our token counts cannot be checked against its own.")
+    if not c["compared"]:
+        return ("crosscheck", "Cross-check with Claude Code's totals", "all", "missing",
+                "%d session total%s found but none is large enough to compare yet." % (
+                    c["snapshots"], "" if c["snapshots"] == 1 else "s"))
+    if c["bad"]:
+        return ("crosscheck", "Cross-check with Claude Code's totals", "all", "partial",
+                "%d of %d sessions: we count fewer output tokens than Claude Code recorded (lowest %.0f%% of its figure). "
+                "Token and cost totals may be too low." % (len(c["bad"]), c["compared"], 100 * c["worst"]))
+    return ("crosscheck", "Cross-check with Claude Code's totals", "all", "ok",
+            "Output tokens for %d session%s agree with the totals Claude Code recorded itself: we count %.1f%% to %.1f%% "
+            "of its figure. Above 100%% is normal, because its snapshot can be older than the end of the log."
+            % (c["compared"], "" if c["compared"] == 1 else "s", 100 * c["worst"], 100 * c["best"]))
+
+
 def archive_card(st: Stats) -> dict:
     """What the Data Health page says about the local archive: status plus one plain sentence."""
     a = dict(st.archive or {"available": sqlite3 is not None, "exists": False, "enabled": False, "path": None,
@@ -2737,6 +3033,7 @@ def build_health(st: Stats) -> dict:
                      % (st.retention["days"], st.retention["source"], first, age,
                         "your local archive keeps logs after Claude Code deletes them." if kept else
                         "older history is gone unless you raised cleanupPeriodDays or turned on the local archive.")))
+    caps.append(_crosscheck_capability(st))
     titled = sum(1 for sid in st.sessions if sid in st.session_titles)
     caps.append(("titles", "Session titles", "weekly",
                  _field_status(titled, len(st.sessions)),
@@ -2745,6 +3042,8 @@ def build_health(st: Stats) -> dict:
         "capabilities": [{"id": i, "label": l, "tab": t, "status": s, "detail": d} for i, l, t, s, d in caps],
         "entry_types": [{"type": str(k), "n": v, "status": _entry_type_status(k)} for k, v in st.entry_types.most_common()],
         "archive": archive_card(st),
+        "adapters": [{"name": k, "n": v} for k, v in st.adapters.most_common()],
+        "extras": [{"entry_type": et, "key": k, "n": v} for (et, k), v in st.extras_keys.most_common(10)],
         "schema": analyze_schema(st.census_paths, st.census_types, load_schema_manifest()),
         "unknown_entry_types": [{"type": str(k), "n": v} for k, v in st.entry_types.most_common()
                                 if _entry_type_status(k) == "new"],
@@ -5476,7 +5775,8 @@ function renderHealth(){
     (H.entrypoints.length?'<span class="chip2">Via '+H.entrypoints.map(v=>'<b>'+esc(v.name)+'</b>').join(', ')+'</span>':'')+
     '<span class="chip2'+(H.parse_errors?' warn':'')+'">Unparsed lines <b>'+H.parse_errors+'</b></span>'+
     '<span class="chip2">Duplicate lines dropped <b>'+H.duplicate_lines+'</b></span>'+
-    '<span class="chip2'+(H.unknown_entry_types.length?' warn':'')+'">New entry types <b>'+H.unknown_entry_types.length+'</b></span>';
+    '<span class="chip2'+(H.unknown_entry_types.length?' warn':'')+'">New entry types <b>'+H.unknown_entry_types.length+'</b></span>'+
+    H.adapters.map(a=>'<span class="chip2'+(a.name==='fallback'?' warn':'')+'">Reader <b>'+esc(a.name)+'</b> '+a.n.toLocaleString()+' lines</span>').join('');
   document.querySelector('#tHealth tbody').innerHTML=H.entry_types.map(t=>'<tr><td><code>'+esc(t.type)+'</code></td><td class="num">'+t.n.toLocaleString()+'</td><td>'+(t.status==='handled'?'yes':t.status==='ignored'?'no (known, not used yet)':'<b>new type, not read</b>')+'</td></tr>').join('');
   $('healthLimits').innerHTML=H.limits.map(l=>'<li>'+esc(l)+'</li>').join('');
   const sel=$('catTab'),tabs=[...new Set(Object.values(D.catalog).map(m=>m.tab))];
