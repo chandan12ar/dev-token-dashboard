@@ -190,6 +190,11 @@ Everything stays on your machine. The server binds to `127.0.0.1` only,
 Chart.js is bundled locally, and the page makes zero external requests.
 Your prompts and logs never leave your disk.
 
+One optional feature writes to disk: the **local archive**, which keeps a private copy of your transcripts so history
+survives Claude Code's clean-up (it deletes logs after 30 days by default). It is **off until you run
+`--archive-enable`**, can be switched on only from the command line, and stores raw transcript text (prompts, code,
+command output), so read the notice it shows first. See [SETUP.md](SETUP.md#3c-optional-keep-your-history-local-archive).
+
 ## Notes
 
 - Cost is an *estimate* at public API pricing — on a subscription plan your

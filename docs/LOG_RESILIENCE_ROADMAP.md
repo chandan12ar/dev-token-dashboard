@@ -1,6 +1,6 @@
 # Log Resilience Roadmap
 
-**Status:** Phase 0 done; Phase 1 largely done (see tables); Phase 2 not started · **Branch:** `claude/elegant-heisenberg-c7jxms`
+**Status:** Phase 0 done; Phase 1 largely done; Phase 2 done except the items marked below; Phase 3 not started · **Branch:** `claude/elegant-heisenberg-c7jxms`
 **Purpose:** make AI Fluency Insights trustworthy when Claude Code's log format changes, when we re-scan,
 and when Claude Code deletes old logs. This is a living document: update the status column as work lands.
 
@@ -218,15 +218,27 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 | Cross-check against Claude Code's own `cost-state` totals (new in Phase 0, see `SCHEMA_NOTES.md`) for *meaning* drift | ☐ |
 
 ### Phase 2: Archive and checkpoints (answers Q2 and Q3)
+Defaults used because the owner decisions in section 8 were not answered: **opt-in, command-line only, raw lines stored, full history**. All are easy to change.
+
 | Item | Status |
 |---|---|
-| SQLite store: `raw_events`, `sources`, `checkpoints`, `schema_census`, `user_version` migrations | ☐ |
-| Opt-in prompt, consent record, `--archive-status`, `--purge-archive`, size cap and meter | ☐ |
-| Byte-offset tail reader with torn-line, truncate and rewrite handling | ☐ |
-| Idempotent ingest, one transaction for events plus checkpoint | ☐ |
-| First-run backfill from existing logs; "gone" marking instead of delete | ☐ |
-| Scanner reads archive plus live files; `--rebuild` | ☐ |
-| Ingest triggers when the dashboard is closed (decide: hook / scheduled task) | ☐ |
+| Byte-offset tail reader (`read_tail`): reads only new bytes, advances past full lines only, SHA-1 anchors detect truncation and rewrites | ☑ |
+| Scanner extends entries and census incrementally; a rewritten file is replaced, never appended. Property test: a file growing mid-line matches a fresh scan and each byte is read once | ☑ |
+| SQLite store (`Archive`): `meta`, `sources` (per file generation), `lines` (zlib), `user_version`, WAL, mode 0600 | ☑ |
+| Opt-in: nothing written until `--archive-enable`, which prints the privacy trade-off and asks. Command-line only (the web page cannot enable it) | ☑ |
+| `--archive-status`, `--archive-disable`, `--archive-purge` (asks), `--archive-sync` (for a scheduled task), size cap (2 GB) that pauses capture and says so | ☑ |
+| Idempotent ingest: lines and checkpoint in one `BEGIN IMMEDIATE` transaction; two processes cannot duplicate lines | ☑ |
+| Rewritten file starts a new generation; older generations kept; files that disappear are marked `gone_at`, never deleted | ☑ |
+| Set-aside (`.orphaned-`) copies are archived raw but never counted | ☑ |
+| First-run backfill from existing logs (runs inside `--archive-enable`) | ☑ |
+| Scanner restores deleted files from the archive, per logs folder; a file that reappears is read from disk | ☑ verified on a real log: totals identical after deleting the file |
+| Data Health "Local archive" card, History window card aware of the archive | ☑ |
+| Fails soft: a corrupt or missing-sqlite archive never breaks the dashboard | ☑ |
+| Ingest while the dashboard is closed | ◐ `--archive-sync` plus documented Task Scheduler / cron lines. **Not automatic**: the user must schedule it. A sync at least every week or two is enough because Claude Code deletes only logs older than the retention period |
+| `--rebuild` (re-derive from raw) | ☐ belongs with Phase 3 (needs the canonical model) |
+| Persisted checkpoints used by the *scanner* so a restarted dashboard skips already-read bytes | ☐ the scanner's checkpoint is in memory; a restart reads everything once. The archive's checkpoints are persisted |
+| Compression / size work: 3.4 MB log became 2.1 MB (about 1.6x); block compression gains only ~15% here. Bigger wins would come from storing repeated tool definitions and echoed tool inputs once | ☐ measure monthly volume first |
+| Windows: file locking, OneDrive folders, `icacls` privacy of the archive file (POSIX 0600 is tested; Windows relies on the user-profile ACL) | ☐ untested on Windows |
 
 ### Phase 3: Canonical model and adapters (answers Q4)
 | Item | Status |
@@ -269,6 +281,7 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 | Date | Change |
 |---|---|
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
+| 2026-11-02 | Phase 2: incremental tail reader and opt-in SQLite archive with restore of deleted logs, `--archive-*` commands, Data Health card. 31 new tests (199 total); mutation-checked; verified on a real log. |
 | 2026-11-02 | Drift sentinel shipped: per-file census, baseline manifest, Data Health panel + banner, `--schema-report`, `--collect-fixture`, History window card. 16 new tests (168 total). Tested on a real log (clean) and a simulated field rename (detected, banner shown). |
 | 2026-11-02 | Phase 1 quick fixes F1 to F4 and entry-type classification shipped with 8 new tests (152 total passing). Live log confirmed append-only over the session. |
 | 2026-11-02 | Phase 0: census tool, `SCHEMA_NOTES.md`, docs verified, findings F1 to F5 recorded. Phase 1 items added. |

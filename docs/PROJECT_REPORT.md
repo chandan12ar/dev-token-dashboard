@@ -833,8 +833,11 @@ Being direct about what it does not do:
 - **Corrections are detected at the start of a prompt only.**
 - **It can only see logs that still exist.** Claude Code's documentation says
   session transcripts are kept for 30 days by default (the `cleanupPeriodDays`
-  setting). If your logs are cleaned up, "all time" means "all that remains".
-  Check or raise the setting if you want longer history.
+  setting). If your logs are cleaned up, "all time" means "all that remains",
+  unless you turned on the opt-in local archive (`--archive-enable`), which keeps
+  a private copy and restores deleted files. Organisation-managed settings can
+  pin the retention period, and the archive only helps for logs captured before
+  they were deleted.
 - **Plan usage needs the status-line hook and a subscription.** The live 5-hour
   and 7-day figures are captured by a hook that runs only while a Claude Code
   session is active, and Claude Code provides them for Pro and Max plans. Toast

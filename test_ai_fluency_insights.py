@@ -2071,6 +2071,313 @@ class IncrementalReadTests(_LogFixture):
         self.assertEqual(st.hc["decode_errors_torn"], 0)
 
 
+class _ArchiveBase(_LogFixture):
+    """Helpers shared by the archive test classes (no tests of its own)."""
+
+    def setUp(self):
+        super().setUp()
+        self.adir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.adir, True)
+        self.apath = os.path.join(self.adir, "state", "archive.sqlite")
+
+    def _session(self, n=2):
+        for i in range(n):
+            self.prompt("add pagination to the orders list, round %d" % i)
+            self.edit()
+            self.end_turn()
+        return b"".join(afi.json.dumps(e).encode() + b"\n" for e in self.entries)
+
+    def _put(self, rel, data):
+        p = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(data)
+        return p
+
+    def _arc(self, enable=True, **kw):
+        a = afi.Archive(self.apath, **kw)
+        self.addCleanup(a.close)
+        if enable:
+            self.assertTrue(a.enable(), a.last_error)
+        return a
+
+    def _scan(self, arc, root=None):
+        return afi.Scanner(root or self.root, archive=arc)
+
+    def _totals(self, st):
+        return (sum(d["output"] for d in st.days.values()), sum(d["messages"] for d in st.days.values()),
+                len(st.sessions), sorted(st.projects), len(st.turns))
+
+
+class ArchiveTests(_ArchiveBase):
+    """Phase 2b: the opt-in local archive keeps history after Claude Code deletes its logs."""
+
+    # --- consent -----------------------------------------------------------
+    def test_nothing_is_written_until_enabled(self):
+        self._put("proj/s1.jsonl", self._session())
+        arc = self._arc(enable=False)
+        self._scan(arc).build_stats()
+        self.assertFalse(os.path.exists(self.apath))
+        self.assertFalse(arc.enabled)
+        self.assertFalse(os.path.exists(os.path.dirname(self.apath)))
+
+    def test_enable_then_scan_backfills_existing_logs(self):
+        data = self._session()
+        self._put("proj/s1.jsonl", data)
+        arc = self._arc()
+        st = self._scan(arc).build_stats()
+        s = arc.status()
+        self.assertTrue(s["enabled"])
+        self.assertEqual((s["sources"], s["lines"]), (1, data.count(b"\n")))
+        self.assertEqual(st.archive["lines"], s["lines"])
+
+    def test_disable_stops_capture_but_keeps_and_still_restores_data(self):
+        data = self._session()
+        p = self._put("proj/s1.jsonl", data)
+        arc = self._arc()
+        sc = self._scan(arc)
+        before = self._totals(sc.build_stats())
+        arc.disable()
+        with open(p, "ab") as f:
+            f.write(b'{"type":"user"}\n')
+        sc.build_stats()
+        self.assertEqual(arc.status()["lines"], data.count(b"\n"))              # nothing new captured
+        os.remove(p)
+        self.assertEqual(self._totals(self._scan(arc).build_stats()), before)    # old data still restores
+
+    def test_purge_removes_the_files(self):
+        self._put("proj/s1.jsonl", self._session())
+        arc = self._arc()
+        self._scan(arc).build_stats()
+        arc.purge()
+        self.assertFalse(os.path.exists(self.apath))
+        self.assertFalse(arc.exists())
+        self.assertEqual([f for f in os.listdir(os.path.dirname(self.apath)) if f.startswith("archive")], [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits")
+    def test_archive_is_private_to_the_user(self):
+        self._arc()
+        self.assertEqual(os.stat(self.apath).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.dirname(self.apath)).st_mode & 0o777, 0o700)
+
+    # --- ingest ------------------------------------------------------------
+    def test_ingest_is_incremental_and_idempotent(self):
+        data = self._session(3)
+        cut = data.index(b"\n", len(data) // 2) + 1
+        p = self._put("proj/s1.jsonl", data[:cut])
+        arc = self._arc()
+        sc = self._scan(arc)
+        sc.build_stats()
+        sc.build_stats()
+        self.assertEqual(arc.status()["lines"], data[:cut].count(b"\n"))
+        with open(p, "ab") as f:
+            f.write(data[cut:])
+        sc.build_stats()
+        self.assertEqual(arc.status()["lines"], data.count(b"\n"))
+        self._scan(self._arc(enable=False)).build_stats()                        # a fresh process, same db
+        self.assertEqual(arc.status()["lines"], data.count(b"\n"))              # not duplicated
+
+    def test_two_writers_do_not_duplicate_lines(self):
+        data = self._session()
+        p = self._put("proj/s1.jsonl", data)
+        a, b = self._arc(), afi.Archive(self.apath)
+        self.addCleanup(b.close)
+        key = (os.stat(p).st_mtime, os.stat(p).st_size)
+        a.ingest(self.root, p, "proj/s1.jsonl", "transcript", key)
+        b.ingest(self.root, p, "proj/s1.jsonl", "transcript", (0, 0))
+        self.assertEqual(a.status()["lines"], data.count(b"\n"))
+
+    def test_raw_bytes_survive_exactly_including_invalid_utf8(self):
+        raw = b'{"type":"user","message":{"content":"caf\xc3\xa9 \xff"}}\n{"type":"user"}\n'
+        p = self._put("proj/s1.jsonl", raw)
+        arc = self._arc()
+        self._scan(arc).build_stats()
+        src = arc.restorable(self.root, set())[0]
+        self.assertEqual(arc.load_lines(src["id"]), raw.splitlines())
+
+    def test_rewritten_file_starts_a_new_generation_and_keeps_the_old_lines(self):
+        data = self._session(3)
+        p = self._put("proj/s1.jsonl", data)
+        arc = self._arc()
+        sc = self._scan(arc)
+        sc.build_stats()
+        short = b"".join(data.splitlines(True)[:4])
+        with open(p, "wb") as f:
+            f.write(short)
+        sc.build_stats()
+        s = arc.status()
+        self.assertEqual((s["sources"], s["generations"]), (1, 2))
+        self.assertEqual(s["lines"], data.count(b"\n") + short.count(b"\n"))   # old lines kept, nothing lost
+        os.remove(p)                                                              # restore uses the latest version
+        src = arc.restorable(self.root, set())[0]
+        self.assertEqual(len(arc.load_lines(src["id"])), short.count(b"\n"))
+
+    def test_set_aside_copies_are_archived_but_never_counted(self):
+        data = self._session()
+        self._put("proj/s1.jsonl", data)
+        self._put("proj/s1.orphaned-1730000000-abc.jsonl", data)
+        arc = self._arc()
+        st = self._scan(arc).build_stats()
+        self.assertEqual(arc.status()["sources"], 2)
+        base = afi.Scanner(self.root).build_stats()
+        self.assertEqual(self._totals(st), self._totals(base))
+        os.remove(os.path.join(self.root, "proj", "s1.jsonl"))
+        # the live transcript is gone; the set-aside copy must not be restored as if it were a session
+        st2 = self._scan(arc).build_stats()
+        self.assertEqual((self._totals(st2)[2], st2.hc["restored_files"]), (1, 1))      # only the transcript
+
+    # --- restore -----------------------------------------------------------
+    def test_deleted_logs_are_restored_from_the_archive(self):
+        data = self._session(3)
+        p = self._put("-home-u-proj/s1.jsonl", data)
+        self._put("-home-u-proj/s1/subagents/a1.jsonl", b"".join(
+            afi.json.dumps(dict(e, isSidechain=True, uuid=str(e.get("uuid")) + "x")).encode() + b"\n"
+            for e in self.entries[:2]))
+        arc = self._arc()
+        before = self._totals(self._scan(arc).build_stats())
+        for rel in ("-home-u-proj/s1.jsonl", "-home-u-proj/s1/subagents/a1.jsonl"):
+            os.remove(os.path.join(self.root, *rel.split("/")))
+        self.assertEqual(self._totals(afi.Scanner(self.root).build_stats())[0], 0)         # without it: history gone
+        st = self._scan(self._arc(enable=False)).build_stats()                              # new process
+        self.assertEqual(self._totals(st), before)
+        self.assertEqual(st.hc["restored_files"], 2)
+        self.assertIn("restored", afi.build_health(st)["archive"]["note"])
+
+    def test_restore_ignores_archives_made_for_another_logs_folder(self):
+        self._put("proj/s1.jsonl", self._session())
+        arc = self._arc()
+        self._scan(arc).build_stats()
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
+        st = self._scan(arc, other).build_stats()
+        self.assertEqual((len(st.sessions), st.hc["restored_files"]), (0, 0))
+
+    def test_a_file_that_reappears_is_read_from_disk_not_double_counted(self):
+        data = self._session()
+        p = self._put("proj/s1.jsonl", data)
+        arc = self._arc()
+        sc = self._scan(arc)
+        before = self._totals(sc.build_stats())
+        os.remove(p)
+        self.assertEqual(self._totals(sc.build_stats()), before)                 # served from the archive
+        self._put("proj/s1.jsonl", data)
+        st = sc.build_stats()
+        self.assertEqual(self._totals(st), before)
+        self.assertEqual(st.hc["restored_files"], 0)
+
+    # --- safety --------------------------------------------------------------
+    def test_size_cap_pauses_capture_and_says_so(self):
+        self._put("proj/s1.jsonl", self._session())
+        arc = self._arc(max_bytes=1)
+        self._scan(arc).build_stats()
+        s = arc.status()
+        self.assertTrue(s["capped"])
+        self.assertEqual(s["lines"], 0)
+
+    def test_a_broken_archive_never_breaks_the_dashboard(self):
+        data = self._session()
+        self._put("proj/s1.jsonl", data)
+        os.makedirs(os.path.dirname(self.apath))
+        with open(self.apath, "wb") as f:
+            f.write(b"this is not a sqlite database" * 50)
+        arc = afi.Archive(self.apath)
+        self.addCleanup(arc.close)
+        st = self._scan(arc).build_stats()
+        self.assertEqual(self._totals(st)[2], 1)
+        self.assertTrue(arc.status()["last_error"])
+
+    def test_unavailable_sqlite_is_handled(self):
+        from unittest import mock
+        with mock.patch.object(afi, "sqlite3", None):
+            arc = afi.Archive(self.apath)
+            self.assertFalse(arc.enable())
+            self.assertFalse(arc.status()["available"])
+
+    def test_health_reports_the_archive(self):
+        self._put("proj/s1.jsonl", self._session())
+        off = afi.build_health(self._scan(self._arc(enable=False)).build_stats())["archive"]
+        self.assertFalse(off["enabled"])
+        self.assertIn("--archive-enable", off["note"])
+        on = afi.build_health(self._scan(self._arc()).build_stats())["archive"]
+        self.assertTrue(on["enabled"])
+        afi.json.dumps(on)
+
+
+class ArchiveCommandTests(_ArchiveBase):
+    """The --archive-* commands: consent wording, confirmation, and what each one changes."""
+
+    def _run(self, answer="y", **flags):
+        import types
+        args = types.SimpleNamespace(archive_enable=False, archive_disable=False, archive_status=False,
+                                     archive_sync=False, archive_purge=False, yes=False)
+        for k, v in flags.items():
+            setattr(args, k, v)
+        out = []
+        arc = afi.Archive(self.apath)
+        self.addCleanup(arc.close)
+        sc = afi.Scanner(self.root, archive=arc)
+        code = afi.run_archive_command(args, sc, arc, input_fn=lambda _q: answer, print_fn=lambda *a: out.append(" ".join(map(str, a))))
+        return code, "\n".join(out), arc
+
+    def test_enable_explains_the_risk_and_does_nothing_if_declined(self):
+        self._put("proj/s1.jsonl", self._session())
+        code, text, arc = self._run(answer="n", archive_enable=True)
+        self.assertEqual(code, 1)
+        self.assertFalse(os.path.exists(self.apath))
+        for must in ("secrets", "readable only by your user", "30 days", "--archive-purge", "organisation"):
+            self.assertIn(must, text)
+
+    def test_enable_confirmed_backfills_and_mentions_scheduling(self):
+        data = self._session()
+        self._put("proj/s1.jsonl", data)
+        code, text, arc = self._run(archive_enable=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(arc.enabled)
+        self.assertIn("Captured %s lines" % format(data.count(b"\n"), ","), text)
+        self.assertIn("--archive-sync", text)
+
+    def test_enable_with_yes_flag_skips_the_question(self):
+        self._put("proj/s1.jsonl", self._session())
+        code, _t, arc = self._run(answer="n", archive_enable=True, yes=True)
+        self.assertEqual((code, arc.enabled), (0, True))
+
+    def test_sync_needs_the_archive_to_be_on_then_captures_new_lines(self):
+        p = self._put("proj/s1.jsonl", self._session())
+        code, text, _a = self._run(archive_sync=True)
+        self.assertEqual(code, 1)
+        self.assertIn("--archive-enable", text)
+        self._run(archive_enable=True, yes=True)
+        with open(p, "ab") as f:
+            f.write(b'{"type":"user"}\n{"type":"user"}\n')
+        code, text, _a = self._run(archive_sync=True)
+        self.assertEqual(code, 0)
+        self.assertIn("Captured 2 new lines", text)
+
+    def test_disable_pauses_and_status_reports(self):
+        self._put("proj/s1.jsonl", self._session())
+        self._run(archive_enable=True, yes=True)
+        code, text, arc = self._run(archive_disable=True)
+        self.assertEqual((code, arc.enabled), (0, False))
+        _c, text, _a = self._run(archive_status=True)
+        self.assertIn("off (paused)", text)
+
+    def test_purge_asks_first(self):
+        self._put("proj/s1.jsonl", self._session())
+        self._run(archive_enable=True, yes=True)
+        code, _t, _a = self._run(answer="n", archive_purge=True)
+        self.assertEqual(code, 1)
+        self.assertTrue(os.path.exists(self.apath))
+        code, text, _a = self._run(answer="y", archive_purge=True)
+        self.assertEqual(code, 0)
+        self.assertFalse(os.path.exists(self.apath))
+        self.assertIn("Archive deleted", text)
+
+    def test_status_when_nothing_exists(self):
+        code, text, _a = self._run(archive_status=True)
+        self.assertEqual(code, 0)
+        self.assertIn("off and nothing has been captured", text)
+
+
 class HealthAndCatalogTests(_LogFixture):
     def test_missing_signals_are_reported_not_zeroed(self):
         self.prompt("hi")

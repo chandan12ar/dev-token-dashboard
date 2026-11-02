@@ -14,3 +14,8 @@ DevTokenDashboard-Startup.vbs
 # Notification threshold-tracking state (local runtime data)
 .notify_state.json
 .notify_state.json.tmp
+
+# Local transcript archive (contains raw prompts and code; never commit)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

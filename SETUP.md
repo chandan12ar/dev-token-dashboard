@@ -136,6 +136,36 @@ for how this works and why the number can lag by a few minutes when idle.
 Toast notifications are Windows-only for now; on macOS/Linux this sets
 up the accurate numbers only.
 
+## 3c. Optional: keep your history (local archive)
+
+Claude Code deletes transcripts older than `cleanupPeriodDays` (30 days by default), and this dashboard can only see
+logs that still exist, so "all time" shrinks as logs are cleaned up. The archive keeps a private copy.
+
+```
+python ai_fluency_insights.py --archive-enable    # explains the trade-off, asks, then copies your existing logs
+python ai_fluency_insights.py --archive-status    # what is stored, how big, how many files are no longer on disk
+python ai_fluency_insights.py --archive-disable   # stop capturing; keep (and keep using) what is stored
+python ai_fluency_insights.py --archive-purge     # delete it all (asks first)
+```
+
+**Read this before turning it on.** Transcripts contain your prompts, your code, command output and any secrets that
+passed through them. The archive keeps all of that, compressed, for as long as you keep the archive, even after Claude
+Code deletes the originals. It is stored in `~/.ai-fluency-insights/archive.sqlite` (override with `--archive-path` or
+`AFI_ARCHIVE_PATH`), readable only by your user account on macOS and Linux, never sent anywhere, and never served by the
+dashboard. **It is off until you turn it on**, and it can be turned on only from the command line. If your organisation
+sets a short retention period on purpose, check that keeping a copy is allowed.
+
+Once on, the dashboard captures new lines while it runs, and when Claude Code deletes a log the dashboard serves that
+file from the archive instead, so history, streaks and the adoption score do not shrink. Capturing stops by itself at
+2 GB (existing history stays safe). The archive stores logs as they were written, so it can be rebuilt into any future
+format.
+
+**Capturing while the dashboard is closed.** Claude Code deletes a log only after it is older than the retention
+period, so a sync at least every week or two is plenty. Schedule `--archive-sync` (it captures new lines once and exits):
+
+- Windows: `schtasks /Create /TN "AI Fluency archive sync" /SC DAILY /TR "pythonw.exe C:\path\to\ai_fluency_insights.py --archive-sync"`
+- macOS / Linux (cron): `0 12 * * * python3 /path/to/ai_fluency_insights.py --archive-sync`
+
 ## 4. Optional: AI weekly summaries
 
 The Weekly Report tab has an "AI summary" button that turns your week into

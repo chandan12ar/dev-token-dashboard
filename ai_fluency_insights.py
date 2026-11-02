@@ -26,10 +26,16 @@ import sys
 import threading
 import time
 import webbrowser
+import zlib
 from collections import defaultdict, Counter
 from datetime import datetime, timezone, date, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
+
+try:
+    import sqlite3
+except ImportError:          # a few minimal Python builds ship without it; the archive is then unavailable
+    sqlite3 = None
 
 # ---------------------------------------------------------------------------
 # Pricing (USD per 1M tokens). Edit freely — these are estimates for the
@@ -409,6 +415,7 @@ class Stats:
         self.entry_types = Counter()
         self.census_paths = Counter()      # (type, version, path, jtype) -> entries; see analyze_schema
         self.census_types = Counter()      # (type, version) -> entries
+        self.archive = None                # Archive.status() when an archive is configured (see Scanner.build_stats)
         self.retention = None              # {"days", "source"} from load_retention(), set by Scanner.build_stats
         self.usage_missing = Counter()     # token-usage field -> responses where it was absent/non-numeric
         self.attachment_types = Counter()
@@ -900,8 +907,11 @@ class Scanner:
     """Reads Claude Code transcripts. A changed file is read from the last checkpoint onward (read_tail), so a
     running dashboard touches only new bytes; a rewritten file is detected and read again from the start."""
 
-    def __init__(self, root):
+    def __init__(self, root, archive=None):
         self.root = root
+        self.archive = archive   # optional Archive: captures lines (if enabled) and restores deleted files
+        self.restored = set()    # paths served from the archive on the last scan (the original file is gone)
+        self._from_archive = set()
         self._cache = {}     # path -> (mtime, size)
         self._entries = {}   # path -> list[dict]
         self._tail = {}      # path -> read_tail checkpoint
@@ -916,21 +926,26 @@ class Scanner:
     def scan(self):
         found = set()
         set_aside = set()
+        arc = self.archive if (self.archive is not None and self.archive.enabled) else None
         for dirpath, _dirs, files in os.walk(self.root):
             for fn in files:
                 if not fn.endswith(".jsonl"):
                     continue
                 path = os.path.join(dirpath, fn)
-                if is_set_aside(fn):
+                set_aside_copy = is_set_aside(fn)
+                if set_aside_copy:
                     set_aside.add(path)
-                    continue
-                found.add(path)
+                else:
+                    found.add(path)
                 try:
                     stat = os.stat(path)
                     key = (stat.st_mtime, stat.st_size)
                 except OSError:
                     continue
-                if self._cache.get(path) == key:
+                if arc is not None:
+                    arc.ingest(self.root, path, _rel_key(self.root, path),
+                               "set_aside" if set_aside_copy else "transcript", key)
+                if set_aside_copy or self._cache.get(path) == key:
                     continue
                 prev = self._tail.get(path)
                 try:
@@ -939,7 +954,8 @@ class Scanner:
                     continue
                 self.bytes_read += state["offset"] - (0 if (rewritten or not prev) else prev["offset"])
                 new, bad = decode_lines(lines)
-                if rewritten or path not in self._entries:
+                if rewritten or path not in self._entries or path in self._from_archive:
+                    self._from_archive.discard(path)
                     self._entries[path] = new
                     self._census[path] = census_entries(new)
                     mid = bad
@@ -954,9 +970,32 @@ class Scanner:
                 self._cache[path] = key
                 self._dirty = True
         self.set_aside = set_aside
+        # files Claude Code has deleted come back from the archive (the original on disk wins when it exists)
+        restored = set()
+        if self.archive is not None and self.archive.exists():
+            present = {_rel_key(self.root, pth) for pth in found}
+            if arc is not None:
+                self.archive.sync_gone(self.root, present)
+            for src in self.archive.restorable(self.root, present):
+                path = os.path.join(self.root, *src["rel"].split("/"))
+                restored.add(path)
+                found.add(path)
+                key = ("archive", src["id"], src["lines"])
+                if self._cache.get(path) == key:
+                    continue
+                new, bad = decode_lines(self.archive.load_lines(src["id"]))
+                self._entries[path] = new
+                self._census[path] = census_entries(new)
+                self._tail.pop(path, None)
+                self._bad[path] = (bad, 0)
+                self._cache[path] = key
+                self._from_archive.add(path)
+                self._dirty = True
+        self.restored = restored
         # drop deleted files
         for path in list(self._entries):
             if path not in found:
+                self._from_archive.discard(path)
                 self._entries.pop(path, None)
                 self._cache.pop(path, None)
                 self._tail.pop(path, None)
@@ -991,12 +1030,309 @@ class Scanner:
             st.hc["decode_errors_torn"] = torn
             st.hc["set_aside_files"] = len(self.set_aside)
             st.parse_errors += mid      # an unreadable line in the middle of a file is lost data
+            st.hc["restored_files"] = len(self.restored)
+            st.archive = self.archive.status() if self.archive is not None else None
             st.census_paths, st.census_types = self.census()
             st.retention = load_retention()
             if st.parse_errors:
                 print(f"[warn] {st.parse_errors} log entries could not be parsed "
                       "(log format may have changed - stats may be incomplete)")
             return st
+
+
+# ---------------------------------------------------------------------------
+# Opt-in local archive (docs/LOG_RESILIENCE_ROADMAP.md section 4)
+#
+# Claude Code deletes transcripts older than `cleanupPeriodDays` (default 30). With the archive switched on, every
+# line of every transcript is also stored, compressed, in a private SQLite file, and the scanner restores a file
+# from it once Claude Code has deleted the original. Nothing is captured until the user runs --archive-enable.
+# The archive stores RAW transcript lines, which can contain prompts, code, command output and secrets.
+# ---------------------------------------------------------------------------
+
+ARCHIVE_SCHEMA_VERSION = 1
+DEFAULT_ARCHIVE_MAX_BYTES = 2 * 1024 ** 3
+
+
+def _db_errors():
+    """Exceptions a database call may raise (computed per call so a missing sqlite3 module is survivable)."""
+    return (sqlite3.Error, OSError) if sqlite3 is not None else (OSError,)
+
+
+def default_archive_path():
+    return os.environ.get("AFI_ARCHIVE_PATH") or os.path.join(
+        os.path.expanduser("~"), ".ai-fluency-insights", "archive.sqlite")
+
+
+def _root_key(root):
+    return os.path.normcase(os.path.abspath(root))
+
+
+def _rel_key(root, path):
+    return os.path.relpath(path, root).replace(os.sep, "/")
+
+
+class Archive:
+    """Append-only store of raw transcript lines, with a per-file checkpoint (byte offset plus anchors).
+
+    * Idempotent: the lines and the checkpoint move in one transaction, so a crash or a second process can neither
+      lose nor duplicate lines.
+    * A rewritten file starts a new generation; older generations stay, so nothing already captured is ever lost.
+    * It never raises into the dashboard: any failure is kept in `last_error` and the scan carries on.
+    * Capture happens only while `enabled`; restoring and reading continue after --archive-disable."""
+
+    def __init__(self, path=None, max_bytes=DEFAULT_ARCHIVE_MAX_BYTES):
+        self.path = path or default_archive_path()
+        self.max_bytes = max_bytes
+        self.last_error = None
+        self._conn = None
+        self._seen = {}                   # (root, rel) -> (mtime, size) last checked: skips a DB round trip
+        self._lock = threading.RLock()
+
+    @property
+    def available(self):
+        return sqlite3 is not None
+
+    def exists(self):
+        return self.available and os.path.isfile(self.path)
+
+    # -- connection / schema -------------------------------------------------
+    def _db(self, create=False):
+        if self._conn is not None:
+            return self._conn
+        if not self.available or (not create and not os.path.isfile(self.path)):
+            return None
+        folder = os.path.dirname(self.path)
+        if folder and not os.path.isdir(folder):
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+        if not os.path.exists(self.path):
+            os.close(os.open(self.path, os.O_CREAT | os.O_WRONLY, 0o600))      # private from the first byte
+        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=False, isolation_level=None)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            ver = conn.execute("PRAGMA user_version").fetchone()[0]
+            if ver > ARCHIVE_SCHEMA_VERSION:
+                raise sqlite3.DatabaseError("archive was written by a newer version of this tool")
+            if ver == 0:
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+                    CREATE TABLE IF NOT EXISTS sources(
+                        id INTEGER PRIMARY KEY, root TEXT NOT NULL, rel TEXT NOT NULL, gen INTEGER NOT NULL,
+                        kind TEXT NOT NULL, first_seen REAL, updated REAL, gone_at REAL,
+                        byte_off INTEGER NOT NULL DEFAULT 0, lines INTEGER NOT NULL DEFAULT 0,
+                        head TEXT, tail TEXT, UNIQUE(root, rel, gen));
+                    CREATE TABLE IF NOT EXISTS lines(
+                        source_id INTEGER NOT NULL, seq INTEGER NOT NULL, z BLOB NOT NULL,
+                        PRIMARY KEY(source_id, seq)) WITHOUT ROWID;
+                    PRAGMA user_version = %d;""" % ARCHIVE_SCHEMA_VERSION)
+        except Exception:
+            conn.close()
+            raise
+        self._conn = conn
+        return conn
+
+    def _meta(self, key, default=None):
+        conn = self._db()
+        if conn is None:
+            return default
+        row = conn.execute("SELECT v FROM meta WHERE k=?", (key,)).fetchone()
+        return row[0] if row else default
+
+    def _set_meta(self, key, value):
+        self._db(create=True).execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                                      (key, str(value)))
+
+    def _fail(self, e):
+        self.last_error = "%s: %s" % (type(e).__name__, e)
+
+    # -- consent ---------------------------------------------------------------
+    @property
+    def enabled(self):
+        with self._lock:
+            try:
+                return self._meta("enabled") == "1"
+            except _db_errors() as e:
+                self._fail(e)
+                return False
+
+    def enable(self):
+        if not self.available:
+            return False
+        with self._lock:
+            try:
+                self._db(create=True)
+                if self._meta("consent_at") is None:
+                    self._set_meta("consent_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+                self._set_meta("enabled", "1")
+                self._set_meta("capped", "0")
+                return True
+            except _db_errors() as e:
+                self._fail(e)
+                return False
+
+    def disable(self):
+        with self._lock:
+            try:
+                if self._db() is not None:
+                    self._set_meta("enabled", "0")
+                return True
+            except _db_errors() as e:
+                self._fail(e)
+                return False
+
+    def close(self):
+        """Release the database file (needed on Windows before the file can be deleted or moved)."""
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except _db_errors():
+                    pass
+                self._conn = None
+
+    def purge(self):
+        """Delete the archive file(s). The caller is responsible for asking the user first."""
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except _db_errors():
+                    pass
+                self._conn = None
+            self._seen.clear()
+            removed = []
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(self.path + suffix)
+                    removed.append(self.path + suffix)
+                except OSError:
+                    pass
+            return removed
+
+    # -- capture -----------------------------------------------------------------
+    def _db_bytes(self):
+        total = 0
+        for suffix in ("", "-wal"):
+            try:
+                total += os.path.getsize(self.path + suffix)
+            except OSError:
+                pass
+        return total
+
+    def ingest(self, root, path, rel, kind, key):
+        """Capture the lines of `path` added since the last checkpoint. Returns the number of new lines.
+        `key` is the file's (mtime, size) as the scanner saw it."""
+        rk = (_root_key(root), rel)
+        with self._lock:
+            if self._seen.get(rk) == key:
+                return 0
+            try:
+                if self._db_bytes() > self.max_bytes:
+                    self._set_meta("capped", "1")
+                    return 0
+                conn = self._db()
+                if conn is None:
+                    return 0
+                now = time.time()
+                conn.execute("BEGIN IMMEDIATE")        # re-read the checkpoint inside the lock another process shares
+                try:
+                    row = conn.execute("SELECT id,gen,byte_off,lines,head,tail FROM sources "
+                                       "WHERE root=? AND rel=? ORDER BY gen DESC LIMIT 1", rk).fetchone()
+                    state = {"offset": row[2], "head": row[4], "tail": row[5]} if row else None
+                    lines, nstate, rewritten, _torn = read_tail(path, state)
+                    if row is None or rewritten:
+                        gen = row[1] + 1 if row else 1
+                        sid = conn.execute("INSERT INTO sources(root,rel,gen,kind,first_seen,updated,head,tail) "
+                                           "VALUES(?,?,?,?,?,?,'','')", (rk[0], rel, gen, kind, now, now)).lastrowid
+                        seq0 = 0
+                    else:
+                        sid, seq0 = row[0], row[3]
+                    if lines:
+                        conn.executemany("INSERT OR IGNORE INTO lines(source_id,seq,z) VALUES(?,?,?)",
+                                         ((sid, seq0 + i, zlib.compress(ln, 6)) for i, ln in enumerate(lines)))
+                    conn.execute("UPDATE sources SET byte_off=?, lines=?, head=?, tail=?, updated=?, gone_at=NULL "
+                                 "WHERE id=?", (nstate["offset"], seq0 + len(lines), nstate["head"], nstate["tail"],
+                                                now, sid))
+                    conn.execute("COMMIT")
+                except BaseException:
+                    conn.execute("ROLLBACK")
+                    raise
+                self._seen[rk] = key
+                return len(lines)
+            except _db_errors() as e:
+                self._fail(e)
+                return 0
+
+    def sync_gone(self, root, present_rels):
+        """Remember when a captured file disappeared from disk (information only; nothing is ever deleted)."""
+        with self._lock:
+            try:
+                conn = self._db()
+                if conn is None:
+                    return
+                rows = conn.execute(
+                    "SELECT s.id, s.rel, s.gone_at FROM sources s WHERE s.root=? AND s.gen="
+                    "(SELECT MAX(gen) FROM sources WHERE root=s.root AND rel=s.rel)", (_root_key(root),)).fetchall()
+                now = time.time()
+                gone = [(now, i) for i, rel, g in rows if g is None and rel not in present_rels]
+                if gone:
+                    conn.executemany("UPDATE sources SET gone_at=? WHERE id=?", gone)
+            except _db_errors() as e:
+                self._fail(e)
+
+    # -- restore -------------------------------------------------------------------
+    def restorable(self, root, present_rels):
+        """Latest version of every archived transcript of this logs folder whose file is no longer on disk."""
+        with self._lock:
+            try:
+                conn = self._db()
+                if conn is None:
+                    return []
+                rows = conn.execute(
+                    "SELECT s.id, s.rel, s.lines FROM sources s WHERE s.root=? AND s.kind='transcript' AND s.gen="
+                    "(SELECT MAX(gen) FROM sources WHERE root=s.root AND rel=s.rel) ORDER BY s.rel",
+                    (_root_key(root),)).fetchall()
+                return [{"id": i, "rel": rel, "lines": n} for i, rel, n in rows if rel not in present_rels]
+            except _db_errors() as e:
+                self._fail(e)
+                return []
+
+    def load_lines(self, source_id):
+        with self._lock:
+            try:
+                conn = self._db()
+                if conn is None:
+                    return []
+                return [zlib.decompress(z) for (z,) in conn.execute(
+                    "SELECT z FROM lines WHERE source_id=? ORDER BY seq", (source_id,))]
+            except _db_errors() + (zlib.error,) as e:
+                self._fail(e)
+                return []
+
+    # -- reporting -------------------------------------------------------------------
+    def status(self):
+        out = {"available": self.available, "exists": self.exists(), "enabled": False, "path": self.path,
+               "sources": 0, "generations": 0, "lines": 0, "raw_bytes": 0, "db_bytes": 0, "gone": 0,
+               "capped": False, "max_bytes": self.max_bytes, "consent_at": None, "last_error": self.last_error}
+        if not out["exists"]:
+            return out
+        with self._lock:
+            try:
+                conn = self._db()
+                out["enabled"] = self._meta("enabled") == "1"
+                out["consent_at"] = self._meta("consent_at")
+                out["capped"] = self._meta("capped") == "1"
+                n_gen, lines, raw = conn.execute("SELECT COUNT(*), COALESCE(SUM(lines),0), COALESCE(SUM(byte_off),0) "
+                                                 "FROM sources").fetchone()
+                out["generations"], out["lines"], out["raw_bytes"] = n_gen, lines, raw
+                out["sources"] = conn.execute("SELECT COUNT(DISTINCT root||'|'||rel) FROM sources").fetchone()[0]
+                out["gone"] = conn.execute("SELECT COUNT(*) FROM sources s WHERE gone_at IS NOT NULL AND s.gen="
+                                           "(SELECT MAX(gen) FROM sources WHERE root=s.root AND rel=s.rel)").fetchone()[0]
+                out["db_bytes"] = self._db_bytes()
+            except _db_errors() as e:
+                self._fail(e)
+                out["last_error"] = self.last_error
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -2316,6 +2652,32 @@ def _entry_type_status(t) -> str:
     return "handled" if t in HANDLED_ENTRY_TYPES else ("ignored" if t in IGNORED_ENTRY_TYPES else "new")
 
 
+def archive_card(st: Stats) -> dict:
+    """What the Data Health page says about the local archive: status plus one plain sentence."""
+    a = dict(st.archive or {"available": sqlite3 is not None, "exists": False, "enabled": False, "path": None,
+                            "sources": 0, "generations": 0, "lines": 0, "raw_bytes": 0, "db_bytes": 0, "gone": 0,
+                            "capped": False, "max_bytes": DEFAULT_ARCHIVE_MAX_BYTES, "consent_at": None,
+                            "last_error": None})
+    a["restored_files"] = st.hc["restored_files"]
+    days = (st.retention or {}).get("days", 30)
+    if not a["available"]:
+        a["note"] = "This Python build has no sqlite3 module, so the archive cannot be used."
+    elif not a["enabled"] and not a["exists"]:
+        a["note"] = ("Off. Claude Code deletes logs older than %d days, and your history goes with them. To keep a private "
+                     "local copy, run: python ai_fluency_insights.py --archive-enable" % days)
+    elif not a["enabled"]:
+        a["note"] = "Paused (no new logs are being captured). What was captured is still used. Resume with --archive-enable."
+    elif a["capped"]:
+        a["note"] = "Full: the archive reached its size limit and stopped capturing. Existing history is safe."
+    else:
+        a["note"] = "On. %s lines from %d log file%s are kept in a private file on this machine." % (
+            format(a["lines"], ","), a["sources"], "" if a["sources"] == 1 else "s")
+    if a["restored_files"]:
+        a["note"] += " %d log file%s restored from the archive because Claude Code deleted the original%s." % (
+            a["restored_files"], "" if a["restored_files"] == 1 else "s", "" if a["restored_files"] == 1 else "s")
+    return a
+
+
 def build_health(st: Stats) -> dict:
     """What this machine's logs actually contain, so a metric can say 'not in your logs'
     instead of showing a misleading zero."""
@@ -2367,11 +2729,14 @@ def build_health(st: Stats) -> dict:
     if st.retention and st.days:
         first = min(st.days)
         age = (date.today() - date.fromisoformat(first)).days
+        kept = bool(st.archive and st.archive.get("enabled"))
         caps.append(("history", "History window", "all",
-                     "partial" if st.retention["days"] < 365 else "ok",
+                     "partial" if st.retention["days"] < 365 and not kept else "ok",
                      "Claude Code deletes logs older than %d days (from %s). Your earliest day here is %s (%d days ago); "
-                     "older history is gone unless you raised cleanupPeriodDays. Organisation-managed settings can "
-                     "override this and are not checked." % (st.retention["days"], st.retention["source"], first, age)))
+                     "%s Organisation-managed settings can override the retention value and are not checked."
+                     % (st.retention["days"], st.retention["source"], first, age,
+                        "your local archive keeps logs after Claude Code deletes them." if kept else
+                        "older history is gone unless you raised cleanupPeriodDays or turned on the local archive.")))
     titled = sum(1 for sid in st.sessions if sid in st.session_titles)
     caps.append(("titles", "Session titles", "weekly",
                  _field_status(titled, len(st.sessions)),
@@ -2379,6 +2744,7 @@ def build_health(st: Stats) -> dict:
     return {
         "capabilities": [{"id": i, "label": l, "tab": t, "status": s, "detail": d} for i, l, t, s, d in caps],
         "entry_types": [{"type": str(k), "n": v, "status": _entry_type_status(k)} for k, v in st.entry_types.most_common()],
+        "archive": archive_card(st),
         "schema": analyze_schema(st.census_paths, st.census_types, load_schema_manifest()),
         "unknown_entry_types": [{"type": str(k), "n": v} for k, v in st.entry_types.most_common()
                                 if _entry_type_status(k) == "new"],
@@ -4299,6 +4665,8 @@ background:var(--fill)}
     <div class="cap" id="healthCaps"></div></div>
   <div class="card" style="--i:1"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg></span><h3>Log format changes</h3><span class="hint" id="schemaHint"></span></div>
     <div id="healthSchema"></div></div>
+  <div class="card" style="--i:1"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/></svg></span><h3>Local archive</h3><span class="hint" id="archHint"></span></div>
+    <div id="healthArchive"></div></div>
   <div class="row" style="--i:1">
     <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><h3>Log inventory</h3></div>
       <div class="chips" id="healthMeta" style="margin-bottom:14px"></div>
@@ -5083,9 +5451,24 @@ function renderSchema(){
   el.innerHTML=rows.length?'<ul class="sflist">'+rows.join('')+'</ul>':
     '<div class="ins-empty">No log format changes detected. Every field this dashboard reads is present and has the expected shape.</div>';
 }
+function renderArchive(){
+  const A=D.health.archive,fb=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(1)+' KB':n<1073741824?(n/1048576).toFixed(1)+' MB':(n/1073741824).toFixed(2)+' GB';
+  $('archHint').textContent=A.enabled?(A.capped?'full':'on'):(A.exists?'paused':'off');
+  let h='<p class="note" style="margin:0 0 12px">'+esc(A.note)+'</p>';
+  if(A.exists)h+='<div class="chips" style="margin-bottom:12px">'+
+    '<span class="chip2">Lines kept <b>'+A.lines.toLocaleString()+'</b></span>'+
+    '<span class="chip2">Log files <b>'+A.sources+'</b></span>'+
+    '<span class="chip2">No longer on disk <b>'+A.gone+'</b></span>'+
+    '<span class="chip2">Restored now <b>'+A.restored_files+'</b></span>'+
+    '<span class="chip2">Size <b>'+fb(A.db_bytes)+'</b> of '+fb(A.max_bytes)+'</span></div>';
+  if(A.last_error)h+='<p class="note" style="color:var(--rose)">Last problem: '+esc(A.last_error)+'</p>';
+  h+='<p class="note" style="margin:0">It stores raw transcript lines, which can contain prompts, code, command output and secrets, in a file only your user account can read. '+
+    'It never leaves this machine and the dashboard cannot switch it on: use <code>--archive-enable</code>, <code>--archive-disable</code>, <code>--archive-status</code> or <code>--archive-purge</code>.</p>';
+  $('healthArchive').innerHTML=h;
+}
 function renderHealth(){
   const H=D.health;
-  renderSchema();
+  renderSchema();renderArchive();
   $('healthCaps').innerHTML=H.capabilities.map(c=>'<div class="it '+c.status+'"><span class="dot"></span><div><b>'+esc(c.label)+'</b><span>'+esc(c.detail)+'</span></div></div>').join('');
   $('healthMeta').innerHTML=
     '<span class="chip2">Sessions <b>'+H.sessions+'</b></span>'+
@@ -5684,6 +6067,112 @@ STARTUP_TASK = "AIFluencyInsights"
 LEGACY_STARTUP_TASK = "DevTokenDashboard"
 
 
+def _fmt_bytes(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
+def run_archive_command(args, scanner, archive, input_fn=input, print_fn=print) -> int:
+    """--archive-enable / --archive-disable / --archive-status / --archive-sync / --archive-purge. Returns an exit code."""
+    def say(*a):
+        print_fn(*a)
+
+    def confirmed(question):
+        return bool(getattr(args, "yes", False)) or input_fn(question + " [y/N] ").strip().lower() in ("y", "yes")
+
+    def capture():
+        before = archive.status()["lines"]
+        with scanner._lock:
+            scanner.scan()
+        return archive.status()["lines"] - before
+
+    def summary():
+        s = archive.status()
+        say("  Archive file : %s" % s["path"])
+        say("  State        : %s%s" % ("on" if s["enabled"] else "off (paused)", ", FULL (size limit reached)" if s["capped"] else ""))
+        say("  Contents     : %s lines from %d log file%s (%d version%s), %d no longer on disk" % (
+            format(s["lines"], ","), s["sources"], "" if s["sources"] == 1 else "s", s["generations"],
+            "" if s["generations"] == 1 else "s", s["gone"]))
+        say("  Size on disk : %s (limit %s)" % (_fmt_bytes(s["db_bytes"]), _fmt_bytes(s["max_bytes"])))
+        if s["consent_at"]:
+            say("  Enabled since: %s" % s["consent_at"])
+        if s["last_error"]:
+            say("  Last problem : %s" % s["last_error"])
+
+    if not archive.available:
+        say("This Python build has no sqlite3 module, so the archive cannot be used.")
+        return 1
+
+    if args.archive_enable:
+        days = load_retention()["days"]
+        say("")
+        say("Local archive of your Claude Code transcripts")
+        say("  Claude Code deletes transcripts older than %d days, so your history here is only as long as that." % days)
+        say("  Turning this on stores a compressed copy of every transcript line in:")
+        say("      %s" % archive.path)
+        say("  Please know:")
+        say("   - Transcripts can contain your prompts, code, command output and any secrets that passed through them.")
+        say("     The archive keeps them for as long as you keep the archive, even after Claude Code deletes the originals.")
+        say("   - The file is readable only by your user account and is never sent anywhere or served by the dashboard.")
+        say("   - If your organisation sets a short retention period on purpose, check that keeping a copy is allowed.")
+        say("   - Stop capturing any time with --archive-disable; delete everything with --archive-purge.")
+        say("")
+        if not confirmed("Turn the archive on and copy your existing logs into it?"):
+            say("Nothing was changed.")
+            return 1
+        if not archive.enable():
+            say("Could not create the archive: %s" % archive.last_error)
+            return 1
+        n = capture()
+        say("Archive is on. Captured %s lines from your existing logs." % format(n, ","))
+        summary()
+        say("")
+        say("Capturing continues while the dashboard runs. To keep capturing when it is closed, schedule:")
+        say("    python %s --archive-sync" % os.path.basename(__file__))
+        return 0
+
+    if args.archive_disable:
+        archive.disable()
+        say("Archive paused: nothing new will be captured. What is already stored is kept and still used.")
+        say("Resume with --archive-enable, or delete it with --archive-purge.")
+        return 0
+
+    if args.archive_sync:
+        if not archive.enabled:
+            say("The archive is off. Turn it on first with --archive-enable.")
+            return 1
+        n = capture()
+        say("Captured %s new lines." % format(n, ","))
+        if archive.last_error:
+            say("Last problem: %s" % archive.last_error)
+            return 1
+        return 0
+
+    if args.archive_purge:
+        if not archive.exists():
+            say("There is no archive to delete (%s)." % archive.path)
+            return 0
+        summary()
+        say("")
+        say("This permanently deletes the archive. Anything Claude Code has already deleted from disk can't be recovered.")
+        if not confirmed("Delete the archive?"):
+            say("Nothing was changed.")
+            return 1
+        archive.purge()
+        say("Archive deleted.")
+        return 0
+
+    # --archive-status
+    s = archive.status()
+    if not s["exists"]:
+        say("The archive is off and nothing has been captured. Turn it on with --archive-enable.")
+        return 0
+    summary()
+    return 0
+
+
 def claude_config_dir():
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
@@ -5939,6 +6428,15 @@ def main():
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--dump", action="store_true", help="print stats JSON and exit (for testing)")
+    ap.add_argument("--archive-enable", action="store_true",
+                    help="keep a private local copy of your transcripts so history survives Claude Code's clean-up (asks first)")
+    ap.add_argument("--archive-disable", action="store_true", help="stop capturing; keep what is already stored")
+    ap.add_argument("--archive-status", action="store_true", help="show what the archive holds and exit")
+    ap.add_argument("--archive-sync", action="store_true",
+                    help="capture new transcript lines once and exit (for a scheduled task while the dashboard is closed)")
+    ap.add_argument("--archive-purge", action="store_true", help="delete the archive (asks first)")
+    ap.add_argument("--archive-path", default=None, help="archive file (default: ~/.ai-fluency-insights/archive.sqlite)")
+    ap.add_argument("--yes", action="store_true", help="answer yes to the archive questions")
     ap.add_argument("--schema-report", action="store_true",
                     help="print which log-format changes were detected (new/missing/changed fields) and exit")
     ap.add_argument("--collect-fixture", metavar="FILE",
@@ -5990,7 +6488,11 @@ def main():
         print("    Pass it explicitly:  python ai_fluency_insights.py --dir <path>")
         sys.exit(1)
 
-    scanner = Scanner(args.dir)
+    archive = Archive(args.archive_path)
+    scanner = Scanner(args.dir, archive=archive)
+
+    if args.archive_enable or args.archive_disable or args.archive_status or args.archive_sync or args.archive_purge:
+        sys.exit(run_archive_command(args, scanner, archive))
 
     if args.dump:
         print(json.dumps(stats_to_json(scanner.build_stats(), None), indent=2))

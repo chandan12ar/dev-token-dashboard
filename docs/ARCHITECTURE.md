@@ -238,26 +238,57 @@ Fields the parser reads:
 
 `tool_result` blocks arrive inside **`user`** entries (`tool_use_id`, `is_error`, `content`). **[S]**
 
-### 4.2 Scanner: the incremental file cache
+### 4.2 Scanner: incremental reading, archive restore
 
 ```
-Scanner._cache   : path -> (st_mtime, st_size)
-Scanner._entries : path -> list[dict]       # every parsed line of that file
+Scanner._cache   : path -> (st_mtime, st_size)          # cheap "did it change?" gate
+Scanner._tail    : path -> {offset, head, tail, size}   # read_tail checkpoint
+Scanner._entries : path -> list[dict]                   # every parsed line of that file
+Scanner._census  : path -> structure counters           # for the schema sentinel (§4.5)
 ```
 
 `scan()` walks the root with `os.walk`, and for each `*.jsonl`:
 
-1. `os.stat` the file. If `(mtime, size)` equals the cached key, **skip**.
-2. Otherwise re-read the **whole file** (not just the tail), `json.loads` each line, and replace `_entries[path]`.
-   Undecodable lines are skipped and counted: a bad *last* line with no trailing newline is a write in flight
+1. Files named `*.orphaned-*` / `*.superseded-*` (copies Claude Code sets aside) are never parsed; they are counted
+   in Data Health and, if the archive is on, captured raw.
+2. `os.stat` the file. If `(mtime, size)` equals the cached key, **skip** (one `stat`).
+3. Otherwise `read_tail(path, checkpoint)` reads **only the bytes after the checkpoint**. The checkpoint advances only
+   past a full line, so a half-written line is retried next time. A final line that is complete JSON but lacks its
+   newline is consumed. The checkpoint carries two fingerprints (SHA-1 of the first 4 KB and of the 256 bytes before the
+   offset); if the file shrank or either fingerprint changed, the file was rewritten, so it is read again from byte 0
+   and its entries are replaced (never appended).
+4. New lines are decoded; undecodable ones are counted: a bad last line with no newline is a write in flight
    (`decode_errors_torn`), any other is `decode_errors_mid` and also raises `parse_errors`.
-   Files named `*.orphaned-*` / `*.superseded-*` (copies Claude Code sets aside) are not read; they are counted in Data Health.
-3. Afterwards, drop cache entries for files that no longer exist. **[S]**
+5. If the archive is on, the same file is offered to `Archive.ingest` (its own persisted checkpoint).
+6. After the walk, archived transcripts whose files are no longer on disk are loaded from the archive
+   (`Scanner.restored`); a file that reappears on disk is read from disk and the archived copy is dropped.
+7. Cache entries for files that are neither on disk nor restorable are dropped. **[S]**
 
-This makes unchanged files cost one `stat` call. It does **not** avoid re-parsing: `build_stats()`
-creates a fresh `Stats` and runs `parse_entry` over *every* cached entry on *every* call (see
-[§12](#12-performance-and-scalability)). A corrupt line is skipped without affecting the rest. Entries that raise inside `parse_entry` are counted in `parse_errors` and
-surfaced in the UI as a yellow warning. **[S]**
+So a running dashboard reads each transcript byte once (`Scanner.bytes_read`), and unchanged files cost one `stat`.
+**What this does not fix:** `build_stats()` still creates a fresh `Stats` and runs `parse_entry` over *every* cached
+entry on every call (see [§12](#12-performance-and-scalability)), and a restarted dashboard reads everything once.
+Entries that raise inside `parse_entry` are counted in `parse_errors` and surfaced in the UI as a yellow warning. **[S]**
+
+### 4.2a The opt-in archive (`Archive`)
+
+Off by default and switchable only from the command line (`--archive-enable`, after an explicit notice). SQLite
+(`~/.ai-fluency-insights/archive.sqlite`, mode 0600, WAL):
+
+| Table | Purpose |
+|---|---|
+| `meta` | consent time, `enabled`, `capped` |
+| `sources` | one row per file *generation*: `root`, `rel`, `gen`, `kind` (`transcript` / `set_aside`), byte offset, line count, anchors, `gone_at` |
+| `lines` | `(source_id, seq)` -> raw line, zlib-compressed |
+
+- **Atomic and idempotent:** lines and the checkpoint are written in one `BEGIN IMMEDIATE` transaction that re-reads
+  the checkpoint, so a crash or a second process can neither lose nor duplicate lines.
+- **Never loses what it captured:** a rewritten file starts a new generation; older generations stay. Files that vanish
+  from disk are only marked `gone_at`.
+- **Keyed by logs folder:** archived files are restored only into the same `--dir` they came from.
+- **Fails soft:** any database error goes to `Archive.last_error` (shown in Data Health) and the scan continues.
+- **Capped:** at 2 GB it stops capturing and says so.
+- Measured on one real log (3.4 MB, 515 lines): 2.1 MB on disk, about 1.6x smaller than the text. Per-line compression
+  is weak on this data (signatures, hashes); compressing blocks of lines would gain only ~15% here.
 
 ### 4.3 Parser rules (`parse_entry`)
 
@@ -314,6 +345,24 @@ flowchart LR
 ```
 
 ---
+
+### 4.5 Schema sentinel
+
+At scan time each entry is flattened to `(json_path, type)` pairs (`flatten_entry`: arrays collapse to `[]`, id-like keys
+to `<id>`, model-name keys under `modelUsage` to `<key>`, free-form subtrees such as `input_schema` stay closed) and
+counted per `(entry type, Claude Code version)`. `analyze_schema` compares that with `CONSUMED_FIELDS` (the fields this
+dashboard reads) and with `schema/claude_code_known.json` (fields seen in known logs):
+
+| Finding | Severity | Meaning |
+|---|---|---|
+| `missing_all` | warning | a field every entry should carry is in none of 20+ entries |
+| `vanished` | warning | present in other Claude Code versions, missing in this one |
+| `type_change` | warning | arrived as a type the parser does not expect |
+| `new_field` / `type_change_other` | info | not in the baseline; possibly a new signal |
+
+Warnings raise a banner, list the affected catalog metrics (`catalog_payload(drift)`), and appear in Data Health
+and `--schema-report`. Design and rationale: [LOG_RESILIENCE_ROADMAP.md](LOG_RESILIENCE_ROADMAP.md); observed schema:
+[SCHEMA_NOTES.md](SCHEMA_NOTES.md).
 
 ## 5. The 15-second refresh cycle
 
@@ -814,6 +863,12 @@ hook is not wired in yet.
 | `--dump` | Print the range-less stats JSON and exit (no server, no notify thread) |
 | `--schema-report` | Print the drift sentinel's findings (`build_health(...)["schema"]`) and exit |
 | `--collect-fixture FILE` | Write a structure-only, redacted copy of every log entry to FILE (`redact_entry`) and exit |
+| `--archive-enable` | Explain the privacy trade-off, ask, then turn the local archive on and copy existing logs into it |
+| `--archive-disable` | Stop capturing; stored data is kept and still used |
+| `--archive-status` | Show what the archive holds, then exit |
+| `--archive-sync` | Capture new lines once and exit (for a scheduled task while the dashboard is closed) |
+| `--archive-purge` | Delete the archive (asks first) |
+| `--archive-path FILE`, `--yes` | Archive file location; answer yes to the questions |
 | `--setup-notifications` | Run the wizard and exit |
 | `--dry-run` | With the wizard: preview only |
 | `--install-startup` / `--uninstall-startup` | Windows Task Scheduler: `schtasks /Create /TN AIFluencyInsights /SC ONLOGON` running `pythonw.exe … --no-browser --port N`; also deletes the legacy `DevTokenDashboard` task |
