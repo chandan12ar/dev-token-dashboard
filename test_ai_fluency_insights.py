@@ -1967,6 +1967,110 @@ class SchemaSentinelTests(_LogFixture):
         self.assertEqual(a.parse_errors, b.parse_errors)
 
 
+class IncrementalReadTests(_LogFixture):
+    """Phase 2a: the scanner reads only the bytes appended since last time, and notices rewrites."""
+
+    def _file(self, name="grow.jsonl"):
+        return os.path.join(self.root, "proj", name)
+
+    def _append(self, path, data):
+        with open(path, "ab") as f:
+            f.write(data)
+
+    def _lines(self):
+        self.prompt("add pagination to the orders list please")
+        self.edit()
+        self.prompt("now add a test for it")
+        self.edit(path="/p/tests/test_a.py")
+        self.end_turn()
+        return [afi.json.dumps(e).encode() + b"\n" for e in self.entries]
+
+    # --- read_tail -----------------------------------------------------
+    def test_read_tail_returns_only_new_complete_lines(self):
+        p = self._file()
+        self._append(p, b'{"a":1}\n{"b":2}\n{"c":')                  # last line still being written
+        lines, st, rew, torn = afi.read_tail(p, None)
+        self.assertEqual((lines, rew, torn), ([b'{"a":1}', b'{"b":2}'], False, 1))
+        self.assertEqual(st["offset"], len(b'{"a":1}\n{"b":2}\n'))
+        self._append(p, b'3}\n{"d":4}\n')
+        lines, st2, rew, torn = afi.read_tail(p, st)
+        self.assertEqual((lines, rew, torn), ([b'{"c":3}', b'{"d":4}'], False, 0))
+
+    def test_read_tail_consumes_a_complete_last_line_without_newline(self):
+        p = self._file()
+        self._append(p, b'{"a":1}\n{"b":2}')
+        lines, st, _r, torn = afi.read_tail(p, None)
+        self.assertEqual((lines, torn), ([b'{"a":1}', b'{"b":2}'], 0))
+        self._append(p, b"\n{\"c\":3}\n")                              # newline arrives later, then more
+        lines, _st, rew, _t = afi.read_tail(p, st)
+        self.assertEqual((lines, rew), ([b'{"c":3}'], False))
+
+    def test_read_tail_detects_truncation_and_rewrites(self):
+        p = self._file()
+        body = b"".join(b'{"n":%d,"pad":"%s"}\n' % (i, b"x" * 40) for i in range(40))
+        self._append(p, body)
+        _l, st, _r, _t = afi.read_tail(p, None)
+        for label, new in (("truncated", body[:100]),
+                           ("rewritten from the start", b"".join(b'{"n":%d,"pad":"%s"}\n' % (i, b"y" * 40) for i in range(60))),
+                           ("edited just before the checkpoint", body[:-40] + b"Z" * 20 + body[-20:] + b'{"n":99}\n')):
+            with open(p, "wb") as f:
+                f.write(new)
+            lines, _st, rew, _t = afi.read_tail(p, st)
+            self.assertTrue(rew, label)
+            self.assertEqual(len(lines), new.count(b"\n"), label)
+
+    # --- Scanner ---------------------------------------------------------
+    def _same_stats(self, a, b):
+        self.assertEqual(dict(a.days), dict(b.days))
+        self.assertEqual(sorted(a.sessions), sorted(b.sessions))
+        self.assertEqual(len(a.turns), len(b.turns))
+        self.assertEqual(a.parse_errors, b.parse_errors)
+        self.assertEqual(dict(a.hc), dict(b.hc))
+        self.assertEqual(a.census_paths, b.census_paths)
+        self.assertEqual(a.census_types, b.census_types)
+
+    def test_growing_file_matches_a_fresh_scan_and_reads_each_byte_once(self):
+        data = b"".join(self._lines())
+        p = self._file()
+        sc = afi.Scanner(self.root)
+        cuts = [0, 17, 300, 301, 900, len(data) - 400, len(data) - 5, len(data)]   # cut mid-line on purpose
+        for a, b in zip(cuts, cuts[1:]):
+            self._append(p, data[a:b])
+            sc.build_stats()
+        fresh = afi.Scanner(self.root).build_stats()
+        self._same_stats(sc.build_stats(), fresh)
+        self.assertEqual(sc.bytes_read, len(data))                               # no byte was read twice
+
+    def test_rewritten_file_is_reread_not_double_counted(self):
+        data = b"".join(self._lines())
+        p = self._file()
+        self._append(p, data)
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        with open(p, "wb") as f:                                                  # same session, rewritten shorter
+            f.write(b"".join(data.splitlines(True)[:3]))
+        self._same_stats(sc.build_stats(), afi.Scanner(self.root).build_stats())
+
+    def test_unchanged_files_are_not_read_again(self):
+        self._append(self._file(), b"".join(self._lines()))
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        n = sc.bytes_read
+        sc.build_stats()
+        sc.build_stats()
+        self.assertEqual(sc.bytes_read, n)
+
+    def test_mid_file_decode_errors_accumulate_across_increments(self):
+        p = self._file()
+        self._append(p, b'{"type":"user"}\n{broken\n')
+        sc = afi.Scanner(self.root)
+        self.assertEqual(sc.build_stats().hc["decode_errors_mid"], 1)
+        self._append(p, b'{"type":"user"}\n{also broken\n{"type":"user"}\n')
+        st = sc.build_stats()
+        self.assertEqual(st.hc["decode_errors_mid"], 2)
+        self.assertEqual(st.hc["decode_errors_torn"], 0)
+
+
 class HealthAndCatalogTests(_LogFixture):
     def test_missing_signals_are_reported_not_zeroed(self):
         self.prompt("hi")

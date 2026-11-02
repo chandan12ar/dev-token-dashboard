@@ -14,6 +14,7 @@ Requires: Python 3.8+ (standard library only).
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -835,12 +836,77 @@ def project_label(root, path) -> str:
     return name.lstrip("-").replace("--", "/").replace("-", "/")
 
 
+HEAD_ANCHOR_BYTES = 4096
+TAIL_ANCHOR_BYTES = 256
+
+
+def _anchors(f, upto):
+    """Fingerprints of the first and the last bytes before `upto`: cheap proof that the bytes we already read
+    are still there (an append leaves both unchanged; a rewrite or an edit near the end changes one)."""
+    f.seek(0)
+    head = f.read(min(HEAD_ANCHOR_BYTES, upto))
+    f.seek(max(0, upto - TAIL_ANCHOR_BYTES))
+    tail = f.read(min(TAIL_ANCHOR_BYTES, upto))
+    return hashlib.sha1(head).hexdigest(), hashlib.sha1(tail).hexdigest()
+
+
+def read_tail(path, state=None):
+    """Read the complete lines added to `path` since `state` (None = from the start).
+
+    Returns (lines, new_state, rewritten, torn):
+      lines      raw non-empty lines (bytes, no newline)
+      new_state  {"offset", "head", "tail", "size"}: pass it back next time to continue where this stopped
+      rewritten  True when the file no longer extends what `state` described (shrunk, or the bytes before the
+                 checkpoint changed), so everything was read again from byte 0 and the caller must replace, not append
+      torn       1 when an unfinished last line was left unread (a write in flight), else 0
+
+    The checkpoint only ever advances past a full line, so a half-written line is retried next time, not lost."""
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        off, rewritten = 0, False
+        if state:
+            off = state["offset"]
+            if size < off or _anchors(f, off) != (state["head"], state["tail"]):
+                off, rewritten = 0, True
+        f.seek(off)
+        data = f.read(size - off)
+        end = data.rfind(b"\n") + 1
+        torn = 0
+        rest = data[end:]
+        if rest.strip():
+            try:                                    # a complete final line that just lacks its newline
+                json.loads(rest.decode("utf-8", "replace"))
+                end = len(data)
+            except ValueError:
+                torn = 1
+        new_off = off + end
+        head, tail = _anchors(f, new_off)
+    lines = [ln for ln in data[:end].split(b"\n") if ln.strip()]
+    return lines, {"offset": new_off, "head": head, "tail": tail, "size": size}, rewritten, torn
+
+
+def decode_lines(lines):
+    """Raw lines -> (entries, number of lines that were not valid JSON)."""
+    entries, bad = [], 0
+    for raw in lines:
+        try:
+            entries.append(json.loads(raw.decode("utf-8", errors="replace")))
+        except json.JSONDecodeError:
+            bad += 1
+    return entries, bad
+
+
 class Scanner:
+    """Reads Claude Code transcripts. A changed file is read from the last checkpoint onward (read_tail), so a
+    running dashboard touches only new bytes; a rewritten file is detected and read again from the start."""
+
     def __init__(self, root):
         self.root = root
         self._cache = {}     # path -> (mtime, size)
         self._entries = {}   # path -> list[dict]
+        self._tail = {}      # path -> read_tail checkpoint
         self._bad = {}       # path -> (mid_file_decode_errors, torn_last_line_errors)
+        self.bytes_read = 0      # bytes read from transcripts by this scanner (for tests and the status line)
         self.set_aside = set()   # set-aside copies seen on the last scan (not parsed)
         self._census = {}        # path -> (paths Counter, types Counter): structure seen in that file
         self._merged = (Counter(), Counter())
@@ -866,29 +932,26 @@ class Scanner:
                     continue
                 if self._cache.get(path) == key:
                     continue
-                entries = []
-                mid = torn = 0
+                prev = self._tail.get(path)
                 try:
-                    with open(path, "r", encoding="utf-8", errors="replace") as f:
-                        for raw in f:
-                            line = raw.strip()
-                            if not line:
-                                continue
-                            try:
-                                entries.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                # No trailing newline on the last line = a write still in flight (expected
-                                # while a session is live). Anything else is a genuinely unreadable line.
-                                if raw.endswith("\n"):
-                                    mid += 1
-                                else:
-                                    torn += 1
+                    lines, state, rewritten, torn = read_tail(path, prev)
                 except OSError:
                     continue
-                self._cache[path] = key
-                self._entries[path] = entries
+                self.bytes_read += state["offset"] - (0 if (rewritten or not prev) else prev["offset"])
+                new, bad = decode_lines(lines)
+                if rewritten or path not in self._entries:
+                    self._entries[path] = new
+                    self._census[path] = census_entries(new)
+                    mid = bad
+                else:
+                    self._entries[path].extend(new)
+                    np_, nt = census_entries(new)
+                    self._census[path][0].update(np_)
+                    self._census[path][1].update(nt)
+                    mid = self._bad[path][0] + bad
+                self._tail[path] = state
                 self._bad[path] = (mid, torn)
-                self._census[path] = census_entries(entries)
+                self._cache[path] = key
                 self._dirty = True
         self.set_aside = set_aside
         # drop deleted files
@@ -896,6 +959,7 @@ class Scanner:
             if path not in found:
                 self._entries.pop(path, None)
                 self._cache.pop(path, None)
+                self._tail.pop(path, None)
                 self._bad.pop(path, None)
                 self._census.pop(path, None)
                 self._dirty = True
