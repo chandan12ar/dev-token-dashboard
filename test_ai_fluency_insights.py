@@ -7,8 +7,10 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import tempfile
 import unittest
+from collections import Counter
 from unittest.mock import patch
 
 import ai_fluency_insights as afi
@@ -2376,6 +2378,230 @@ class ArchiveCommandTests(_ArchiveBase):
         code, text, _a = self._run(archive_status=True)
         self.assertEqual(code, 0)
         self.assertIn("off and nothing has been captured", text)
+
+
+# ---------------------------------------------------------------------------
+# Characterization ("golden") tests. Phase 3 of docs/LOG_RESILIENCE_ROADMAP.md put a canonical event layer between
+# the raw log and Stats; these pin the exact Stats a deterministic "kitchen sink" log produces, so any change in
+# what the parser derives shows up as a diff. To accept an intended change:
+#     AFI_REGEN_GOLDEN=1 python -m unittest test_ai_fluency_insights.GoldenStatsTests
+# ---------------------------------------------------------------------------
+
+GOLDEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests_data", "kitchen_sink_stats.json")
+
+
+def kitchen_sink_logs():
+    """{relative path: [raw entries]}: every entry kind the parser handles, fixed timestamps, two projects."""
+    out = {}
+    n = [0]
+
+    def ts(day, h, m=0, s=0):
+        return "2026-10-%02dT%02d:%02d:%02d.000Z" % (day, h, m, s)
+
+    def base(sid, t, **kw):
+        d = {"sessionId": sid, "timestamp": t, "cwd": "/work/app", "version": "2.1.316", "gitBranch": "main"}
+        d.update(kw)
+        return d
+
+    def user(sid, t, content, **kw):
+        n[0] += 1
+        return base(sid, t, type="user", uuid="u%d" % n[0], message={"role": "user", "content": content}, **kw)
+
+    def assistant(sid, t, blocks, usage="default", stop="tool_use", model="claude-sonnet-5", mid=None, **kw):
+        n[0] += 1
+        mid = mid or "m%d" % n[0]
+        u = {"input_tokens": 12, "output_tokens": 40 + n[0], "cache_creation_input_tokens": 300,
+             "cache_read_input_tokens": 5000} if usage == "default" else usage
+        msg = {"id": mid, "model": model, "stop_reason": stop, "content": blocks}
+        if u is not None:
+            msg["usage"] = u
+        return base(sid, t, type="assistant", uuid="a%d" % n[0], requestId="r" + mid, message=msg, **kw)
+
+    def tool(name, inp, tid=None):
+        n[0] += 1
+        return {"type": "tool_use", "id": tid or "tu%d" % n[0], "name": name, "input": inp}
+
+    def result(sid, t, tid, text="ok", err=False):
+        b = {"type": "tool_result", "tool_use_id": tid, "content": text}
+        if err:
+            b["is_error"] = True
+        return user(sid, t, [b])
+
+    # ---- project A, day 12: a full working session -------------------------------------------------
+    a = [{"type": "ai-title", "sessionId": "sA", "aiTitle": "Add pagination to orders"},
+         {"type": "permission-mode", "permissionMode": "plan"},
+         {"type": "permission-mode", "permissionMode": "default"},
+         user("sA", ts(12, 9, 0), "Add pagination to the orders list.\nKeep the page size configurable."),
+         assistant("sA", ts(12, 9, 0, 20), [{"type": "thinking", "thinking": "hmm"},
+                                               tool("Read", {"file_path": "/work/app/orders.py"}, "t_read"),
+                                               tool("Grep", {"pattern": "def list_orders"}, "t_grep")],
+                   thinkingDurationMs=2400, effort="high"),
+         result("sA", ts(12, 9, 0, 22), "t_read"),
+         result("sA", ts(12, 9, 0, 23), "t_grep"),
+         assistant("sA", ts(12, 9, 1), [tool("Edit", {"file_path": "/work/app/orders.py", "old_string": "a",
+                                                        "new_string": "def page(n):\n    return n\n"}, "t_edit"),
+                                          tool("Write", {"file_path": "/work/app/tests/test_orders.py",
+                                                         "content": "def test_a():\n    assert 1\n\n"}, "t_write"),
+                                          tool("MultiEdit", {"file_path": "/work/app/api.py", "edits": [
+                                              {"old_string": "x", "new_string": "y\nz"}, {"old_string": "p", "new_string": "q"},
+                                              "not-a-dict"]}, "t_multi"),
+                                          tool("NotebookEdit", {"notebook_path": "/work/app/n.ipynb",
+                                                                "new_source": "a\nb\nc"}, "t_nb")]),
+         result("sA", ts(12, 9, 1, 5), "t_edit"), result("sA", ts(12, 9, 1, 6), "t_write"),
+         result("sA", ts(12, 9, 1, 7), "t_multi"), result("sA", ts(12, 9, 1, 8), "t_nb"),
+         assistant("sA", ts(12, 9, 2), [tool("Bash", {"command": "pytest -q"}, "t_test1")]),
+         result("sA", ts(12, 9, 2, 30), "t_test1", "Exit code 1\nFAILED", err=True),
+         assistant("sA", ts(12, 9, 3), [tool("Bash", {"command": "pytest -q"}, "t_test2")]),
+         result("sA", ts(12, 9, 3, 20), "t_test2", "2 passed"),
+         assistant("sA", ts(12, 9, 4), [tool("Bash", {"command": "npm run build"}, "t_build"),
+                                          tool("Bash", {"command": "ruff check ."}, "t_lint")]),
+         result("sA", ts(12, 9, 4, 40), "t_build"), result("sA", ts(12, 9, 4, 41), "t_lint", "E1", err=True),
+         assistant("sA", ts(12, 9, 5), [tool("Bash", {"command": "git push --force origin main"}, "t_risky"),
+                                          tool("Read", {"file_path": "/work/app/.env"}, "t_env"),
+                                          tool("Write", {"file_path": "/work/app/secrets.json", "content": "{}"}, "t_sec")]),
+         result("sA", ts(12, 9, 5, 3), "t_risky", "denied", err=True), result("sA", ts(12, 9, 5, 4), "t_env"),
+         result("sA", ts(12, 9, 5, 5), "t_sec"),
+         # one response logged on three lines (same message id + request id): tokens must count once
+         assistant("sA", ts(12, 9, 6), [{"type": "text", "text": "Working"}], stop=None, mid="mDUP"),
+         assistant("sA", ts(12, 9, 6, 1), [tool("Agent", {"subagent_type": "reviewer", "prompt": "review"}, "t_agent")],
+                   stop=None, mid="mDUP"),
+         assistant("sA", ts(12, 9, 6, 2), [tool("Agent", {"subagent_type": "reviewer", "prompt": "review"}, "t_agent")],
+                   stop="tool_use", mid="mDUP"),
+         assistant("sA", ts(12, 9, 6, 30), [tool("mcp__github__get_issue", {}, "t_mcp"), tool("TodoWrite", {}, "t_todo"),
+                                              tool("WebSearch", {"query": "q"}, "t_web"), tool("Skill", {}, "t_skill"),
+                                              tool("Bash", {"command": "ls"}, "t_ls")]),
+         result("sA", ts(12, 9, 6, 40), "t_mcp"), result("sA", ts(12, 9, 6, 41), "t_unknown_id"),
+         assistant("sA", ts(12, 9, 7), [{"type": "text", "text": "Done. Pagination added."}], stop="end_turn", model="claude-opus-5-5"),
+         user("sA", ts(12, 9, 8), "no, that's wrong - the page size should default to 25"),
+         assistant("sA", ts(12, 9, 8, 30), [tool("Edit", {"file_path": "/work/app/orders.py", "new_string": "PAGE = 25"}, "t_e2")],
+                   usage={"input_tokens": 5, "output_tokens": 10}),
+         user("sA", ts(12, 9, 8, 40), "[Request interrupted by user]"),
+         user("sA", ts(12, 9, 9), "<command-name>/compact</command-name>\n<command-message>compact</command-message>"),
+         user("sA", ts(12, 9, 9, 5), "<local-command-stdout>Compacted</local-command-stdout>"),
+         user("sA", ts(12, 9, 10), [{"type": "text", "text": "thanks"}, {"type": "text", "text": "ship it"}]),
+         assistant("sA", ts(12, 9, 10, 20), [{"type": "text", "text": "ok"}], stop="end_turn", usage={}),
+         assistant("sA", ts(12, 9, 11), [{"type": "text", "text": "no usage field"}], stop="end_turn", usage=None),
+         user("sA", ts(12, 9, 12), ""), user("sA", ts(12, 9, 12, 5), []),
+         {"type": "system", "subtype": "stop_hook_summary", "sessionId": "sA", "timestamp": ts(12, 9, 12, 10)},
+         {"type": "system", "subtype": "other", "sessionId": "sA", "timestamp": ts(12, 9, 12, 11)},
+         {"type": "attachment", "sessionId": "sA", "timestamp": ts(12, 9, 12, 12), "attachment": {"type": "hook_success"}},
+         {"type": "attachment", "sessionId": "sA", "timestamp": ts(12, 9, 12, 13), "attachment": {}},
+         {"type": "attachment", "sessionId": "sA", "attachment": {"type": "no_timestamp"}},
+         user("sA", ts(12, 9, 13), "meta line", isMeta=True),
+         dict(user("sA", ts(12, 9, 14), "late night work"), timestamp=ts(12, 23, 30)),
+         base("sA", ts(12, 9, 15), type="assistant", uuid="a-perm", requestId="r-perm",
+              permissionDecision={"decision": "accept", "source": "user"},
+              message={"id": "m-perm", "model": "claude-sonnet-5", "stop_reason": "end_turn", "content": [],
+                       "usage": {"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 0,
+                                 "cache_read_input_tokens": 0}}),
+         {"type": "queue-operation", "operation": "enqueue", "sessionId": "sA"},
+         {"type": "cost-state", "sessionId": "sA", "totalCostUSD": 1.5},
+         {"type": "never-heard-of-it", "sessionId": "sA", "timestamp": ts(12, 9, 16)}]
+    out["-work-app/sA.jsonl"] = a
+
+    # ---- subagent file of the same session (sidechain), project A -----------------------------------
+    out["-work-app/sA/subagents/agent-1.jsonl"] = [
+        assistant("sA", ts(12, 9, 6, 10), [tool("Read", {"file_path": "/work/app/x.py"}, "tsub1"),
+                                              tool("Bash", {"command": "pytest -q"}, "tsub2")], isSidechain=True),
+        result("sA", ts(12, 9, 6, 12), "tsub1", err=False),
+        dict(result("sA", ts(12, 9, 6, 13), "tsub2", "Exit code 2", err=True), isSidechain=True),
+        dict(user("sA", ts(12, 9, 6, 14), "sidechain prompt"), isSidechain=True)]
+
+    # ---- project B, days 12-13: a second session with another model and branch ---------------------
+    b = [user("sB", ts(13, 14, 0), "explain the build"),
+         assistant("sB", ts(13, 14, 1), [{"type": "text", "text": "it runs make"}], stop="end_turn",
+                   model="claude-haiku-5-5", gitBranch="feature/x"),
+         assistant("sB", ts(13, 14, 2), [tool("Write", {"file_path": "/work/b/mod.py", "content": "x = 1\n" * 30}, "tb1")],
+                   model="some-unknown-model", gitBranch="feature/x"),
+         {"type": "user", "sessionId": "sB", "message": {"content": "undated prompt"}},
+         user("sB", ts(13, 14, 3), "typed after undated")]
+    out["-work-b/sB.jsonl"] = b
+    return out
+
+
+def stats_fingerprint(st):
+    """A deterministic, JSON-able picture of everything Stats derived (see GoldenStatsTests)."""
+    skip = {"census_paths", "census_types", "retention", "archive"}
+
+    def norm(v):
+        if isinstance(v, dict):
+            return {str(k): norm(x) for k, x in sorted(v.items(), key=lambda kv: str(kv[0]))}
+        if isinstance(v, (set, frozenset)):
+            return sorted((norm(x) for x in v), key=lambda x: afi.json.dumps(x, sort_keys=True))
+        if isinstance(v, (list, tuple)):
+            return [norm(x) for x in v]
+        if isinstance(v, float):
+            return round(v, 9)
+        if hasattr(v, "isoformat"):
+            return v.isoformat()
+        return v
+
+    return {k: norm(v) for k, v in sorted(vars(st).items()) if k not in skip}
+
+
+class GoldenStatsTests(unittest.TestCase):
+    """The same raw log must keep producing the same Stats, whatever happens between the raw line and Stats."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tz = os.environ.get("TZ")
+        if hasattr(time, "tzset"):
+            os.environ["TZ"] = "UTC"
+            time.tzset()
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(time, "tzset"):
+            if cls._tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = cls._tz
+            time.tzset()
+
+    def _stats(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        for rel, entries in kitchen_sink_logs().items():
+            p = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                for e in entries:
+                    f.write(afi.json.dumps(e) + "\n")
+        return afi.Scanner(root).build_stats()
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to pin the time zone")
+    def test_kitchen_sink_stats_match_the_golden_snapshot(self):
+        got = stats_fingerprint(self._stats())
+        if os.environ.get("AFI_REGEN_GOLDEN"):
+            with open(GOLDEN_PATH, "w", encoding="utf-8") as f:
+                afi.json.dump(got, f, indent=1, sort_keys=True)
+                f.write("\n")
+        with open(GOLDEN_PATH, "r", encoding="utf-8") as f:
+            want = afi.json.load(f)
+        self.assertEqual(got.keys(), want.keys())
+        for k in want:
+            self.assertEqual(got[k], want[k], "Stats.%s changed" % k)
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "needs time.tzset to pin the time zone")
+    def test_the_kitchen_sink_really_exercises_the_parser(self):
+        st = self._stats()
+        t = lambda k: sum(d[k] for d in st.days.values())      # noqa: E731
+        self.assertGreater(t("loc"), 40)
+        self.assertEqual(st.hc["duplicate_lines"], 2)           # one response logged on three lines
+        self.assertGreaterEqual(st.hc["sidechain_entries"], 3)
+        for k in ("corrections", "interruptions", "late_msgs", "tool_errors", "reads", "writes", "prompts"):
+            self.assertGreater(t(k), 0, k)
+        for k in ("exit_code_text", "permission_decisions", "stop_hook_summary", "thinking", "effort",
+                  "tool_results_matched", "usage_complete"):
+            self.assertGreater(st.hc[k], 0, k)
+        self.assertEqual(sorted(st.projects), ["work/app", "work/b"])
+        self.assertEqual({k for _d, k in st.safety}, {"force_push", "secret_file_touched"})
+        self.assertTrue({"test", "build", "lint"} <= {k for _d, _s, k, _ok in st.cmd_runs})
+        self.assertEqual(st.session_titles, {"sA": "Add pagination to orders"})
+        self.assertEqual(set(st.slash), {"/compact"})
+        self.assertGreater(len(st.episodes), 0)
+        self.assertEqual(st.subagents, Counter({"reviewer": 1}))
+        self.assertGreaterEqual(len(st.models), 4)               # sonnet, opus, haiku, unknown
 
 
 class HealthAndCatalogTests(_LogFixture):

@@ -1,0 +1,839 @@
+{
+ "attachment_types": {
+  "hook_success": 1
+ },
+ "branches": {
+  "feature/x": {
+   "loc": 31,
+   "msgs": 2,
+   "output": 218
+  },
+  "main": {
+   "loc": 15,
+   "msgs": 12,
+   "output": 706
+  }
+ },
+ "cmd_runs": [
+  [
+   "2026-10-12",
+   "sA",
+   "test",
+   false
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "test",
+   true
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "build",
+   true
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "lint",
+   false
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "test",
+   false
+  ]
+ ],
+ "day_buckets": {
+  "2026-10-12": [
+   141,
+   54,
+   55
+  ],
+  "2026-10-13": [
+   84
+  ]
+ },
+ "days": {
+  "2026-10-12": {
+   "cache_read": 50000,
+   "cache_savings": 0.146025,
+   "cache_write": 3000,
+   "corrections": 1,
+   "cost": 0.041998,
+   "human_tokens": 39,
+   "input": 126,
+   "interruptions": 1,
+   "late_msgs": 1,
+   "loc": 15,
+   "messages": 43,
+   "output": 706,
+   "prompt_lines": 7,
+   "prompt_words": 30,
+   "prompts": 5,
+   "reads": 5,
+   "tool_errors": 4,
+   "writes": 6
+  },
+  "2026-10-13": {
+   "cache_read": 10000,
+   "cache_savings": 0.0177,
+   "cache_write": 600,
+   "corrections": 0,
+   "cost": 0.005738,
+   "human_tokens": 8,
+   "input": 24,
+   "interruptions": 0,
+   "late_msgs": 0,
+   "loc": 31,
+   "messages": 4,
+   "output": 218,
+   "prompt_lines": 2,
+   "prompt_words": 6,
+   "prompts": 2,
+   "reads": 0,
+   "tool_errors": 0,
+   "writes": 1
+  }
+ },
+ "edits": [
+  [
+   "2026-10-12",
+   "sA",
+   "/work/app/orders.py",
+   "work/app"
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "/work/app/tests/test_orders.py",
+   "work/app"
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "/work/app/api.py",
+   "work/app"
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "/work/app/n.ipynb",
+   "work/app"
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "/work/app/secrets.json",
+   "work/app"
+  ],
+  [
+   "2026-10-12",
+   "sA",
+   "/work/app/orders.py",
+   "work/app"
+  ],
+  [
+   "2026-10-13",
+   "sB",
+   "/work/b/mod.py",
+   "work/b"
+  ]
+ ],
+ "efforts": [
+  [
+   "2026-10-12",
+   "high"
+  ]
+ ],
+ "entry_types": {
+  "ai-title": 1,
+  "assistant": 18,
+  "attachment": 3,
+  "cost-state": 1,
+  "never-heard-of-it": 1,
+  "permission-mode": 2,
+  "queue-operation": 1,
+  "system": 2,
+  "user": 31
+ },
+ "entrypoints": {},
+ "episodes": [
+  [
+   "2026-10-12",
+   "Bash",
+   1,
+   1
+  ]
+ ],
+ "errors": 1,
+ "feature_days": {
+  "hooks": [
+   "2026-10-12"
+  ],
+  "mcp": [
+   "2026-10-12"
+  ],
+  "skills": [
+   "2026-10-12"
+  ],
+  "slash": [
+   "2026-10-12"
+  ],
+  "subagents": [
+   "2026-10-12"
+  ],
+  "tasks": [
+   "2026-10-12"
+  ],
+  "verify": [
+   "2026-10-12"
+  ],
+  "web": [
+   "2026-10-12"
+  ]
+ },
+ "files_touched": {
+  "api.py": 3,
+  "mod.py": 31,
+  "n.ipynb": 3,
+  "orders.py": 4,
+  "secrets.json": 1,
+  "test_orders.py": 4
+ },
+ "hc": {
+  "assistant_lines": 18,
+  "assistant_msgs": 14,
+  "decode_errors_mid": 0,
+  "decode_errors_torn": 0,
+  "duplicate_lines": 2,
+  "effort": 1,
+  "entries": 48,
+  "entries_dated": 47,
+  "exit_code_text": 2,
+  "permission_decisions": 1,
+  "restored_files": 0,
+  "set_aside_files": 0,
+  "sidechain_entries": 3,
+  "stop_hook_summary": 1,
+  "stop_reason": 16,
+  "thinking": 1,
+  "tool_results": 17,
+  "tool_results_matched": 16,
+  "tool_uses": 23,
+  "usage_complete": 13
+ },
+ "heatmap": {
+  "(0, 23)": 1,
+  "(0, 9)": 42,
+  "(1, 14)": 4
+ },
+ "last_day": "2026-10-13",
+ "longest_prompts": [
+  [
+   2,
+   11,
+   "Add pagination to the orders list. Keep the page size configurable.",
+   "2026-10-12"
+  ],
+  [
+   2,
+   3,
+   "thanks ship it",
+   "2026-10-12"
+  ],
+  [
+   1,
+   11,
+   "no, that's wrong - the page size should default to 25",
+   "2026-10-12"
+  ],
+  [
+   1,
+   3,
+   "late night work",
+   "2026-10-12"
+  ],
+  [
+   1,
+   2,
+   "sidechain prompt",
+   "2026-10-12"
+  ],
+  [
+   1,
+   3,
+   "explain the build",
+   "2026-10-13"
+  ],
+  [
+   1,
+   2,
+   "undated prompt",
+   ""
+  ],
+  [
+   1,
+   3,
+   "typed after undated",
+   "2026-10-13"
+  ]
+ ],
+ "models": {
+  "claude-haiku-5-5": {
+   "cache_read": 5000,
+   "cache_write": 300,
+   "cost": 0.001427,
+   "input": 12,
+   "msgs": 1,
+   "output": 108
+  },
+  "claude-opus-5-5": {
+   "cache_read": 5000,
+   "cache_write": 300,
+   "cost": 0.01983,
+   "input": 12,
+   "msgs": 1,
+   "output": 87
+  },
+  "claude-sonnet-5": {
+   "cache_read": 45000,
+   "cache_write": 2700,
+   "cost": 0.022168,
+   "input": 114,
+   "msgs": 11,
+   "output": 619
+  },
+  "some-unknown-model": {
+   "cache_read": 5000,
+   "cache_write": 300,
+   "cost": 0.004311,
+   "input": 12,
+   "msgs": 1,
+   "output": 110
+  }
+ },
+ "parse_errors": 0,
+ "pending_tools": {
+  "t_agent": {
+   "family": "Agent",
+   "kind": null,
+   "name": "Agent",
+   "sid": "sA",
+   "side": false,
+   "ts": "2026-10-12T09:06:01+00:00"
+  },
+  "t_e2": {
+   "family": "Edit",
+   "kind": null,
+   "name": "Edit",
+   "sid": "sA",
+   "side": false,
+   "ts": "2026-10-12T09:08:30+00:00"
+  },
+  "t_ls": {
+   "family": "ls",
+   "kind": "other",
+   "name": "Bash",
+   "sid": "sA",
+   "side": false,
+   "ts": "2026-10-12T09:06:30+00:00"
+  },
+  "t_skill": {
+   "family": "Skill",
+   "kind": null,
+   "name": "Skill",
+   "sid": "sA",
+   "side": false,
+   "ts": "2026-10-12T09:06:30+00:00"
+  },
+  "t_todo": {
+   "family": "TodoWrite",
+   "kind": null,
+   "name": "TodoWrite",
+   "sid": "sA",
+   "side": false,
+   "ts": "2026-10-12T09:06:30+00:00"
+  },
+  "t_web": {
+   "family": "WebSearch",
+   "kind": null,
+   "name": "WebSearch",
+   "sid": "sA",
+   "side": false,
+   "ts": "2026-10-12T09:06:30+00:00"
+  },
+  "tb1": {
+   "family": "Write",
+   "kind": null,
+   "name": "Write",
+   "sid": "sB",
+   "side": false,
+   "ts": "2026-10-13T14:02:00+00:00"
+  }
+ },
+ "perm_decisions": [
+  [
+   "2026-10-12",
+   "accept",
+   "user"
+  ]
+ ],
+ "permission_modes": {
+  "default": 1,
+  "plan": 1
+ },
+ "project_cwd": {
+  "work/app": "/work/app",
+  "work/b": "/work/app"
+ },
+ "projects": {
+  "work/app": {
+   "cost": 0.041998,
+   "days": {
+    "2026-10-12": {
+     "loc": 15,
+     "output": 706
+    }
+   },
+   "files": {
+    "api.py": 3,
+    "n.ipynb": 3,
+    "orders.py": 4,
+    "secrets.json": 1,
+    "test_orders.py": 4
+   },
+   "input": 126,
+   "loc": 15,
+   "output": 706,
+   "prompts": 5,
+   "sessions": [
+    "sA"
+   ]
+  },
+  "work/b": {
+   "cost": 0.005738,
+   "days": {
+    "2026-10-13": {
+     "loc": 31,
+     "output": 218
+    }
+   },
+   "files": {
+    "mod.py": 31
+   },
+   "input": 24,
+   "loc": 31,
+   "output": 218,
+   "prompts": 3,
+   "sessions": [
+    "sB"
+   ]
+  }
+ },
+ "prompt_chars": 215,
+ "prompt_words": 38,
+ "safety": [
+  [
+   "2026-10-12",
+   "force_push"
+  ],
+  [
+   "2026-10-12",
+   "secret_file_touched"
+  ],
+  [
+   "2026-10-12",
+   "secret_file_touched"
+  ]
+ ],
+ "seen_msg_ids": [
+  [
+   "m-perm",
+   "r-perm"
+  ],
+  [
+   "m11",
+   "rm11"
+  ],
+  [
+   "m17",
+   "rm17"
+  ],
+  [
+   "m20",
+   "rm20"
+  ],
+  [
+   "m24",
+   "rm24"
+  ],
+  [
+   "m30",
+   "rm30"
+  ],
+  [
+   "m4",
+   "rm4"
+  ],
+  [
+   "m4",
+   "think"
+  ],
+  [
+   "m44",
+   "rm44"
+  ],
+  [
+   "m47",
+   "rm47"
+  ],
+  [
+   "m50",
+   "rm50"
+  ],
+  [
+   "m63",
+   "rm63"
+  ],
+  [
+   "m68",
+   "rm68"
+  ],
+  [
+   "m70",
+   "rm70"
+  ],
+  [
+   "mDUP",
+   "rmDUP"
+  ]
+ ],
+ "seen_tool_ids": [
+  "t_agent",
+  "t_build",
+  "t_e2",
+  "t_edit",
+  "t_env",
+  "t_grep",
+  "t_lint",
+  "t_ls",
+  "t_mcp",
+  "t_multi",
+  "t_nb",
+  "t_read",
+  "t_risky",
+  "t_sec",
+  "t_skill",
+  "t_test1",
+  "t_test2",
+  "t_todo",
+  "t_web",
+  "t_write",
+  "tb1",
+  "tsub1",
+  "tsub2"
+ ],
+ "session_titles": {
+  "sA": "Add pagination to orders"
+ },
+ "sessions": {
+  "sA": {
+   "api_calls": 12,
+   "bash": 7,
+   "cache_resets": 0,
+   "cost": 0.041998,
+   "end": "2026-10-12T23:30:00.000Z",
+   "first_call_cost": 0.002214,
+   "first_edit_s": 60.0,
+   "last_cmd_seq": 19,
+   "last_turn": {
+    "corrected": false,
+    "day": "2026-10-12",
+    "err": false,
+    "intr": false,
+    "secs": 0.0,
+    "sid": "sA",
+    "steps": 0
+   },
+   "last_verify_seq": 10,
+   "last_write_seq": 20,
+   "loc": 15,
+   "model_cost": {
+    "claude-opus-5-5": 0.01983,
+    "claude-sonnet-5": 0.022168
+   },
+   "msgs": 43,
+   "open_err": {
+    "Bash": {
+     "day": "2026-10-12",
+     "fails": 2,
+     "steps": 4
+    }
+   },
+   "output": 706,
+   "project": "work/app",
+   "prompts": 5,
+   "reads": 5,
+   "seq": 20,
+   "start": "2026-10-12T09:00:00.000Z",
+   "start_dt": "2026-10-12T09:00:00+00:00",
+   "test_files": 1,
+   "turn": null,
+   "writes": 6
+  },
+  "sB": {
+   "api_calls": 2,
+   "bash": 0,
+   "cache_resets": 0,
+   "cost": 0.005738,
+   "end": "2026-10-13T14:03:00.000Z",
+   "first_call_cost": 0.001427,
+   "first_edit_s": 120.0,
+   "last_cmd_seq": -1,
+   "last_turn": {
+    "corrected": false,
+    "day": "",
+    "err": false,
+    "intr": false,
+    "secs": null,
+    "sid": "sB",
+    "steps": 0
+   },
+   "last_verify_seq": -1,
+   "last_write_seq": 1,
+   "loc": 31,
+   "model_cost": {
+    "claude-haiku-5-5": 0.001427,
+    "some-unknown-model": 0.004311
+   },
+   "msgs": 5,
+   "open_err": {},
+   "output": 218,
+   "project": "work/b",
+   "prompts": 3,
+   "reads": 0,
+   "seq": 1,
+   "start": "2026-10-13T14:00:00.000Z",
+   "start_dt": "2026-10-13T14:00:00+00:00",
+   "test_files": 0,
+   "turn": {
+    "corrected": false,
+    "day": "2026-10-13",
+    "err": false,
+    "intr": false,
+    "secs": null,
+    "sid": "sB",
+    "start": "2026-10-13T14:03:00+00:00",
+    "steps": 0
+   },
+   "writes": 1
+  }
+ },
+ "slash": {
+  "/compact": 1
+ },
+ "subagents": {
+  "reviewer": 1
+ },
+ "thinking": [
+  [
+   "2026-10-12",
+   2400
+  ]
+ ],
+ "tool_calls": [
+  [
+   "2026-10-12",
+   "Read",
+   "Read",
+   2.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Grep",
+   "Grep",
+   3.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Edit",
+   "Edit",
+   5.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Write",
+   "Write",
+   6.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "MultiEdit",
+   "MultiEdit",
+   7.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "NotebookEdit",
+   "NotebookEdit",
+   8.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Bash",
+   "pytest",
+   30.0,
+   false
+  ],
+  [
+   "2026-10-12",
+   "Bash",
+   "pytest",
+   20.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Bash",
+   "npm run build",
+   40.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Bash",
+   "ruff",
+   41.0,
+   false
+  ],
+  [
+   "2026-10-12",
+   "Bash",
+   "git push",
+   3.0,
+   false
+  ],
+  [
+   "2026-10-12",
+   "Read",
+   "Read",
+   4.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Write",
+   "Write",
+   5.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "mcp__github__get_issue",
+   "mcp__github__get_issue",
+   10.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Read",
+   "Read",
+   2.0,
+   true
+  ],
+  [
+   "2026-10-12",
+   "Bash",
+   "pytest",
+   3.0,
+   false
+  ]
+ ],
+ "tool_errors": 4,
+ "tools": {
+  "Agent": 1,
+  "Bash": 7,
+  "Edit": 2,
+  "Grep": 1,
+  "MultiEdit": 1,
+  "NotebookEdit": 1,
+  "Read": 3,
+  "Skill": 1,
+  "TodoWrite": 1,
+  "WebSearch": 1,
+  "Write": 3,
+  "mcp__github__get_issue": 1
+ },
+ "turns": [
+  {
+   "corrected": true,
+   "day": "2026-10-12",
+   "err": true,
+   "intr": false,
+   "secs": 420.0,
+   "sid": "sA",
+   "steps": 19
+  },
+  {
+   "corrected": false,
+   "day": "2026-10-12",
+   "err": false,
+   "intr": true,
+   "secs": null,
+   "sid": "sA",
+   "steps": 1
+  },
+  {
+   "corrected": false,
+   "day": "2026-10-12",
+   "err": false,
+   "intr": false,
+   "secs": 20.0,
+   "sid": "sA",
+   "steps": 0
+  },
+  {
+   "corrected": false,
+   "day": "2026-10-12",
+   "err": false,
+   "intr": false,
+   "secs": 0.0,
+   "sid": "sA",
+   "steps": 0
+  },
+  {
+   "corrected": false,
+   "day": "2026-10-13",
+   "err": false,
+   "intr": false,
+   "secs": 60.0,
+   "sid": "sB",
+   "steps": 0
+  },
+  {
+   "corrected": false,
+   "day": "",
+   "err": false,
+   "intr": false,
+   "secs": null,
+   "sid": "sB",
+   "steps": 0
+  }
+ ],
+ "usage_missing": {
+  "cache_creation_input_tokens": 1,
+  "cache_read_input_tokens": 1
+ },
+ "versions": {
+  "2.1.316": 48
+ }
+}
