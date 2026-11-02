@@ -1761,6 +1761,212 @@ class LogResilienceTests(_LogFixture):
         self.assertEqual([t["type"] for t in h["unknown_entry_types"]], ["brand-new-thing"])
 
 
+class SchemaSentinelTests(_LogFixture):
+    """The drift sentinel (docs/LOG_RESILIENCE_ROADMAP.md section 2), retention note and fixture redaction."""
+
+    def _mk(self, i, ver="2.1.316", drop=(), **over):
+        """One realistic assistant entry; `drop` removes dotted fields, `over` replaces top-level keys."""
+        e = {"type": "assistant", "sessionId": "s%d" % (i // 5), "timestamp": self._ts(i), "version": ver,
+             "uuid": "u%s%d" % (ver, i), "requestId": "r%s%d" % (ver, i),
+             "message": {"id": "m%s%d" % (ver, i), "model": "claude-sonnet-5", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "x"}],
+                         "usage": {"input_tokens": 10, "output_tokens": 5, "cache_creation_input_tokens": 0,
+                                   "cache_read_input_tokens": 100}}}
+        e.update(over)
+        for dotted in drop:
+            *parents, leaf = dotted.split(".")
+            node = e
+            for part in parents:
+                node = node[part]
+            node.pop(leaf, None)
+        return e
+
+    def _analyze(self, entries, manifest=None, **kw):
+        path = os.path.join(self.root, "proj", "a.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for e in entries:
+                f.write(afi.json.dumps(e) + "\n")
+        st = afi.Scanner(self.root).build_stats()
+        return afi.analyze_schema(st.census_paths, st.census_types, manifest, **kw), st
+
+    def _kinds(self, res):
+        return {(f["kind"], f["path"]) for f in res["findings"] if f["severity"] == "warning"}
+
+    # --- flattening --------------------------------------------------------
+    def test_flatten_collapses_ids_maps_and_opaque_subtrees(self):
+        e = {"type": "x", "wireToolInputs": {"toolu_01ABC": {"a": 1}},
+             "modelUsage": {"claude-new-9": {"costUSD": 1.5}},
+             "u": {"123e4567-e89b-12d3-a456-426614174000": 1}, "m": [{"k": 1}, {"k": "s"}]}
+        flat = afi.flatten_entry(e)
+        paths = {p for p, _t in flat}
+        self.assertIn("wireToolInputs", paths)
+        self.assertFalse([p for p in paths if p.startswith("wireToolInputs.")])
+        self.assertIn("modelUsage.<key>.costUSD", paths)
+        self.assertIn("u.<id>", paths)
+        self.assertTrue({("m[].k", "int"), ("m[].k", "str")} <= flat)
+
+    # --- consumed-field drift ---------------------------------------------
+    def test_healthy_logs_raise_no_warnings(self):
+        res, _ = self._analyze([self._mk(i) for i in range(30)], afi.load_schema_manifest())
+        self.assertEqual(res["summary"]["warning"], 0, res["findings"])
+
+    def test_field_missing_everywhere_is_a_warning_and_degrades_metrics(self):
+        res, _ = self._analyze([self._mk(i, drop=["message.usage.cache_read_input_tokens"]) for i in range(30)])
+        self.assertIn(("missing_all", "message.usage.cache_read_input_tokens"), self._kinds(res))
+        self.assertIn("cache_savings", res["affected_metrics"])
+        cat = afi.catalog_payload(res)
+        self.assertIn("cache read tokens", cat["cache_savings"]["degraded"])
+        self.assertIsNone(cat["turn_time"]["degraded"])
+
+    def test_field_that_vanished_in_a_newer_version_names_the_version(self):
+        entries = [self._mk(i, ver="2.1.0") for i in range(25)] + \
+                  [self._mk(100 + i, ver="2.2.0", drop=["message.stop_reason"]) for i in range(25)]
+        res, _ = self._analyze(entries)
+        f = [f for f in res["findings"] if f["kind"] == "vanished"]
+        self.assertEqual(len(f), 1)
+        self.assertEqual(f[0]["versions"], ["2.2.0"])
+        self.assertIn("2.2.0", f[0]["title"])
+
+    def test_type_change_is_a_warning(self):
+        entries = [self._mk(i) for i in range(25)]
+        for e in entries:
+            e["message"]["usage"]["cache_read_input_tokens"] = "100"      # int became a string
+        res, _ = self._analyze(entries)
+        self.assertIn(("type_change", "message.usage.cache_read_input_tokens"), self._kinds(res))
+
+    def test_too_little_evidence_is_not_drift(self):
+        res, _ = self._analyze([self._mk(i, drop=["message.model"]) for i in range(5)])
+        self.assertEqual(res["summary"]["warning"], 0)
+
+    def test_optional_fields_may_be_absent(self):
+        # thinkingDurationMs only appears on thinking turns; its absence must never be flagged
+        res, _ = self._analyze([self._mk(i) for i in range(30)])
+        self.assertNotIn(("missing_all", "thinkingDurationMs"), self._kinds(res))
+
+    # --- baseline comparison ----------------------------------------------
+    def test_new_fields_are_info_only_and_need_a_baseline(self):
+        entries = [self._mk(i, brandNewField={"deep": 1}) for i in range(25)]
+        manifest = afi.load_schema_manifest()
+        res, _ = self._analyze(entries, manifest)
+        new = [f for f in res["findings"] if f["kind"] == "new_field"]
+        self.assertEqual(len(new), 1)
+        self.assertEqual(new[0]["severity"], "info")
+        self.assertIn("brandNewField", new[0]["paths"])
+        self.assertEqual(res["summary"]["warning"], 0)
+        res2, _ = self._analyze(entries, None)            # no baseline: say so, report nothing about new fields
+        self.assertFalse(res2["baseline"]["loaded"])
+        self.assertFalse([f for f in res2["findings"] if f["kind"] == "new_field"])
+
+    def test_shipped_baseline_covers_every_always_present_consumed_field(self):
+        m = afi.load_schema_manifest()
+        self.assertIsNotNone(m, "schema/claude_code_known.json is missing or unreadable")
+        for et, path, _acc, always, _metrics, _label in afi.CONSUMED_FIELDS:
+            if always:
+                self.assertIn(path, m["entry_types"].get(et, {}), (et, path))
+
+    def test_new_model_name_does_not_look_like_new_fields(self):
+        m = afi.load_schema_manifest()
+        e = {"type": "cost-state", "sessionId": "s", "modelUsage": {"claude-brand-new-9": {"costUSD": 1.0}}}
+        paths = {p for p, _t in afi.flatten_entry(e)}
+        self.assertTrue(paths <= set(m["entry_types"]["cost-state"]) | {"modelUsage.<key>.costUSD"}, paths)
+
+    # --- report ------------------------------------------------------------
+    def test_report_text(self):
+        res, st = self._analyze([self._mk(i, drop=["message.model"]) for i in range(30)], afi.load_schema_manifest())
+        text = afi.render_schema_report({"schema": res, "unknown_entry_types": []})
+        self.assertIn("[WARNING]", text)
+        self.assertIn("message.model", text)
+        ok, _ = self._analyze([self._mk(i) for i in range(30)], afi.load_schema_manifest())
+        self.assertIn("No log format changes detected", afi.render_schema_report({"schema": ok, "unknown_entry_types": []}))
+
+    def test_health_payload_carries_schema_and_serialises(self):
+        self.prompt("hello")
+        self.end_turn()
+        h = afi.build_health(self.stats())
+        self.assertIn("schema", h)
+        afi.json.dumps(h)
+
+    # --- retention ---------------------------------------------------------
+    def _config(self, content):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        if content is not None:
+            with open(os.path.join(d, "settings.json"), "w", encoding="utf-8") as f:
+                f.write(content if isinstance(content, str) else afi.json.dumps(content))
+        return d
+
+    def test_retention_reads_the_setting_and_rejects_bad_values(self):
+        self.assertEqual(afi.load_retention(self._config({"cleanupPeriodDays": 90}))["days"], 90)
+        for bad in (None, {}, {"cleanupPeriodDays": 0}, {"cleanupPeriodDays": True},
+                    {"cleanupPeriodDays": "90"}, "{not json"):
+            r = afi.load_retention(self._config(bad))
+            self.assertEqual((r["days"], r["source"]), (30, "the Claude Code default"), bad)
+
+    def test_history_window_capability(self):
+        self.prompt("hello")
+        self.end_turn()
+        from unittest import mock
+        for cfg, status in (({}, "partial"), ({"cleanupPeriodDays": 400}, "ok")):
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self._config(cfg)}):
+                caps = {c["id"]: c for c in afi.build_health(self.stats())["capabilities"]}
+            self.assertEqual(caps["history"]["status"], status)
+        self.assertIn("older history is gone", caps["history"]["detail"])
+
+    # --- redaction ---------------------------------------------------------
+    SECRETS = ("hunter2", "alice", "corp.com", "internal.example", "secret-project", "mcp__corp__deploy", "S-secret",
+               "toolu_01XYZ")
+
+    def _secret_entry(self):
+        return {"type": "assistant", "uuid": "u-1", "sessionId": "S-secret", "cwd": "/home/alice/secret-project",
+                "timestamp": "2026-11-01T10:00:00.000Z", "version": "2.1.316", "isSidechain": False,
+                "attachment": {"context": {"userEmail": "alice@corp.com"}},
+                "wireToolInputs": {"toolu_01XYZ": {"command": "curl https://internal.example/token"}},
+                "message": {"id": "m1", "model": "claude-sonnet-5", "stop_reason": "tool_use",
+                            "content": [{"type": "text", "text": "my password is hunter2"},
+                                        {"type": "tool_use", "id": "toolu_01XYZ", "name": "mcp__corp__deploy",
+                                         "input": {"file_path": "/home/alice/x.py"}},
+                                        {"type": "tool_use", "id": "toolu_02", "name": "Bash",
+                                         "input": {"command": "ls"}}],
+                            "usage": {"input_tokens": 12, "output_tokens": 34, "cache_creation_input_tokens": 0,
+                                      "cache_read_input_tokens": 56}}}
+
+    def test_redaction_removes_content_and_keeps_structure(self):
+        ids = {}
+        r1 = afi.redact_entry(self._secret_entry(), ids)
+        text = afi.json.dumps(r1)
+        for secret in self.SECRETS:
+            self.assertNotIn(secret, text)
+        self.assertEqual(r1["type"], "assistant")
+        self.assertEqual(r1["message"]["model"], "claude-sonnet-5")
+        self.assertEqual(r1["message"]["usage"]["output_tokens"], 34)
+        self.assertEqual(r1["timestamp"], "2026-11-01T10:00:00.000Z")
+        self.assertEqual(r1["message"]["content"][2]["name"], "Bash")
+        self.assertEqual(afi.flatten_entry(r1), afi.flatten_entry(self._secret_entry()))   # same structure
+        # ids are consistent pseudonyms across entries, so de-duplication still works
+        r2 = afi.redact_entry(self._secret_entry(), ids)
+        self.assertEqual(r1["sessionId"], r2["sessionId"])
+        self.assertNotEqual(r1["sessionId"], r1["uuid"])
+
+    def test_redacted_logs_give_the_same_token_totals(self):
+        self.prompt("add pagination to the orders list please")
+        self.edit()
+        self.end_turn()
+        a = self.stats()
+        other = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, other, True)
+        os.makedirs(os.path.join(other, "proj"))
+        ids = {}
+        with open(os.path.join(other, "proj", "a.jsonl"), "w", encoding="utf-8") as f:
+            for e in self.entries:
+                f.write(afi.json.dumps(afi.redact_entry(e, ids)) + "\n")
+        b = afi.Scanner(other).build_stats()
+        tot = lambda st, k: sum(d[k] for d in st.days.values())      # noqa: E731
+        for k in ("input", "output", "cache_read", "cache_write"):
+            self.assertEqual(tot(a, k), tot(b, k), k)
+        self.assertEqual(len(a.turns), len(b.turns))
+        self.assertEqual(a.parse_errors, b.parse_errors)
+
+
 class HealthAndCatalogTests(_LogFixture):
     def test_missing_signals_are_reported_not_zeroed(self):
         self.prompt("hi")

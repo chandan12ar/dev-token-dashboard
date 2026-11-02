@@ -1,0 +1,1348 @@
+{
+ "format": 1,
+ "note": "Fields seen in real Claude Code logs. Used by the dashboard's schema sentinel to spot NEW fields. Grow it with: python tools/schema_census.py --write-manifest schema/claude_code_known.json",
+ "entry_types": {
+  "assistant": {
+   "advisorModel": [
+    "str"
+   ],
+   "apiBlockIndex": [
+    "int"
+   ],
+   "cwd": [
+    "str"
+   ],
+   "effort": [
+    "str"
+   ],
+   "entrypoint": [
+    "str"
+   ],
+   "gitBranch": [
+    "str"
+   ],
+   "isSidechain": [
+    "bool"
+   ],
+   "message": [
+    "object"
+   ],
+   "message.container": [
+    "null"
+   ],
+   "message.content": [
+    "list"
+   ],
+   "message.content[]": [
+    "object"
+   ],
+   "message.content[].caller": [
+    "object"
+   ],
+   "message.content[].caller.type": [
+    "str"
+   ],
+   "message.content[].id": [
+    "str"
+   ],
+   "message.content[].input": [
+    "object"
+   ],
+   "message.content[].input.-A": [
+    "int"
+   ],
+   "message.content[].input.-B": [
+    "int"
+   ],
+   "message.content[].input.-n": [
+    "bool"
+   ],
+   "message.content[].input.activeForm": [
+    "str"
+   ],
+   "message.content[].input.command": [
+    "str"
+   ],
+   "message.content[].input.content": [
+    "str"
+   ],
+   "message.content[].input.description": [
+    "str"
+   ],
+   "message.content[].input.file_path": [
+    "str"
+   ],
+   "message.content[].input.glob": [
+    "str"
+   ],
+   "message.content[].input.head_limit": [
+    "int"
+   ],
+   "message.content[].input.limit": [
+    "int"
+   ],
+   "message.content[].input.max_results": [
+    "int"
+   ],
+   "message.content[].input.offset": [
+    "int"
+   ],
+   "message.content[].input.output_mode": [
+    "str"
+   ],
+   "message.content[].input.path": [
+    "str"
+   ],
+   "message.content[].input.pattern": [
+    "str"
+   ],
+   "message.content[].input.prompt": [
+    "str"
+   ],
+   "message.content[].input.query": [
+    "str"
+   ],
+   "message.content[].input.status": [
+    "str"
+   ],
+   "message.content[].input.subject": [
+    "str"
+   ],
+   "message.content[].input.taskId": [
+    "str"
+   ],
+   "message.content[].input.url": [
+    "str"
+   ],
+   "message.content[].name": [
+    "str"
+   ],
+   "message.content[].signature": [
+    "str"
+   ],
+   "message.content[].text": [
+    "str"
+   ],
+   "message.content[].thinking": [
+    "str"
+   ],
+   "message.content[].type": [
+    "str"
+   ],
+   "message.context_management": [
+    "null"
+   ],
+   "message.diagnostics": [
+    "null"
+   ],
+   "message.id": [
+    "str"
+   ],
+   "message.input_transformations": [
+    "list"
+   ],
+   "message.model": [
+    "str"
+   ],
+   "message.role": [
+    "str"
+   ],
+   "message.stop_details": [
+    "null"
+   ],
+   "message.stop_reason": [
+    "str"
+   ],
+   "message.stop_sequence": [
+    "null"
+   ],
+   "message.type": [
+    "str"
+   ],
+   "message.usage": [
+    "object"
+   ],
+   "message.usage.cache_creation": [
+    "object"
+   ],
+   "message.usage.cache_creation.ephemeral_1h_input_tokens": [
+    "int"
+   ],
+   "message.usage.cache_creation.ephemeral_5m_input_tokens": [
+    "int"
+   ],
+   "message.usage.cache_creation_input_tokens": [
+    "int"
+   ],
+   "message.usage.cache_read_input_tokens": [
+    "int"
+   ],
+   "message.usage.fallback_credit": [
+    "null"
+   ],
+   "message.usage.inference_geo": [
+    "str"
+   ],
+   "message.usage.input_tokens": [
+    "int"
+   ],
+   "message.usage.iterations": [
+    "list"
+   ],
+   "message.usage.iterations[]": [
+    "object"
+   ],
+   "message.usage.iterations[].cache_creation": [
+    "object"
+   ],
+   "message.usage.iterations[].cache_creation.ephemeral_1h_input_tokens": [
+    "int"
+   ],
+   "message.usage.iterations[].cache_creation.ephemeral_5m_input_tokens": [
+    "int"
+   ],
+   "message.usage.iterations[].cache_creation_input_tokens": [
+    "int"
+   ],
+   "message.usage.iterations[].cache_read_input_tokens": [
+    "int"
+   ],
+   "message.usage.iterations[].input_tokens": [
+    "int"
+   ],
+   "message.usage.iterations[].output_tokens": [
+    "int"
+   ],
+   "message.usage.iterations[].type": [
+    "str"
+   ],
+   "message.usage.output_tokens": [
+    "int"
+   ],
+   "message.usage.output_tokens_details": [
+    "object"
+   ],
+   "message.usage.output_tokens_details.thinking_tokens": [
+    "int"
+   ],
+   "message.usage.server_tool_use": [
+    "object"
+   ],
+   "message.usage.server_tool_use.web_fetch_requests": [
+    "int"
+   ],
+   "message.usage.server_tool_use.web_search_requests": [
+    "int"
+   ],
+   "message.usage.service_tier": [
+    "str"
+   ],
+   "message.usage.speed": [
+    "str"
+   ],
+   "parentUuid": [
+    "str"
+   ],
+   "perTurnEffort": [
+    "str"
+   ],
+   "requestId": [
+    "str"
+   ],
+   "requestedModel": [
+    "str"
+   ],
+   "serverClassifierRequest": [
+    "str"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "thinkingDisplay": [
+    "str"
+   ],
+   "thinkingDurationMs": [
+    "int"
+   ],
+   "timestamp": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ],
+   "userType": [
+    "str"
+   ],
+   "uuid": [
+    "str"
+   ],
+   "version": [
+    "str"
+   ],
+   "wireIngestContext": [
+    "object"
+   ],
+   "wireToolInputs": [
+    "object"
+   ]
+  },
+  "atis-latch": {
+   "atis": [
+    "str"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ]
+  },
+  "attachment": {
+   "attachment": [
+    "object"
+   ],
+   "attachment.addedBlocks": [
+    "list"
+   ],
+   "attachment.addedBlocks[]": [
+    "str"
+   ],
+   "attachment.addedLines": [
+    "list"
+   ],
+   "attachment.addedLines[]": [
+    "str"
+   ],
+   "attachment.addedNames": [
+    "list"
+   ],
+   "attachment.addedNames[]": [
+    "str"
+   ],
+   "attachment.addedTypes": [
+    "list"
+   ],
+   "attachment.addedTypes[]": [
+    "str"
+   ],
+   "attachment.builtInPluginTypes": [
+    "list"
+   ],
+   "attachment.builtInTypes": [
+    "list"
+   ],
+   "attachment.builtInTypes[]": [
+    "str"
+   ],
+   "attachment.cliPrefix": [
+    "str"
+   ],
+   "attachment.commit": [
+    "str"
+   ],
+   "attachment.content": [
+    "list",
+    "str"
+   ],
+   "attachment.content[]": [
+    "object"
+   ],
+   "attachment.content[].activeForm": [
+    "str"
+   ],
+   "attachment.content[].blockedBy": [
+    "list"
+   ],
+   "attachment.content[].blocks": [
+    "list"
+   ],
+   "attachment.content[].description": [
+    "str"
+   ],
+   "attachment.content[].id": [
+    "str"
+   ],
+   "attachment.content[].status": [
+    "str"
+   ],
+   "attachment.content[].subject": [
+    "str"
+   ],
+   "attachment.context": [
+    "object"
+   ],
+   "attachment.context.userEmail": [
+    "str"
+   ],
+   "attachment.contextRendering": [
+    "str"
+   ],
+   "attachment.date": [
+    "str"
+   ],
+   "attachment.digests": [
+    "list"
+   ],
+   "attachment.digests[]": [
+    "str"
+   ],
+   "attachment.echoWireToolInputs": [
+    "bool"
+   ],
+   "attachment.entries": [
+    "list"
+   ],
+   "attachment.entries[]": [
+    "object"
+   ],
+   "attachment.entries[].defer_loading": [
+    "bool"
+   ],
+   "attachment.entries[].description": [
+    "str"
+   ],
+   "attachment.entries[].eager_input_streaming": [
+    "bool"
+   ],
+   "attachment.entries[].input_schema": [
+    "object"
+   ],
+   "attachment.entries[].name": [
+    "str"
+   ],
+   "attachment.failedMcpServers": [
+    "list"
+   ],
+   "attachment.failedMcpServers[]": [
+    "object"
+   ],
+   "attachment.failedMcpServers[].error": [
+    "str"
+   ],
+   "attachment.failedMcpServers[].errorCode": [
+    "str"
+   ],
+   "attachment.failedMcpServers[].name": [
+    "str"
+   ],
+   "attachment.filename": [
+    "str"
+   ],
+   "attachment.identity": [
+    "object"
+   ],
+   "attachment.identity.knowledgeCutoff": [
+    "str"
+   ],
+   "attachment.identity.marketingName": [
+    "str"
+   ],
+   "attachment.identity.modelId": [
+    "str"
+   ],
+   "attachment.inlineTools": [
+    "bool"
+   ],
+   "attachment.isInitial": [
+    "bool"
+   ],
+   "attachment.itemCount": [
+    "int"
+   ],
+   "attachment.keptReminders": [
+    "bool"
+   ],
+   "attachment.managedCommit": [
+    "bool"
+   ],
+   "attachment.managedPr": [
+    "bool"
+   ],
+   "attachment.names": [
+    "list"
+   ],
+   "attachment.names[]": [
+    "str"
+   ],
+   "attachment.needsAuthMcpServers": [
+    "list"
+   ],
+   "attachment.needsAuthMcpServers[]": [
+    "str"
+   ],
+   "attachment.organizationUuid": [
+    "str"
+   ],
+   "attachment.pendingMcpServers": [
+    "list"
+   ],
+   "attachment.pendingMcpServers[]": [
+    "str"
+   ],
+   "attachment.pr": [
+    "str"
+   ],
+   "attachment.readdedNames": [
+    "list"
+   ],
+   "attachment.readdedNames[]": [
+    "str"
+   ],
+   "attachment.reminderFold": [
+    "bool"
+   ],
+   "attachment.removedNames": [
+    "list"
+   ],
+   "attachment.removedNames[]": [
+    "str"
+   ],
+   "attachment.removedTypes": [
+    "list"
+   ],
+   "attachment.sendUserFileHint": [
+    "bool"
+   ],
+   "attachment.showConcurrencyNote": [
+    "bool"
+   ],
+   "attachment.skillCount": [
+    "int"
+   ],
+   "attachment.snapshot": [
+    "object"
+   ],
+   "attachment.snapshot.additionalWorkingDirectories": [
+    "list"
+   ],
+   "attachment.snapshot.isGitRepo": [
+    "bool"
+   ],
+   "attachment.snapshot.isWorktree": [
+    "bool"
+   ],
+   "attachment.snapshot.osVersion": [
+    "str"
+   ],
+   "attachment.snapshot.platform": [
+    "str"
+   ],
+   "attachment.snapshot.scratchpadDirectory": [
+    "str"
+   ],
+   "attachment.snapshot.shell": [
+    "str"
+   ],
+   "attachment.snapshot.workingDirectory": [
+    "str"
+   ],
+   "attachment.snippet": [
+    "str"
+   ],
+   "attachment.surfacedDefinitions": [
+    "list"
+   ],
+   "attachment.surfacedDefinitions[]": [
+    "object"
+   ],
+   "attachment.surfacedDefinitions[].definition": [
+    "object"
+   ],
+   "attachment.surfacedDefinitions[].definition.description": [
+    "str"
+   ],
+   "attachment.surfacedDefinitions[].definition.eager_input_streaming": [
+    "bool"
+   ],
+   "attachment.surfacedDefinitions[].definition.input_schema": [
+    "object"
+   ],
+   "attachment.surfacedDefinitions[].definition.name": [
+    "str"
+   ],
+   "attachment.surfacedDefinitions[].listing": [
+    "str"
+   ],
+   "attachment.surfacedDefinitions[].name": [
+    "str"
+   ],
+   "attachment.surfacedNames": [
+    "list"
+   ],
+   "attachment.surfacedNames[]": [
+    "str"
+   ],
+   "attachment.systemPrompt": [
+    "list"
+   ],
+   "attachment.systemPrompt[]": [
+    "str"
+   ],
+   "attachment.systemTurns": [
+    "bool"
+   ],
+   "attachment.text": [
+    "str"
+   ],
+   "attachment.toolChangeHeader": [
+    "bool"
+   ],
+   "attachment.toolInputCopies": [
+    "list"
+   ],
+   "attachment.toolInputCopies[]": [
+    "object"
+   ],
+   "attachment.toolInputCopies[].copy": [
+    "str"
+   ],
+   "attachment.toolInputCopies[].id": [
+    "str"
+   ],
+   "attachment.tools": [
+    "list"
+   ],
+   "attachment.tools[]": [
+    "object"
+   ],
+   "attachment.tools[].description": [
+    "str"
+   ],
+   "attachment.tools[].name": [
+    "str"
+   ],
+   "attachment.tools[].schema": [
+    "object"
+   ],
+   "attachment.tools[].schema.description": [
+    "str"
+   ],
+   "attachment.tools[].schema.eager_input_streaming": [
+    "bool"
+   ],
+   "attachment.tools[].schema.input_schema": [
+    "object"
+   ],
+   "attachment.tools[].schema.name": [
+    "str"
+   ],
+   "attachment.tools[].server": [
+    "str"
+   ],
+   "attachment.type": [
+    "str"
+   ],
+   "attachment.url": [
+    "str"
+   ],
+   "attachment.wireHiddenNames": [
+    "list"
+   ],
+   "cwd": [
+    "str"
+   ],
+   "entrypoint": [
+    "str"
+   ],
+   "gitBranch": [
+    "str"
+   ],
+   "isSidechain": [
+    "bool"
+   ],
+   "parentUuid": [
+    "str"
+   ],
+   "rendered": [
+    "list"
+   ],
+   "renderedBesideToolResult": [
+    "bool"
+   ],
+   "renderedRole": [
+    "str"
+   ],
+   "rendered[]": [
+    "object"
+   ],
+   "rendered[].content": [
+    "str"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "timestamp": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ],
+   "userType": [
+    "str"
+   ],
+   "uuid": [
+    "str"
+   ],
+   "version": [
+    "str"
+   ]
+  },
+  "cost-state": {
+   "hasUnknownModelCost": [
+    "bool"
+   ],
+   "modelUsage": [
+    "object"
+   ],
+   "modelUsage.<key>": [
+    "object"
+   ],
+   "modelUsage.<key>.cacheCreationEphemeral1hInputTokens": [
+    "int"
+   ],
+   "modelUsage.<key>.cacheCreationEphemeral5mInputTokens": [
+    "int"
+   ],
+   "modelUsage.<key>.cacheCreationInputTokens": [
+    "int"
+   ],
+   "modelUsage.<key>.cacheReadInputTokens": [
+    "int"
+   ],
+   "modelUsage.<key>.costUSD": [
+    "float"
+   ],
+   "modelUsage.<key>.inputTokens": [
+    "int"
+   ],
+   "modelUsage.<key>.outputTokens": [
+    "int"
+   ],
+   "modelUsage.<key>.thinkingTokens": [
+    "int"
+   ],
+   "modelUsage.<key>.webSearchRequests": [
+    "int"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "startTime": [
+    "int"
+   ],
+   "totalAPIDuration": [
+    "int"
+   ],
+   "totalAPIDurationWithoutRetries": [
+    "int"
+   ],
+   "totalCostUSD": [
+    "float"
+   ],
+   "totalDuration": [
+    "int"
+   ],
+   "totalLinesAdded": [
+    "int"
+   ],
+   "totalLinesRemoved": [
+    "int"
+   ],
+   "totalToolDuration": [
+    "int"
+   ],
+   "type": [
+    "str"
+   ]
+  },
+  "last-prompt": {
+   "lastPrompt": [
+    "str"
+   ],
+   "leafUuid": [
+    "str"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ]
+  },
+  "mode": {
+   "mode": [
+    "str"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ]
+  },
+  "queue-operation": {
+   "content": [
+    "str"
+   ],
+   "operation": [
+    "str"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "timestamp": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ]
+  },
+  "system": {
+   "cwd": [
+    "str"
+   ],
+   "entrypoint": [
+    "str"
+   ],
+   "gitBranch": [
+    "str"
+   ],
+   "hasOutput": [
+    "bool"
+   ],
+   "hookAdditionalContext": [
+    "list"
+   ],
+   "hookCount": [
+    "int"
+   ],
+   "hookErrors": [
+    "list"
+   ],
+   "hookInfos": [
+    "list"
+   ],
+   "hookInfos[]": [
+    "object"
+   ],
+   "hookInfos[].command": [
+    "str"
+   ],
+   "hookInfos[].durationMs": [
+    "int"
+   ],
+   "isSidechain": [
+    "bool"
+   ],
+   "level": [
+    "str"
+   ],
+   "parentUuid": [
+    "str"
+   ],
+   "preventedContinuation": [
+    "bool"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "stopReason": [
+    "str"
+   ],
+   "subtype": [
+    "str"
+   ],
+   "timestamp": [
+    "str"
+   ],
+   "toolUseID": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ],
+   "userType": [
+    "str"
+   ],
+   "uuid": [
+    "str"
+   ],
+   "version": [
+    "str"
+   ]
+  },
+  "tools-used": {
+   "sessionId": [
+    "str"
+   ],
+   "tools": [
+    "list"
+   ],
+   "tools[]": [
+    "str"
+   ],
+   "type": [
+    "str"
+   ]
+  },
+  "user": {
+   "clientPlatform": [
+    "str"
+   ],
+   "cwd": [
+    "str"
+   ],
+   "entrypoint": [
+    "str"
+   ],
+   "gitBranch": [
+    "str"
+   ],
+   "isMeta": [
+    "bool"
+   ],
+   "isSidechain": [
+    "bool"
+   ],
+   "message": [
+    "object"
+   ],
+   "message.content": [
+    "list",
+    "str"
+   ],
+   "message.content[]": [
+    "object"
+   ],
+   "message.content[].content": [
+    "list",
+    "str"
+   ],
+   "message.content[].content[]": [
+    "object"
+   ],
+   "message.content[].content[].source": [
+    "object"
+   ],
+   "message.content[].content[].source.data": [
+    "str"
+   ],
+   "message.content[].content[].source.media_type": [
+    "str"
+   ],
+   "message.content[].content[].source.type": [
+    "str"
+   ],
+   "message.content[].content[].tool_name": [
+    "str"
+   ],
+   "message.content[].content[].type": [
+    "str"
+   ],
+   "message.content[].is_error": [
+    "bool"
+   ],
+   "message.content[].tool_use_id": [
+    "str"
+   ],
+   "message.content[].type": [
+    "str"
+   ],
+   "message.role": [
+    "str"
+   ],
+   "origin": [
+    "object"
+   ],
+   "origin.kind": [
+    "str"
+   ],
+   "parentUuid": [
+    "null",
+    "str"
+   ],
+   "permissionDecision": [
+    "object"
+   ],
+   "permissionDecision.decision": [
+    "str"
+   ],
+   "permissionDecision.reasonType": [
+    "str"
+   ],
+   "permissionDecision.ruleSource": [
+    "str"
+   ],
+   "permissionDecision.source": [
+    "str"
+   ],
+   "permissionMode": [
+    "str"
+   ],
+   "promptId": [
+    "str"
+   ],
+   "promptSource": [
+    "str"
+   ],
+   "sandboxed": [
+    "bool"
+   ],
+   "serverClassifierContext": [
+    "object"
+   ],
+   "serverClassifierContext.context": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state.branch": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.cwd": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.default_branch": [
+    "null"
+   ],
+   "serverClassifierContext.context.git_state.root": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.status": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state.status.clean": [
+    "bool"
+   ],
+   "serverClassifierContext.context.git_state.status.counts": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state.status.counts.modified": [
+    "int"
+   ],
+   "serverClassifierContext.context.git_state.status.counts.staged": [
+    "int"
+   ],
+   "serverClassifierContext.context.git_state.status.counts.untracked": [
+    "null"
+   ],
+   "serverClassifierContext.context.git_state.status.counts.untracked_normal": [
+    "int"
+   ],
+   "serverClassifierContext.context.git_state.status.porcelain": [
+    "null"
+   ],
+   "serverClassifierContext.context.git_state.status.truncated": [
+    "bool"
+   ],
+   "serverClassifierContext.context.git_state.visibility": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state.visibility.origin": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state.visibility.origin.host": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.origin.remote": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.origin.visibility": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.push_remote": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.remotes": [
+    "list"
+   ],
+   "serverClassifierContext.context.git_state.visibility.remotes[]": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state.visibility.remotes[].host": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.remotes[].name": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.remotes[].remote": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.remotes[].visibility": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.visibility_cache": [
+    "list"
+   ],
+   "serverClassifierContext.context.git_state.visibility.visibility_cache[]": [
+    "object"
+   ],
+   "serverClassifierContext.context.git_state.visibility.visibility_cache[].host": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.visibility_cache[].remote": [
+    "str"
+   ],
+   "serverClassifierContext.context.git_state.visibility.visibility_cache[].visibility": [
+    "str"
+   ],
+   "serverClassifierContext.context.live_cwd": [
+    "str"
+   ],
+   "serverClassifierContext.context.platform": [
+    "str"
+   ],
+   "serverClassifierContext.request": [
+    "str"
+   ],
+   "sessionId": [
+    "str"
+   ],
+   "sourceToolAssistantUUID": [
+    "str"
+   ],
+   "timestamp": [
+    "str"
+   ],
+   "toolUseResult": [
+    "object",
+    "str"
+   ],
+   "toolUseResult.bytes": [
+    "int"
+   ],
+   "toolUseResult.code": [
+    "int"
+   ],
+   "toolUseResult.codeText": [
+    "str"
+   ],
+   "toolUseResult.content": [
+    "str"
+   ],
+   "toolUseResult.countIsComplete": [
+    "bool"
+   ],
+   "toolUseResult.durationMs": [
+    "int"
+   ],
+   "toolUseResult.file": [
+    "object"
+   ],
+   "toolUseResult.file.base64": [
+    "str"
+   ],
+   "toolUseResult.file.content": [
+    "str"
+   ],
+   "toolUseResult.file.dimensions": [
+    "object"
+   ],
+   "toolUseResult.file.dimensions.displayHeight": [
+    "int"
+   ],
+   "toolUseResult.file.dimensions.displayWidth": [
+    "int"
+   ],
+   "toolUseResult.file.dimensions.originalHeight": [
+    "int"
+   ],
+   "toolUseResult.file.dimensions.originalWidth": [
+    "int"
+   ],
+   "toolUseResult.file.filePath": [
+    "str"
+   ],
+   "toolUseResult.file.numLines": [
+    "int"
+   ],
+   "toolUseResult.file.originalSize": [
+    "int"
+   ],
+   "toolUseResult.file.startLine": [
+    "int"
+   ],
+   "toolUseResult.file.totalLines": [
+    "int"
+   ],
+   "toolUseResult.file.type": [
+    "str"
+   ],
+   "toolUseResult.filePath": [
+    "str"
+   ],
+   "toolUseResult.filenames": [
+    "list"
+   ],
+   "toolUseResult.filenames[]": [
+    "str"
+   ],
+   "toolUseResult.gitDiff": [
+    "object"
+   ],
+   "toolUseResult.gitDiff.additions": [
+    "int"
+   ],
+   "toolUseResult.gitDiff.changes": [
+    "int"
+   ],
+   "toolUseResult.gitDiff.deletions": [
+    "int"
+   ],
+   "toolUseResult.gitDiff.filename": [
+    "str"
+   ],
+   "toolUseResult.gitDiff.patch": [
+    "str"
+   ],
+   "toolUseResult.gitDiff.repository": [
+    "str"
+   ],
+   "toolUseResult.gitDiff.status": [
+    "str"
+   ],
+   "toolUseResult.gitOperation": [
+    "object"
+   ],
+   "toolUseResult.gitOperation.push": [
+    "object"
+   ],
+   "toolUseResult.gitOperation.push.branch": [
+    "str"
+   ],
+   "toolUseResult.interrupted": [
+    "bool"
+   ],
+   "toolUseResult.isImage": [
+    "bool"
+   ],
+   "toolUseResult.matches": [
+    "list"
+   ],
+   "toolUseResult.matches[]": [
+    "str"
+   ],
+   "toolUseResult.mode": [
+    "str"
+   ],
+   "toolUseResult.noOutputExpected": [
+    "bool"
+   ],
+   "toolUseResult.numFiles": [
+    "int"
+   ],
+   "toolUseResult.numLines": [
+    "int"
+   ],
+   "toolUseResult.numMatches": [
+    "int"
+   ],
+   "toolUseResult.originalFile": [
+    "null"
+   ],
+   "toolUseResult.query": [
+    "str"
+   ],
+   "toolUseResult.result": [
+    "str"
+   ],
+   "toolUseResult.staleReadFileStateHint": [
+    "str"
+   ],
+   "toolUseResult.statusChange": [
+    "object"
+   ],
+   "toolUseResult.statusChange.from": [
+    "str"
+   ],
+   "toolUseResult.statusChange.to": [
+    "str"
+   ],
+   "toolUseResult.stderr": [
+    "str"
+   ],
+   "toolUseResult.stdout": [
+    "str"
+   ],
+   "toolUseResult.structuredPatch": [
+    "list"
+   ],
+   "toolUseResult.success": [
+    "bool"
+   ],
+   "toolUseResult.task": [
+    "object"
+   ],
+   "toolUseResult.task.id": [
+    "str"
+   ],
+   "toolUseResult.task.subject": [
+    "str"
+   ],
+   "toolUseResult.taskId": [
+    "str"
+   ],
+   "toolUseResult.totalLines": [
+    "int"
+   ],
+   "toolUseResult.totalMatches": [
+    "int"
+   ],
+   "toolUseResult.total_deferred_tools": [
+    "int"
+   ],
+   "toolUseResult.truncated": [
+    "bool"
+   ],
+   "toolUseResult.type": [
+    "str"
+   ],
+   "toolUseResult.updatedFields": [
+    "list"
+   ],
+   "toolUseResult.updatedFields[]": [
+    "str"
+   ],
+   "toolUseResult.url": [
+    "str"
+   ],
+   "toolUseResult.userModified": [
+    "bool"
+   ],
+   "turnAttributionKey": [
+    "str"
+   ],
+   "turnCompanion": [
+    "bool"
+   ],
+   "turnOrigin": [
+    "str"
+   ],
+   "turnPosition": [
+    "object"
+   ],
+   "turnPosition.promptIndex": [
+    "int"
+   ],
+   "turnPosition.turnIndex": [
+    "int"
+   ],
+   "type": [
+    "str"
+   ],
+   "userType": [
+    "str"
+   ],
+   "uuid": [
+    "str"
+   ],
+   "version": [
+    "str"
+   ]
+  }
+ },
+ "claude_code_versions": [
+  "2.1.316"
+ ]
+}

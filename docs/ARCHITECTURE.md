@@ -812,6 +812,8 @@ hook is not wired in yet.
 | `--dir PATH` | Log directory (default `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`) |
 | `--no-browser` | Do not open a tab (used by auto-start) |
 | `--dump` | Print the range-less stats JSON and exit (no server, no notify thread) |
+| `--schema-report` | Print the drift sentinel's findings (`build_health(...)["schema"]`) and exit |
+| `--collect-fixture FILE` | Write a structure-only, redacted copy of every log entry to FILE (`redact_entry`) and exit |
 | `--setup-notifications` | Run the wizard and exit |
 | `--dry-run` | With the wizard: preview only |
 | `--install-startup` / `--uninstall-startup` | Windows Task Scheduler: `schtasks /Create /TN AIFluencyInsights /SC ONLOGON` running `pythonw.exe … --no-browser --port N`; also deletes the legacy `DevTokenDashboard` task |

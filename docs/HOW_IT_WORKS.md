@@ -143,6 +143,8 @@ python ai_fluency_insights.py               # serves http://localhost:8787
 python ai_fluency_insights.py --port 9000   # different port
 python ai_fluency_insights.py --dir <path>  # custom logs location
 python ai_fluency_insights.py --dump        # print raw stats JSON and exit
+python ai_fluency_insights.py --schema-report   # report log-format changes (new / missing / retyped fields)
+python ai_fluency_insights.py --collect-fixture out.jsonl   # redacted, structure-only copy of your logs
 ```
 
 On Windows, after editing the script, `Restart-Insights.bat` stops every

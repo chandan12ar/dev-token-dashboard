@@ -406,6 +406,9 @@ class Stats:
         # --- what the log contains (all-time, for the Data Health tab)
         self.hc = Counter()
         self.entry_types = Counter()
+        self.census_paths = Counter()      # (type, version, path, jtype) -> entries; see analyze_schema
+        self.census_types = Counter()      # (type, version) -> entries
+        self.retention = None              # {"days", "source"} from load_retention(), set by Scanner.build_stats
         self.usage_missing = Counter()     # token-usage field -> responses where it was absent/non-numeric
         self.attachment_types = Counter()
         self.versions = Counter()
@@ -806,7 +809,9 @@ def parse_entry(entry: dict, project: str, st: Stats, min_day=None, max_day=None
 # known not to be metric inputs (docs/SCHEMA_NOTES.md). Anything else is reported as a NEW type in Data
 # Health, so a format change is visible instead of silently dropped.
 HANDLED_ENTRY_TYPES = frozenset({"user", "assistant", "system", "attachment", "ai-title", "permission-mode"})
-IGNORED_ENTRY_TYPES = frozenset({"atis-latch", "last-prompt", "tools-used", "queue-operation"})
+# "cost-state" is Claude Code's own running totals for a session (cost, tokens per model, lines added): not read
+# yet, but a candidate independent cross-check for our numbers (docs/SCHEMA_NOTES.md).
+IGNORED_ENTRY_TYPES = frozenset({"atis-latch", "last-prompt", "tools-used", "queue-operation", "mode", "cost-state"})
 
 # Claude Code sets a previous transcript aside as "<session>.orphaned-<ts>-<id>.jsonl" (and
 # "<session>.jsonl.superseded-<ts>") instead of overwriting it. Reading such a copy as a normal
@@ -837,6 +842,9 @@ class Scanner:
         self._entries = {}   # path -> list[dict]
         self._bad = {}       # path -> (mid_file_decode_errors, torn_last_line_errors)
         self.set_aside = set()   # set-aside copies seen on the last scan (not parsed)
+        self._census = {}        # path -> (paths Counter, types Counter): structure seen in that file
+        self._merged = (Counter(), Counter())
+        self._dirty = False
         self._lock = threading.Lock()
 
     def scan(self):
@@ -880,6 +888,8 @@ class Scanner:
                 self._cache[path] = key
                 self._entries[path] = entries
                 self._bad[path] = (mid, torn)
+                self._census[path] = census_entries(entries)
+                self._dirty = True
         self.set_aside = set_aside
         # drop deleted files
         for path in list(self._entries):
@@ -887,6 +897,18 @@ class Scanner:
                 self._entries.pop(path, None)
                 self._cache.pop(path, None)
                 self._bad.pop(path, None)
+                self._census.pop(path, None)
+                self._dirty = True
+
+    def census(self):
+        """All-time structure census over every cached file (recomputed only when a file changed)."""
+        if self._dirty:
+            paths, types = Counter(), Counter()
+            for p, t in self._census.values():
+                paths.update(p)
+                types.update(t)
+            self._merged, self._dirty = (paths, types), False
+        return self._merged
 
     def build_stats(self, min_day=None, max_day=None) -> Stats:
         with self._lock:
@@ -905,10 +927,290 @@ class Scanner:
             st.hc["decode_errors_torn"] = torn
             st.hc["set_aside_files"] = len(self.set_aside)
             st.parse_errors += mid      # an unreadable line in the middle of a file is lost data
+            st.census_paths, st.census_types = self.census()
+            st.retention = load_retention()
             if st.parse_errors:
                 print(f"[warn] {st.parse_errors} log entries could not be parsed "
                       "(log format may have changed - stats may be incomplete)")
             return st
+
+
+# ---------------------------------------------------------------------------
+# Schema sentinel: notices when Claude Code's log format drifts
+# (design: docs/LOG_RESILIENCE_ROADMAP.md section 2; observed schema: docs/SCHEMA_NOTES.md)
+# ---------------------------------------------------------------------------
+
+SCHEMA_MAX_DEPTH = 12
+# Some objects are keyed by generated ids (wireToolInputs.toolu_01Abc...). Left alone, every tool call
+# would look like a brand-new field, so id-like keys collapse to "<id>".
+_ID_KEY = re.compile(r"^(toolu_[A-Za-z0-9]+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}|[0-9a-f]{24,})$")
+# Free-form subtrees (tool JSON Schemas, echoed tool inputs): record the key itself, do not descend.
+OPAQUE_KEYS = frozenset({"input_schema", "wireToolInputs", "wireIngestContext"})
+# Maps keyed by a name that grows over time (modelUsage.claude-haiku-5-5): every child key collapses to "<key>",
+# otherwise each new model release would look like new fields.
+MAP_KEYS = frozenset({"modelUsage"})
+# Fewer entries than this of one type (per Claude Code version) is too little evidence to call drift.
+SCHEMA_MIN_ENTRIES = 20
+SCHEMA_MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema", "claude_code_known.json")
+
+# Fields this dashboard reads. If one goes missing or changes type, the numbers built on it are suspect.
+# (entry type, path, accepted JSON types, present on every entry?, catalog metrics that rely on it, plain name)
+_COST = ["cost", "cost_100_loc", "cost_verified", "cold_start", "cost_spikes", "model_mix", "top_tier_nocode"]
+_TIME = ["turn_time", "session_len", "first_edit", "flow_score"]
+CONSUMED_FIELDS = (
+    ("assistant", "message.usage.input_tokens", ("int", "float", "null"), True, _COST, "input tokens"),
+    ("assistant", "message.usage.output_tokens", ("int", "float", "null"), True, _COST, "output tokens"),
+    ("assistant", "message.usage.cache_creation_input_tokens", ("int", "float", "null"), True,
+     _COST + ["cache_savings"], "cache write tokens"),
+    ("assistant", "message.usage.cache_read_input_tokens", ("int", "float", "null"), True,
+     _COST + ["cache_savings"], "cache read tokens"),
+    ("assistant", "message.model", ("str",), True, ["cost", "model_mix", "top_tier_nocode"], "model name"),
+    ("assistant", "message.stop_reason", ("str", "null"), True, ["turn_time", "clean_turns", "flow_score"], "stop reason"),
+    ("assistant", "timestamp", ("str",), True, _TIME, "timestamp"),
+    ("assistant", "sessionId", ("str",), True, ["session_len", "cost_verified"], "session id"),
+    ("assistant", "message.content[].name", ("str",), False,
+     ["tool_time", "verified", "reedit", "first_edit", "tests_alongside", "safety"], "tool name"),
+    ("assistant", "thinkingDurationMs", ("int", "float"), False, ["thinking"], "thinking time"),
+    ("user", "timestamp", ("str",), True, _TIME, "timestamp"),
+    ("user", "sessionId", ("str",), True, ["session_len", "cost_verified"], "session id"),
+    ("user", "message.content", ("str", "list"), True, ["clean_turns", "turn_time"], "prompt content"),
+    ("user", "message.content[].tool_use_id", ("str",), False,
+     ["tool_time", "recovery", "stuck", "friction", "first_run"], "tool result link"),
+    ("user", "message.content[].is_error", ("bool",), False,
+     ["friction", "recovery", "stuck", "first_run", "clean_turns"], "tool error flag"),
+)
+
+
+def _jtype(v) -> str:
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "bool"
+    if isinstance(v, int):
+        return "int"
+    if isinstance(v, float):
+        return "float"
+    if isinstance(v, str):
+        return "str"
+    return "list" if isinstance(v, list) else "object"
+
+
+def flatten_entry(entry) -> set:
+    """The set of (json_path, type) pairs in one log entry. Structure only, never values.
+    Arrays collapse to "[]", generated-id keys to "<id>", free-form subtrees stay closed."""
+    out = set()
+
+    def walk(v, path, depth):
+        if path:
+            out.add((path, _jtype(v)))
+        if depth >= SCHEMA_MAX_DEPTH or path.rsplit(".", 1)[-1] in OPAQUE_KEYS:
+            return
+        if isinstance(v, dict):
+            is_map = path.rsplit(".", 1)[-1] in MAP_KEYS
+            for k, child in v.items():
+                k = "<key>" if is_map else ("<id>" if _ID_KEY.match(str(k)) else str(k))
+                walk(child, path + "." + k if path else k, depth + 1)
+        elif isinstance(v, list):
+            for child in v:
+                walk(child, path + "[]", depth + 1)
+
+    walk(entry, "", 0)
+    return out
+
+
+def census_entries(entries):
+    """(Counter[(type, version, path, jtype)] -> entries, Counter[(type, version)] -> entries)."""
+    paths, types = Counter(), Counter()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        et, ver = str(e.get("type")), str(e.get("version") or "?")
+        types[(et, ver)] += 1
+        for pt in flatten_entry(e):
+            paths[(et, ver) + pt] += 1
+    return paths, types
+
+
+def load_schema_manifest(path=None):
+    """The baseline of fields seen in known-good logs (schema/claude_code_known.json), or None."""
+    try:
+        with open(path or SCHEMA_MANIFEST_PATH, "r", encoding="utf-8") as f:
+            m = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return m if isinstance(m, dict) and isinstance(m.get("entry_types"), dict) else None
+
+
+def analyze_schema(paths, types, manifest=None, min_entries=SCHEMA_MIN_ENTRIES) -> dict:
+    """Compare observed log structure with what the dashboard reads and with the known baseline.
+
+    warning = a field the dashboard relies on is missing, vanished in some Claude Code version, or changed type.
+    info    = new fields or type changes in fields the dashboard does not read (possible new signals)."""
+    n_by_ver = defaultdict(dict)                       # entry type -> {version: entries}
+    for (et, ver), n in types.items():
+        n_by_ver[et][ver] = n
+    presence = defaultdict(lambda: defaultdict(int))   # (entry type, path) -> {version: entries carrying it}
+    seen_types = defaultdict(Counter)                  # (entry type, path) -> {jtype: entries}
+    for (et, ver, path, jt), n in paths.items():
+        presence[(et, path)][ver] += n
+        seen_types[(et, path)][jt] += n
+
+    findings, affected = [], defaultdict(set)
+
+    def warn(kind, et, path, label, title, detail, metrics, versions=()):
+        findings.append({"id": "%s:%s:%s" % (kind, et, path), "kind": kind, "severity": "warning",
+                         "entry_type": et, "path": path, "title": title, "detail": detail,
+                         "versions": sorted(versions), "metrics": sorted(metrics)})
+        for m in metrics:
+            affected[m].add(label)
+
+    for et, path, accepted, always, metrics, label in CONSUMED_FIELDS:
+        vers = {v: n for v, n in n_by_ver.get(et, {}).items() if v != "?"}
+        total = sum(vers.values())
+        pres = presence.get((et, path), {})
+        bad = {t: n for t, n in seen_types.get((et, path), {}).items() if t not in accepted}
+        if bad:
+            warn("type_change", et, path, label,
+                 "The %s field changed shape" % label,
+                 "`%s` on %s entries arrived as %s; the dashboard expects %s."
+                 % (path, et, ", ".join(sorted(bad)), " or ".join(accepted)),
+                 metrics, [v for v in vers if any((et, v, path, t) in paths for t in bad)])
+        if not always:
+            continue
+        if total >= min_entries and not any(pres.get(v) for v in vers):
+            warn("missing_all", et, path, label,
+                 "The %s field is missing from your logs" % label,
+                 "None of %d %s entries carry `%s`. Numbers built on it may be wrong or zero." % (total, et, path),
+                 metrics, vers)
+            continue
+        ratio = {v: min(pres.get(v, 0), n) / n for v, n in vers.items() if n >= min_entries}
+        gone = [v for v, r in ratio.items() if r < 0.5]
+        if gone and any(r >= 0.9 for r in ratio.values()):
+            warn("vanished", et, path, label,
+                 "The %s field stopped appearing in Claude Code %s" % (label, ", ".join(sorted(gone))),
+                 "`%s` on %s entries is present in other versions but missing here. Numbers built on it may be wrong "
+                 "for the sessions recorded with those versions." % (path, et), metrics, gone)
+
+    if manifest:
+        known = manifest["entry_types"]
+        new_by_type, retyped = defaultdict(list), defaultdict(list)
+        for (et, path), tcount in sorted(seen_types.items()):
+            if et not in known:
+                continue          # a whole new entry type is reported by Data Health's entry-type table
+            kp = known[et].get(path)
+            if kp is None:
+                new_by_type[et].append(path)
+            elif any(t not in kp and t != "null" for t in tcount):
+                retyped[et].append(path)
+        for et, plist in new_by_type.items():
+            vs = set()
+            for path in plist:
+                vs |= set(presence[(et, path)])
+            findings.append({"id": "new_field:%s" % et, "kind": "new_field", "severity": "info", "entry_type": et,
+                             "path": plist[0], "paths": plist[:12], "n_paths": len(plist), "metrics": [],
+                             "versions": sorted(v for v in vs if v != "?"),
+                             "title": "%d new field%s on %s entries" % (len(plist), "" if len(plist) == 1 else "s", et),
+                             "detail": "Not in the known baseline. Possibly a new signal worth reading; nothing breaks."})
+        for et, plist in retyped.items():
+            findings.append({"id": "retyped:%s" % et, "kind": "type_change_other", "severity": "info", "entry_type": et,
+                             "path": plist[0], "paths": plist[:12], "n_paths": len(plist), "metrics": [], "versions": [],
+                             "title": "%d field%s on %s entries changed type" % (len(plist), "" if len(plist) == 1 else "s", et),
+                             "detail": "Fields the dashboard does not read now carry a different type than the baseline."})
+
+    findings.sort(key=lambda f: (f["severity"] != "warning", f["kind"], f["entry_type"], f["path"]))
+    return {
+        "baseline": {"loaded": bool(manifest), "versions": (manifest or {}).get("claude_code_versions", [])},
+        "versions_seen": sorted({v for (_et, v) in types if v != "?"}),
+        "min_entries": min_entries,
+        "findings": findings,
+        "summary": {"warning": sum(f["severity"] == "warning" for f in findings),
+                    "info": sum(f["severity"] == "info" for f in findings)},
+        "affected_metrics": {m: sorted(v) for m, v in affected.items()},
+    }
+
+
+def render_schema_report(health) -> str:
+    """Plain-text version of the Data Health schema panel (used by --schema-report)."""
+    sc = health["schema"]
+    out = ["Claude Code versions seen: %s" % (", ".join(sc["versions_seen"]) or "none"),
+           "Baseline: %s" % (("loaded (built from Claude Code %s)" % ", ".join(sc["baseline"]["versions"]))
+                             if sc["baseline"]["loaded"] else "NOT FOUND (new-field detection is off)"),
+           "Findings: %d warning, %d info" % (sc["summary"]["warning"], sc["summary"]["info"])]
+    for f in sc["findings"]:
+        out.append("")
+        out.append("[%s] %s" % (f["severity"].upper(), f["title"]))
+        out.append("    " + f["detail"])
+        if f.get("paths"):
+            out.append("    e.g. " + ", ".join(f["paths"][:6]) + (" ..." if f["n_paths"] > 6 else ""))
+        if f.get("versions"):
+            out.append("    versions: " + ", ".join(f["versions"]))
+        if f["metrics"]:
+            out.append("    affects: " + ", ".join(f["metrics"]))
+    unknown = health.get("unknown_entry_types") or []
+    if unknown:
+        out.append("")
+        out.append("New entry types (not read): " + ", ".join("%s (%d)" % (u["type"], u["n"]) for u in unknown))
+    if not sc["findings"] and not unknown:
+        out.append("")
+        out.append("No log format changes detected.")
+    return "\n".join(out)
+
+
+def load_retention(config_dir=None) -> dict:
+    """How long Claude Code keeps transcripts: `cleanupPeriodDays` from the user's settings.json, default 30.
+    Managed (organisation) settings can override this and are not read here."""
+    settings, _err = load_settings_json(os.path.join(config_dir or claude_config_dir(), "settings.json"))
+    v = settings.get("cleanupPeriodDays") if isinstance(settings, dict) else None
+    if isinstance(v, int) and not isinstance(v, bool) and v >= 1:
+        return {"days": v, "source": "your settings.json"}
+    return {"days": 30, "source": "the Claude Code default"}
+
+
+# Values kept as-is by --collect-fixture: enumerations and model names, not user content.
+_KEEP_STR_KEYS = frozenset({"type", "subtype", "role", "stop_reason", "stopReason", "version", "operation", "level",
+                            "permissionMode", "entrypoint", "effort", "perTurnEffort", "service_tier", "speed",
+                            "model", "requestedModel", "advisorModel", "userType", "inference_geo",
+                            "thinkingDisplay", "contextRendering"})
+_ID_STR_KEYS = frozenset({"uuid", "parentUuid", "sessionId", "requestId", "leafUuid", "toolUseID", "tool_use_id",
+                          "id", "promptId", "messageId"})
+_ISO_TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
+_PLAIN_TOOL = re.compile(r"^[A-Za-z][A-Za-z]*$")      # Bash, Edit, Read...; mcp__server__tool names are redacted
+
+
+def redact_entry(entry, ids=None):
+    """A structure-only copy of a log entry for bug reports: every string value is replaced, except
+    enumerations, model names, built-in tool names and timestamps. Ids become consistent pseudonyms so
+    de-duplication still behaves. Numbers, booleans and nulls are kept. Dict KEYS are kept (they are field
+    names), except keys that look like paths."""
+    ids = ids if ids is not None else {}
+
+    def pseudo(x):
+        return ids.setdefault(x, "id-%d" % (len(ids) + 1))
+
+    def walk(v, key=None):
+        if isinstance(v, dict):
+            out = {}
+            for k, child in v.items():
+                ks = str(k)
+                if _ID_KEY.match(ks):
+                    ks = pseudo(ks)
+                elif "/" in ks or "\\" in ks:
+                    ks = "<key>"
+                out[ks] = walk(child, str(k))
+            return out
+        if isinstance(v, list):
+            return [walk(c, key) for c in v]
+        if isinstance(v, str):
+            if key in _ID_STR_KEYS:
+                return pseudo(v)
+            if key in _KEEP_STR_KEYS or (key == "timestamp" and _ISO_TS.match(v)):
+                return v
+            if key == "name" and _PLAIN_TOOL.match(v):
+                return v
+            return "<redacted>"
+        return v
+
+    return walk(entry)
 
 
 # ---------------------------------------------------------------------------
@@ -1998,6 +2300,14 @@ def build_health(st: Stats) -> dict:
          _field_status(hc["entries_dated"], hc["entries"]),
          "%d of %d entries carry a timestamp" % (hc["entries_dated"], hc["entries"])),
     ]
+    if st.retention and st.days:
+        first = min(st.days)
+        age = (date.today() - date.fromisoformat(first)).days
+        caps.append(("history", "History window", "all",
+                     "partial" if st.retention["days"] < 365 else "ok",
+                     "Claude Code deletes logs older than %d days (from %s). Your earliest day here is %s (%d days ago); "
+                     "older history is gone unless you raised cleanupPeriodDays. Organisation-managed settings can "
+                     "override this and are not checked." % (st.retention["days"], st.retention["source"], first, age)))
     titled = sum(1 for sid in st.sessions if sid in st.session_titles)
     caps.append(("titles", "Session titles", "weekly",
                  _field_status(titled, len(st.sessions)),
@@ -2005,6 +2315,7 @@ def build_health(st: Stats) -> dict:
     return {
         "capabilities": [{"id": i, "label": l, "tab": t, "status": s, "detail": d} for i, l, t, s, d in caps],
         "entry_types": [{"type": str(k), "n": v, "status": _entry_type_status(k)} for k, v in st.entry_types.most_common()],
+        "schema": analyze_schema(st.census_paths, st.census_types, load_schema_manifest()),
         "unknown_entry_types": [{"type": str(k), "n": v} for k, v in st.entry_types.most_common()
                                 if _entry_type_status(k) == "new"],
         "versions": [{"version": k, "n": v} for k, v in st.versions.most_common(6)],
@@ -2095,8 +2406,12 @@ METRIC_CATALOG = [
 METRIC_CATALOG_BY_ID = {m[0]: m for m in METRIC_CATALOG}
 
 
-def catalog_payload():
-    return {m[0]: {"tab": m[1], "name": m[2], "confidence": m[3], "how": m[4], "limit": m[5]}
+def catalog_payload(drift=None):
+    """Metric catalog for the page. `drift` is analyze_schema()'s result: metrics that rely on a field which
+    went missing or changed type carry a `degraded` note instead of silently showing a number."""
+    aff = (drift or {}).get("affected_metrics", {})
+    return {m[0]: {"tab": m[1], "name": m[2], "confidence": m[3], "how": m[4], "limit": m[5],
+                   "degraded": ("Relies on a log field that changed: " + ", ".join(aff[m[0]])) if m[0] in aff else None}
             for m in METRIC_CATALOG}
 
 
@@ -3102,6 +3417,7 @@ opacity:var(--sc,0);transition:opacity .2s ease}
 background:var(--fill);border:1px solid var(--hair);border-left:3px solid var(--amber);
 padding:10px 14px;border-radius:var(--r-ctl);box-shadow:var(--sh-1)}
 .warn svg{width:15px;height:15px;flex:none}
+.warn a{color:inherit;text-decoration:underline}
 .warn.notify{color:var(--sky);border-left-color:var(--sky)}
 .notifyX{margin-left:auto;background:none;border:0;color:inherit;cursor:pointer;
 font-size:1rem;line-height:1;padding:0 2px;flex:none}
@@ -3447,6 +3763,12 @@ border-radius:12px;background:var(--fill-2)}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip2{font-size:.6875rem;padding:4px 10px;border-radius:var(--r-pill);background:var(--fill-3);color:var(--txt-2)}
 .chip2 b{color:var(--txt);font-weight:640}
+.sflist{list-style:none;display:flex;flex-direction:column;gap:10px}
+.sf{display:flex;flex-direction:column;gap:3px;padding:10px 12px;border-radius:var(--r-md,10px);background:var(--fill-3);font-size:.78rem}
+.sf>span{color:var(--txt-2)}
+.sf code{font-size:.6875rem;color:var(--txt-2);word-break:break-all}
+.sf .aff{color:var(--amber)}
+.sf.warning{background:color-mix(in srgb,var(--amber) 12%,transparent)}
 .chip2.warn{background:color-mix(in srgb,var(--rose) 12%,transparent);color:var(--rose)}
 .mbar{display:flex;height:10px;border-radius:99px;overflow:hidden;background:var(--fill-4);margin:8px 0 10px}
 .mbar i{display:block;height:100%}
@@ -3911,6 +4233,8 @@ background:var(--fill)}
 <section id="s-health" class="stack" hidden>
   <div class="card" style="--i:0"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg></span><h3>What your logs let us measure</h3><span class="hint">green = available, amber = partial, grey = not in your logs</span></div>
     <div class="cap" id="healthCaps"></div></div>
+  <div class="card" style="--i:1"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg></span><h3>Log format changes</h3><span class="hint" id="schemaHint"></span></div>
+    <div id="healthSchema"></div></div>
   <div class="row" style="--i:1">
     <div class="card"><div class="chead"><span class="gl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span><h3>Log inventory</h3></div>
       <div class="chips" id="healthMeta" style="margin-bottom:14px"></div>
@@ -4247,6 +4571,12 @@ async function load(){
       D.totals.parse_errors.toLocaleString()+
       ' log entries could not be parsed — the log format may have changed; stats may be incomplete.</span>';
   }else if(pw){pw.remove();}
+  let dw=$('driftwarn');const sw=D.health&&D.health.schema?D.health.schema.summary.warning:0;
+  if(sw>0){
+    if(!dw){dw=document.createElement('div');dw.id='driftwarn';dw.className='warn';$('alerts').appendChild(dw);}
+    dw.innerHTML=ic('alert')+'<span>Claude Code’s log format has changed in '+sw+' place'+(sw===1?'':'s')+
+      ' that this dashboard relies on, so some numbers may be wrong. <a href="#" data-go="health">See Data Health</a>.</span>';
+  }else if(dw){dw.remove();}
   if(D.notifications&&D.notifications.length){
     const seen=window.__notifySeen||(window.__notifySeen=new Set());
     D.notifications.forEach(n=>{
@@ -4676,8 +5006,22 @@ function renderAdvisor(){
   $('advMore').innerHTML=A.more.length?'<ul class="lim">'+A.more.map(r=>'<li><b>'+esc(r.title)+'</b>: '+esc(maskQuoted(r.evidence))+'</li>').join('')+'</ul>':'<div class="ins-empty">Nothing else of note.</div>';
 }
 
+function renderSchema(){
+  const S=D.health.schema, el=$('healthSchema');
+  const nt=D.health.unknown_entry_types||[];
+  $('schemaHint').textContent=(S.versions_seen.length?'Claude Code '+S.versions_seen.join(', ')+' · ':'')+
+    (S.baseline.loaded?'compared with the known format':'no baseline file found, new fields are not checked');
+  const rows=S.findings.map(f=>'<li class="sf '+f.severity+'"><b>'+esc(f.title)+'</b><span>'+esc(f.detail)+'</span>'+
+    (f.paths?'<code>'+f.paths.slice(0,6).map(esc).join('  ')+(f.n_paths>6?'  …':'')+'</code>':
+      f.severity==='warning'?'<code>'+esc(f.entry_type+' · '+f.path)+'</code>':'')+
+    (f.metrics.length?'<span class="aff">Affects: '+f.metrics.map(m=>esc((D.catalog[m]||{}).name||m)).join(', ')+'</span>':'')+'</li>');
+  nt.forEach(t=>rows.push('<li class="sf info"><b>New entry type <code>'+esc(t.type)+'</code> ('+t.n.toLocaleString()+')</b><span>Claude Code wrote a kind of log line this dashboard does not read. Nothing breaks; it may hold a new signal.</span></li>'));
+  el.innerHTML=rows.length?'<ul class="sflist">'+rows.join('')+'</ul>':
+    '<div class="ins-empty">No log format changes detected. Every field this dashboard reads is present and has the expected shape.</div>';
+}
 function renderHealth(){
   const H=D.health;
+  renderSchema();
   $('healthCaps').innerHTML=H.capabilities.map(c=>'<div class="it '+c.status+'"><span class="dot"></span><div><b>'+esc(c.label)+'</b><span>'+esc(c.detail)+'</span></div></div>').join('');
   $('healthMeta').innerHTML=
     '<span class="chip2">Sessions <b>'+H.sessions+'</b></span>'+
@@ -4686,13 +5030,13 @@ function renderHealth(){
     '<span class="chip2'+(H.parse_errors?' warn':'')+'">Unparsed lines <b>'+H.parse_errors+'</b></span>'+
     '<span class="chip2">Duplicate lines dropped <b>'+H.duplicate_lines+'</b></span>'+
     '<span class="chip2'+(H.unknown_entry_types.length?' warn':'')+'">New entry types <b>'+H.unknown_entry_types.length+'</b></span>';
-  document.querySelector('#tHealth tbody').innerHTML=H.entry_types.map(t=>'<tr><td><code>'+esc(t.type)+'</code></td><td class="num">'+t.n.toLocaleString()+'</td><td>'+(t.status==='handled'?'yes':t.status==='ignored'?'no (known, not needed)':'<b>new type, not read</b>')+'</td></tr>').join('');
+  document.querySelector('#tHealth tbody').innerHTML=H.entry_types.map(t=>'<tr><td><code>'+esc(t.type)+'</code></td><td class="num">'+t.n.toLocaleString()+'</td><td>'+(t.status==='handled'?'yes':t.status==='ignored'?'no (known, not used yet)':'<b>new type, not read</b>')+'</td></tr>').join('');
   $('healthLimits').innerHTML=H.limits.map(l=>'<li>'+esc(l)+'</li>').join('');
   const sel=$('catTab'),tabs=[...new Set(Object.values(D.catalog).map(m=>m.tab))];
   if(sel.options.length===1)tabs.forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t.charAt(0).toUpperCase()+t.slice(1);sel.appendChild(o);});
   const f=sel.value;
   document.querySelector('#tCat tbody').innerHTML=Object.values(D.catalog).filter(m=>!f||m.tab===f).map(m=>
-    '<tr><td><b>'+esc(m.name)+'</b></td><td>'+esc(m.tab)+'</td><td><span class="cb '+m.confidence+'">'+CONF[m.confidence]+'</span></td><td class="wrapc">'+esc(m.how)+'</td><td class="wrapc">'+esc(m.limit)+'</td></tr>').join('');
+    '<tr><td><b>'+esc(m.name)+'</b>'+(m.degraded?'<div class="note" style="margin:4px 0 0;color:var(--amber)">⚠ '+esc(m.degraded)+'</div>':'')+'</td><td>'+esc(m.tab)+'</td><td><span class="cb '+m.confidence+'">'+CONF[m.confidence]+'</span></td><td class="wrapc">'+esc(m.how)+'</td><td class="wrapc">'+esc(m.limit)+'</td></tr>').join('');
   paintPriv();
 }
 $('catTab').onchange=()=>{if(D)renderHealth();};
@@ -5189,7 +5533,7 @@ class Handler(BaseHTTPRequestHandler):
                 data["prev_insight"] = {k: {m: pf[k][m] for m in ms} for k, ms in keep.items()}
             data["advisor"] = build_advisor(full, data["adoption"])
             data["health"] = build_health(full)
-            data["catalog"] = catalog_payload()
+            data["catalog"] = catalog_payload(data["health"]["schema"])
             data["root"] = self.root
 
             def sd(dl, k):
@@ -5531,6 +5875,10 @@ def main():
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--dump", action="store_true", help="print stats JSON and exit (for testing)")
+    ap.add_argument("--schema-report", action="store_true",
+                    help="print which log-format changes were detected (new/missing/changed fields) and exit")
+    ap.add_argument("--collect-fixture", metavar="FILE",
+                    help="write a structure-only, content-redacted copy of your logs to FILE (for bug reports) and exit")
     ap.add_argument("--install-startup", action="store_true",
                     help="Windows: run dashboard automatically at logon (Task Scheduler)")
     ap.add_argument("--uninstall-startup", action="store_true",
@@ -5582,6 +5930,23 @@ def main():
 
     if args.dump:
         print(json.dumps(stats_to_json(scanner.build_stats(), None), indent=2))
+        return
+
+    if args.schema_report:
+        print(render_schema_report(build_health(scanner.build_stats())))
+        return
+
+    if args.collect_fixture:
+        with scanner._lock:
+            scanner.scan()
+            ids, n = {}, 0
+            with open(args.collect_fixture, "w", encoding="utf-8") as f:
+                for path in sorted(scanner._entries):
+                    for e in scanner._entries[path]:
+                        f.write(json.dumps(redact_entry(e, ids)) + "\n")
+                        n += 1
+        print("Wrote %d redacted entries to %s" % (n, args.collect_fixture))
+        print("Strings are replaced, but field names and numbers are kept. Skim the file before sharing it.")
         return
 
     watcher = NotificationWatcher(scanner)

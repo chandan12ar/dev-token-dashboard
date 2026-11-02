@@ -52,6 +52,8 @@ Not verified: whether `--resume` copies earlier messages into the new file (docs
 | `last-prompt` | 11 | **no** | no (ignored) | `{lastPrompt, leafUuid, sessionId}`; **holds a prompt's text** |
 | `tools-used` | 7 | **no** | no (ignored) | `{tools[], sessionId}` |
 | `queue-operation` | 4 | **no** | no (ignored) | `operation=enqueue/dequeue`, `content`, `timestamp` |
+| `mode` | 5 | **no** | no (ignored) | `{mode, sessionId}`; appeared mid-session on the same version |
+| `cost-state` | 1 | **no** | no (ignored) | Claude Code's **own running session totals**: `totalCostUSD`, `totalLinesAdded/Removed`, `totalDuration`, `totalAPIDuration`, `totalToolDuration`, and `modelUsage.<model>.{inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, cacheCreation…1h/5m…, thinkingTokens, webSearchRequests, costUSD}`. **A ready-made cross-check for our token, cost and LoC totals** (not yet used) |
 
 (`ai-title`, which the dashboard uses for session titles, did not appear in this sample, so the census cannot
 confirm its current shape. `permission-mode` appeared only as a `permissionMode` field value on `user` entries here.)
@@ -61,6 +63,10 @@ confirm its current shape. `permission-mode` appeared only as a `permissionMode`
 - **Several types have no `version`, no `uuid` and no `timestamp`** (`atis-latch`, `last-prompt`, `tools-used`).
   They are repeated state snapshots (12, 11 and 7 copies in one short session). An archive cannot dedupe them by
   `uuid`; it needs a content hash plus file position.
+- **New entry types appear without a version change.** `mode` and `cost-state` first showed up in this same log, later in
+  the same session, on the same Claude Code version (2.1.316). Version number alone is not a schema fingerprint.
+- **Model names are used as keys** (`modelUsage.claude-haiku-5-5`). Every new model release would look like new fields,
+  so the sentinel collapses children of `modelUsage` to `<key>` (`MAP_KEYS`).
 - **Keys generated at runtime exist.** `wireToolInputs.<toolu_id>` and `wireIngestContext.<toolu_id>` use tool-call ids as
   object keys. A naive "new field detected" check would raise a new alert on every tool call. The sentinel **must
   normalise id-like keys** to a placeholder (the census already does).

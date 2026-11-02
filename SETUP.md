@@ -58,6 +58,8 @@ python ai_fluency_insights.py --dir "D:\path\to\.claude\projects"
 python ai_fluency_insights.py --port 9000      # different port
 python ai_fluency_insights.py --no-browser     # don't auto-open the browser
 python ai_fluency_insights.py --dump           # print raw stats JSON and exit
+python ai_fluency_insights.py --schema-report  # which Claude Code log-format changes were detected
+python ai_fluency_insights.py --collect-fixture out.jsonl   # structure-only copy of your logs for bug reports
 ```
 
 ## 3. Optional: start automatically at logon

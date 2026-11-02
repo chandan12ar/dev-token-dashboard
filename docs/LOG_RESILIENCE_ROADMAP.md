@@ -1,6 +1,6 @@
 # Log Resilience Roadmap
 
-**Status:** Phase 0 done; Phase 1 in progress · **Branch:** `claude/elegant-heisenberg-c7jxms`
+**Status:** Phase 0 done; Phase 1 largely done (see tables); Phase 2 not started · **Branch:** `claude/elegant-heisenberg-c7jxms`
 **Purpose:** make AI Fluency Insights trustworthy when Claude Code's log format changes, when we re-scan,
 and when Claude Code deletes old logs. This is a living document: update the status column as work lands.
 
@@ -208,12 +208,14 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 | **F1** Skip `*.orphaned-*` / `*.superseded-*` set-aside copies so counters do not inflate; the count is shown in Data Health. **Trade-off:** a set-aside file could hold messages the live file lacks; the Phase 2 archive must keep them raw | ☑ |
 | **F2** Attribute `<session>/subagents/*.jsonl` to the parent project, not `subagents` (`project_label()`, also used by the notification watcher) | ☑ |
 | Classify entry types as handled / ignored / **new** and show them in Data Health (**F5**: report, do not parse). Unknown top-level *keys* still to do | ◐ |
-| Startup warning: oldest log age vs retention setting; say when it is pinned by managed settings | ☐ |
-| Schema census + `schema/claude_code_known.json` + diff classifier | ☐ |
-| `requires=[paths]` on `METRIC_CATALOG`; degrade metrics instead of showing 0 | ☐ |
-| Data Health "Schema changes" panel and `--schema-report` | ☐ |
-| `--collect-fixture` (structure-only, redacted) | ☐ |
-| Mutation tests plus per-version golden fixtures | ☐ |
+| "History window" card in Data Health: retention days (from `settings.json`, default 30), earliest day we hold, and a note that managed settings may override. *Changed from a "warning" on purpose: under normal operation the oldest log is always near the limit, so an age warning would be permanently on* | ☑ |
+| Schema census per file at scan time + `schema/claude_code_known.json` baseline + classifier (missing / vanished-in-version / type change = warning; new field = info). Id-like and model-name keys collapse, free-form subtrees stay closed | ☑ |
+| Consumed-field contract (`CONSUMED_FIELDS`) mapped to catalog metrics; affected metrics are tagged in the catalog and listed in the finding. **Not done yet:** KPI tiles still show the number (e.g. `Cache read 0`) when a field is missing; they should show "unverified" | ◐ |
+| Data Health "Log format changes" panel, top-of-page banner on warnings, and `--schema-report` | ☑ |
+| `--collect-fixture FILE`: strings replaced, enumerations/model names/built-in tool names/timestamps kept, ids pseudonymised, numbers kept. Field names are kept, so skim before sharing | ☑ |
+| Mutation tests (drop / retype / vanish-in-version a field) | ☑ |
+| Per-version golden fixtures from other machines | ☐ needs real logs (Phase 0 open item) |
+| Cross-check against Claude Code's own `cost-state` totals (new in Phase 0, see `SCHEMA_NOTES.md`) for *meaning* drift | ☐ |
 
 ### Phase 2: Archive and checkpoints (answers Q2 and Q3)
 | Item | Status |
@@ -267,5 +269,6 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 | Date | Change |
 |---|---|
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
+| 2026-11-02 | Drift sentinel shipped: per-file census, baseline manifest, Data Health panel + banner, `--schema-report`, `--collect-fixture`, History window card. 16 new tests (168 total). Tested on a real log (clean) and a simulated field rename (detected, banner shown). |
 | 2026-11-02 | Phase 1 quick fixes F1 to F4 and entry-type classification shipped with 8 new tests (152 total passing). Live log confirmed append-only over the session. |
 | 2026-11-02 | Phase 0: census tool, `SCHEMA_NOTES.md`, docs verified, findings F1 to F5 recorded. Phase 1 items added. |
