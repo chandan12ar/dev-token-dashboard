@@ -1,6 +1,6 @@
 # Log Resilience Roadmap
 
-**Status:** planning (no code changed yet) · **Branch:** `claude/elegant-heisenberg-c7jxms`
+**Status:** Phase 0 done; Phase 1 in progress · **Branch:** `claude/elegant-heisenberg-c7jxms`
 **Purpose:** make AI Fluency Insights trustworthy when Claude Code's log format changes, when we re-scan,
 and when Claude Code deletes old logs. This is a living document: update the status column as work lands.
 
@@ -19,7 +19,7 @@ Legend: ☐ not started · ◐ in progress · ☑ done · ✖ dropped (say why)
 
 The premise is correct: the transcript `.jsonl` files are an internal format of Claude Code, not a published
 contract. Fields can be added, renamed or dropped between versions. (`docs/COPILOT_DASHBOARD_BUILD_PLAN.md` says the
-same about Copilot's logs.) Most changes are probably additive, but we cannot rely on that. **To confirm in Phase 0.**
+same about Copilot's logs.) Most changes are probably additive, but we cannot rely on that. **Phase 0 confirmed the docs do not document the transcript format or promise stability** (`docs/SCHEMA_NOTES.md` §1).
 
 ---
 
@@ -97,7 +97,7 @@ and not across restarts.**
 ## 4. Q3 — Keeping our own copy so deletion does not erase history
 
 **Problem, verified:** `docs/PROJECT_REPORT.md` §10 notes Claude Code keeps transcripts 30 days by default
-(`cleanupPeriodDays`; **re-verify against current Claude Code docs**). And `Scanner.scan` *drops cached entries for files
+(`cleanupPeriodDays`; **verified in Phase 0**: default 30, minimum 1, `0` is rejected, and managed settings can override a user's value). And `Scanner.scan` *drops cached entries for files
 that no longer exist*, so when Claude Code cleans up, our "all time" numbers, streaks and adoption score **shrink**.
 
 **Key principle: capture raw first, interpret later.** Deletion is irreversible; every parsing mistake is recoverable *if
@@ -184,19 +184,31 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 ### Phase 0: Discovery spike (no product change)
 | Item | Status |
 |---|---|
-| Write a throwaway census script; run on real logs from several Claude Code versions; record every observed path/type | ☐ |
-| Measure: log size per month, parse time, line counts, how often files are rewritten vs appended | ☐ |
-| Verify against current docs: `cleanupPeriodDays` default, hook input fields, OTel exposure, resume/fork duplication | ☐ |
-| Decide archive shape (B vs B+C) and the opt-in policy | ☐ |
-| Output: `docs/SCHEMA_NOTES.md` (observed schema + versions) | ☐ |
+| Census tool `tools/schema_census.py` (structure only, safe to share; collapses id-like keys, opaque subtrees) | ☑ |
+| Run the census on real logs | ◐ one session, one version (2.1.316) only. **Need logs from other machines/versions** |
+| Measure: log size per month, rewrite frequency | ◐ one sample; not representative (see SCHEMA_NOTES §2, §4) |
+| Verify against current docs: retention default, hook input fields, OTel exposure | ☑ (`SCHEMA_NOTES.md` §1). Resume/fork duplication **not** verified |
+| Decide archive shape (B vs B+C) and the opt-in policy | ☐ waiting on the owner (§8) |
+| Output: `docs/SCHEMA_NOTES.md` | ☑ |
+
+**Phase 0 findings that change the plan**
+- **F1** orphaned transcript copies are scanned and inflate non-token counters; **F2** subagent files are attributed to a project called `subagents`;
+  **F3** the tokens health check cannot fail; **F4** undecodable lines are not counted; **F5** four real entry types are unreferenced. Details and evidence: `SCHEMA_NOTES.md` §3.
+- Transcripts **can be rewritten** (docs describe `.superseded-` / `.orphaned-` files), so byte-offset checkpoints must detect rewrites.
+- `stats-cache.json` (kept indefinitely) is a long-lived independent source for cross-checks.
+- Managed settings can pin `cleanupPeriodDays`; the "raise the setting" advice cannot work there.
+- Dynamic keys (`wireToolInputs.<id>`) and embedded schemas make a naive new-field detector noisy; normalisation is mandatory.
+- Some entry types have no `uuid`/`timestamp` (repeated state snapshots); the archive needs a content-hash key for them.
 
 ### Phase 1: Sentinel and quick wins (answers Q1)
 | Item | Status |
 |---|---|
-| Fix the always-true "Tokens and cost" health check (measure tokens present, not assistant/assistant) | ☐ |
-| Count JSON decode errors separately: torn final line vs mid-file | ☐ |
-| Count and list unknown entry types and unknown top-level keys | ☐ |
-| Startup warning: oldest log age vs retention setting (cheap, protects users now) | ☐ |
+| **F3** Fix the always-true "Tokens and cost" health check (measure tokens present, not assistant/assistant) | ☐ |
+| **F4** Count JSON decode errors separately: torn final line vs mid-file | ☐ |
+| **F1** Skip `*.orphaned-*` / `*.superseded-*` set-aside copies (or dedupe them) so counters do not inflate | ☐ |
+| **F2** Attribute `<session>/subagents/*.jsonl` to the parent project, not `subagents` | ☐ |
+| Count and list unknown entry types and unknown top-level keys (**F5** decision: report, do not parse) | ☐ |
+| Startup warning: oldest log age vs retention setting; say when it is pinned by managed settings | ☐ |
 | Schema census + `schema/claude_code_known.json` + diff classifier | ☐ |
 | `requires=[paths]` on `METRIC_CATALOG`; degrade metrics instead of showing 0 | ☐ |
 | Data Health "Schema changes" panel and `--schema-report` | ☐ |
@@ -255,3 +267,4 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 | Date | Change |
 |---|---|
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
+| 2026-11-02 | Phase 0: census tool, `SCHEMA_NOTES.md`, docs verified, findings F1 to F5 recorded. Phase 1 items added. |
