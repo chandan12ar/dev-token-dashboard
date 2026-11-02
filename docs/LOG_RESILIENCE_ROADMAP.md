@@ -258,7 +258,7 @@ Defaults used because the owner decisions in section 8 were not answered: **opt-
 | Persisted canonical store, `--reprocess`, `--rebuild` | ✖ not needed: records are rebuilt from raw on every start (cold 1.4 s per 63 MB), so "reprocess" happens automatically. Revisit if start-up time becomes a problem |
 | Second adapter / second source (Copilot) | ☐ Phase 4. The registry is ready for it, but there is no Copilot log to build against here |
 | Per-version golden fixtures from other Claude Code versions | ☐ still needs real logs from other versions |
-| **Open finding:** our cost estimate was ~18% above Claude Code's own figure on one real session ($3.51 vs $2.97 at the same point). Causes not yet investigated (list prices vs applied rates; 5-minute vs 1-hour cache-write rate) | ☐ |
+| **Cost estimate ~18% above Claude Code's own** | ☑ resolved: it was the price model (1.25x writes instead of 2x for the 1-hour cache, 0.10x reads where Sonnet 5.5 and Opus 5.5 charge 0.05x, stale Opus/Fable/Haiku prices). The published rules reproduce Claude Code's own cost to five decimals; the old formula was +17% to +42% high on Sonnet 5.5 (growing with session length) and 9x on Haiku 5.5. Fixed, with a check in Data Health. See [COST_MODEL.md](COST_MODEL.md) |
 
 ### Phase 4: Performance and reach
 Measured first, on a realistic corpus (60 sessions, 273 MB, 50,340 entries with distinct ids spread over 60 days).
@@ -305,6 +305,7 @@ The earlier benchmark was misleading: copies sharing message ids made de-duplica
 | Date | Change |
 |---|---|
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
+| 2026-11-02 | Cost investigation: the 18% gap was the price model. Published rules reproduce Claude Code's own dollar figure exactly on 6 data points; old formula was +17% to +42% (Sonnet) and 9x (Haiku). Model-aware prices, 1h/5m cache writes, per-model cache-hit rates, Haiku tiers, fast mode, US-only multiplier, web search; Data Health "Model prices" check. 18 new tests (255 total). |
 | 2026-11-02 | Phase 4: profiled on a 273 MB corpus; incremental projection with a deterministic order (idle refresh 0.6 ms, live refresh about 8x faster), faster census, raw lines out of memory (644 MB to 158 MB), warm-up, archive machine id. 13 new tests (237 total). OpenTelemetry/hook journal dropped, Copilot blocked on logs, multi-machine left as a design note. |
 | 2026-11-02 | Phase 3: canonical Record schema v1, adapter registry, projector, watcher on Records, golden characterization tests, cost-state cross-check, unverified-version signal. 26 new tests (225 total). Zero regressions against the previous parser in differential runs. |
 | 2026-11-02 | Phase 2: incremental tail reader and opt-in SQLite archive with restore of deleted logs, `--archive-*` commands, Data Health card. 31 new tests (199 total); mutation-checked; verified on a real log. |

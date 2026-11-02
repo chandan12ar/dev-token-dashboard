@@ -198,7 +198,7 @@ command output), so read the notice it shows first. See [SETUP.md](SETUP.md#3c-o
 ## Notes
 
 - Cost is an *estimate* at public API pricing — on a subscription plan your
-  real marginal cost is $0. Tune the `PRICING` table at the top of the script.
+  real marginal cost is $0. The prices come from Anthropic's published table and are checked against the cost Claude Code records itself ([docs/COST_MODEL.md](docs/COST_MODEL.md)); edit the `PRICING` table at the top of the script if they change.
 - Token totals are **deduplicated per API response**, which is why they're
   lower (and more accurate) than the official Claude Code panel's count —
   the full analysis is in [docs/TOKEN_COUNTS.md](docs/TOKEN_COUNTS.md).

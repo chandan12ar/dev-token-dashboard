@@ -1159,7 +1159,8 @@ class PricingTests(unittest.TestCase):
     def test_sonnet_rate_matches_current_anthropic_pricing(self):
         # Sonnet 5 is $2/$10 per MTok, confirmed permanent (the planned
         # $3/$15 rise was cancelled) -- see the token-economics brainstorm.
-        self.assertEqual(afi.price_for("claude-sonnet-5"), {"in": 2.0, "out": 10.0})
+        rates = afi.price_for("claude-sonnet-5")
+        self.assertEqual((rates["in"], rates["out"]), (2.0, 10.0))
 
 
 class ColdStartAndCacheHealthTests(unittest.TestCase):
@@ -2659,7 +2660,8 @@ class CanonicalLayerTests(unittest.TestCase):
             thinkingDurationMs=900, effort="high")
         self.assertEqual([e["kind"] for e in r.events], ["response", "tool_call", "tool_call", "tool_call"])
         resp = r.events[0]
-        self.assertEqual(resp["usage"], {"input": 3, "output": 4, "cache_write": 5, "cache_read": 6})
+        self.assertEqual(resp["usage"], {"input": 3, "output": 4, "cache_write": 5, "cache_read": 6,
+                                         "cache_write_1h": 0, "web_search": 0})
         self.assertEqual((resp["model"], resp["stop_reason"], resp["thinking_ms"], resp["effort"], resp["message_id"]),
                          ("claude-sonnet-5", "end_turn", 900, "high", "m1"))
         w, b, a = r.events[1:]
@@ -2799,11 +2801,11 @@ class CanonicalLayerTests(unittest.TestCase):
     def test_dated_prices_apply_only_to_days_before_the_change(self):
         cheap = {"in": 1.0, "out": 5.0}
         base = lambda key: next(p for k, p in afi.PRICING if k == key)       # noqa: E731
-        with patch.dict(afi.PRICE_HISTORY, {"sonnet": [("2026-06-01", cheap)]}):
+        with patch.dict(afi.PRICE_HISTORY, {"sonnet-5": [("2026-06-01", cheap)]}):
             self.assertEqual(afi.price_for("claude-sonnet-5", "2026-05-31"), cheap)
-            self.assertEqual(afi.price_for("claude-sonnet-5", "2026-06-01"), base("sonnet"))
-            self.assertEqual(afi.price_for("claude-sonnet-5"), base("sonnet"))
-            self.assertEqual(afi.price_for("claude-opus-5-5", "2020-01-01"), base("opus"))
+            self.assertEqual(afi.price_for("claude-sonnet-5", "2026-06-01"), base("sonnet-5"))
+            self.assertEqual(afi.price_for("claude-sonnet-5"), base("sonnet-5"))
+            self.assertEqual(afi.price_for("claude-opus-5-5", "2020-01-01"), base("opus-5-5"))
 
     # --- sentinel + health ---------------------------------------------------------------
     def test_an_unverified_claude_code_version_is_reported(self):
@@ -3133,6 +3135,164 @@ class IncrementalProjectionTests(unittest.TestCase):
         self.assertEqual((st.hc["decode_errors_mid"], st.parse_errors), (1, 1))
         st2 = sc.build_stats()
         self.assertEqual((st2.hc["decode_errors_mid"], st2.parse_errors), (1, 1))      # not double counted
+
+
+class CostModelTests(unittest.TestCase):
+    """docs/COST_MODEL.md. Ground truth: the dollar figures Claude Code wrote into a real session log, next to its own
+    token counts (numbers only, no content). The published price rules must reproduce them exactly."""
+
+    # (model, Claude Code's token counts, Claude Code's own costUSD), from three snapshots of one real session
+    SNAPSHOTS = [
+        ("claude-sonnet-5-5", dict(i=1083, o=56549, cr=5522121, cw1=167274), 1.78896),
+        ("claude-sonnet-5-5", dict(i=1625, o=100831, cr=10328604, cw1=228105), 2.95684),
+        ("claude-sonnet-5-5", dict(i=3333, o=324484, cr=51293452, cw1=500529), 10.38297),
+        ("claude-haiku-5-5", dict(i=116921, o=4946, cr=0, cw1=0), 0.01417),
+    ]
+
+    def _cost(self, model, i=0, o=0, cr=0, cw5=0, cw1=0, **kw):
+        return afi.price_parts(afi.price_for(model), i, o, cw5, cw1, cr, **kw)[0]
+
+    def test_reproduces_claude_codes_own_cost_from_its_own_token_counts(self):
+        for model, t, want in self.SNAPSHOTS:
+            rates = {k: v for k, v in afi.price_for(model).items() if k != "tier"}
+            # a snapshot sums many requests, each under Haiku 5.5's 100k-token prompt tier, so price it at the base tier
+            cost = afi.price_parts(rates, t["i"], t["o"], 0, t["cw1"], t["cr"])[0]
+            self.assertAlmostEqual(cost, want, places=5, msg=model)
+
+    def test_the_old_formula_was_wrong_in_the_way_the_investigation_found(self):
+        i, o, cr, cw = 1625, 100831, 10328604, 228105                 # Sonnet 5.5 snapshot 2
+        old = (i * 2 + o * 10 + cw * 2 * 1.25 + cr * 2 * 0.10) / 1e6   # 1.25x writes, 0.10x reads
+        self.assertGreater(old / 2.95684, 1.2)                          # about 23% too high on a cache-heavy session
+
+    def test_the_right_row_is_chosen_for_each_model_id(self):
+        rows = {"claude-sonnet-5-5": (2, 10, 0.05), "claude-sonnet-5": (2, 10, 0.10), "claude-sonnet-4-5-20250929": (3, 15, 0.10),
+                "claude-opus-5-5": (4, 20, 0.05), "claude-opus-5": (5, 25, 0.10), "claude-opus-4-5-20251101": (5, 25, 0.10),
+                "claude-opus-4-1-20250805": (15, 75, 0.10), "claude-3-opus-20240229": (15, 75, 0.10),
+                "claude-fable-5-1": (10, 50, 0.025), "claude-fable-5": (10, 50, 0.10),
+                "claude-haiku-5-5": (0.10, 0.50, 0.10), "claude-haiku-4-5-20251001": (1, 5, 0.10),
+                "claude-3-5-haiku-20241022": (0.8, 4, 0.10)}
+        for model, (pin, pout, read) in rows.items():
+            r, matched = afi.match_price(model)
+            self.assertTrue(matched, model)
+            self.assertEqual((r["in"], r["out"], r.get("read", 0.10)), (pin, pout, read), model)
+
+    def test_unknown_models_use_the_default_and_say_so(self):
+        r, matched = afi.match_price("some-brand-new-model")
+        self.assertFalse(matched)
+        self.assertEqual(r, afi.DEFAULT_PRICE)
+        st = afi.Stats()
+        e = {"type": "assistant", "sessionId": "s", "timestamp": "2026-10-12T09:00:00Z", "version": "2.1.1",
+             "message": {"id": "m", "model": "some-brand-new-model", "content": [],
+                         "usage": {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0,
+                                   "cache_read_input_tokens": 0}}}
+        afi.project_record(afi.adapt_entry(e), "p", st)
+        self.assertEqual(st.default_priced, Counter({"some-brand-new-model": 1}))
+
+    def test_one_hour_writes_cost_twice_the_input_price_and_five_minute_writes_1_25(self):
+        self.assertAlmostEqual(self._cost("claude-sonnet-5-5", cw5=1_000_000), 2.5)
+        self.assertAlmostEqual(self._cost("claude-sonnet-5-5", cw1=1_000_000), 4.0)
+        self.assertAlmostEqual(self._cost("claude-sonnet-5-5", cr=1_000_000), 0.10)
+        self.assertAlmostEqual(self._cost("claude-sonnet-5", cr=1_000_000), 0.20)
+        self.assertAlmostEqual(self._cost("claude-fable-5-1", cr=1_000_000), 0.25)
+
+    def test_haiku_5_5_is_priced_per_request_by_prompt_length(self):
+        small = self._cost("claude-haiku-5-5", i=50_000, o=1000, cr=40_000)               # prompt 90k: base prices
+        self.assertAlmostEqual(small, (50_000 * 0.10 + 1000 * 0.50 + 40_000 * 0.10 * 0.10) / 1e6)
+        big = self._cost("claude-haiku-5-5", i=50_000, o=1000, cr=60_000)                 # prompt 110k: the whole request
+        self.assertAlmostEqual(big, (50_000 * 0.50 + 1000 * 2.50 + 60_000 * 0.50 * 0.10) / 1e6)
+        self.assertEqual(self._cost("claude-sonnet-5-5", i=500_000), 500_000 * 2 / 1e6)   # no long-context surcharge here
+
+    def test_fast_mode_and_us_only_inference_stack_and_only_where_published(self):
+        base = self._cost("claude-opus-5-5", i=1_000_000, o=1_000_000)
+        self.assertAlmostEqual(base, 24.0)
+        self.assertAlmostEqual(self._cost("claude-opus-5-5", i=1_000_000, o=1_000_000, speed="fast"), 48.0)
+        self.assertAlmostEqual(self._cost("claude-opus-5-5", i=1_000_000, o=1_000_000, geo="us"), 24.0 * 1.1)
+        self.assertAlmostEqual(self._cost("claude-opus-5-5", i=1_000_000, o=1_000_000, speed="fast", geo="us"), 48.0 * 1.1)
+        self.assertAlmostEqual(self._cost("claude-sonnet-5-5", i=1_000_000, speed="fast"), 2.0)      # no fast mode for Sonnet
+        self.assertAlmostEqual(self._cost("claude-opus-4-5", i=1_000_000, geo="us"), 5.0)            # 4.6 and later only
+        self.assertAlmostEqual(self._cost("claude-sonnet-5-5", i=1_000_000, geo="global"), 2.0)
+
+    def test_web_searches_cost_one_cent_each(self):
+        self.assertAlmostEqual(self._cost("claude-sonnet-5-5", searches=3), 0.03)
+
+    def test_cache_savings_use_the_models_own_rates(self):
+        r = afi.price_for("claude-sonnet-5-5")
+        _c, saved = afi.price_parts(r, 0, 0, 0, 100_000, 1_000_000)
+        self.assertAlmostEqual(saved, (1_000_000 * 2 * 0.95 - 100_000 * 2 * 1.0) / 1e6)
+
+    def test_the_adapter_carries_the_cache_split_speed_region_and_searches(self):
+        e = {"type": "assistant", "sessionId": "s", "timestamp": "2026-10-12T09:00:00Z", "version": "2.1.316",
+             "message": {"id": "m", "model": "claude-opus-5-5", "content": [], "usage": {
+                 "input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 300, "cache_read_input_tokens": 4,
+                 "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 200},
+                 "server_tool_use": {"web_search_requests": 2}, "speed": "fast", "inference_geo": "us"}}}
+        resp = afi.adapt_entry(e).events[0]
+        self.assertEqual((resp["usage"]["cache_write_1h"], resp["usage"]["web_search"], resp["speed"], resp["geo"]),
+                         (200, 2, "fast", "us"))
+        e["message"]["usage"].pop("cache_creation")                       # an older log with no split: all 5-minute
+        self.assertEqual(afi.adapt_entry(e).events[0]["usage"]["cache_write_1h"], 0)
+        e["message"]["usage"]["cache_creation"] = {"ephemeral_1h_input_tokens": 99999}     # cannot exceed the total
+        self.assertEqual(afi.adapt_entry(e).events[0]["usage"]["cache_write_1h"], 300)
+
+    def test_top_tier_means_the_opus_fable_families_whatever_they_cost(self):
+        for m in ("claude-opus-5-5", "claude-opus-4-1", "claude-fable-5-1", "claude-mythos-5-1"):
+            self.assertTrue(afi._is_top_tier(m), m)
+        for m in ("claude-sonnet-5-5", "claude-haiku-5-5", "unknown"):
+            self.assertFalse(afi._is_top_tier(m), m)
+
+
+class PriceCheckTests(unittest.TestCase):
+    """The dashboard reprices Claude Code's own token counts and compares with Claude Code's own dollar figure."""
+
+    def _snapshot(self, model, cost, i=1625, o=100831, cr=10328604, cw1=228105, **extra):
+        return {"type": "cost-state", "sessionId": "s1", "totalCostUSD": cost, "modelUsage": {model: dict({
+            "inputTokens": i, "outputTokens": o, "cacheReadInputTokens": cr, "cacheCreationInputTokens": cw1,
+            "cacheCreationEphemeral5mInputTokens": 0, "cacheCreationEphemeral1hInputTokens": cw1, "costUSD": cost,
+            "webSearchRequests": 0}, **extra)}}
+
+    def _cap(self, *entries, responses=()):
+        st = afi.Stats()
+        for e in list(responses) + list(entries):
+            afi.project_record(afi.adapt_entry(e), "p", st)
+        return {c["id"]: c for c in afi.build_health(st)["capabilities"]}["prices"]
+
+    def test_correct_prices_pass(self):
+        cap = self._cap(self._snapshot("claude-sonnet-5-5", 2.95684))
+        self.assertEqual(cap["status"], "ok")
+        self.assertIn("claude-sonnet-5-5", cap["detail"])
+
+    def test_a_changed_price_is_reported_with_both_figures(self):
+        cap = self._cap(self._snapshot("claude-sonnet-5-5", 3.60))              # Claude Code charged more than we think
+        self.assertEqual(cap["status"], "partial")
+        self.assertIn("$2.96", cap["detail"])
+        self.assertIn("$3.60", cap["detail"])
+
+    def test_the_old_formula_would_have_been_caught(self):
+        # what the dashboard used to charge for the same tokens: 1.25x writes and 0.10x reads
+        old_cost = (1625 * 2 + 100831 * 10 + 228105 * 2 * 1.25 + 10328604 * 2 * 0.10) / 1e6
+        self.assertNotEqual(self._cap(self._snapshot("claude-sonnet-5-5", old_cost))["status"], "ok")
+
+    def test_within_one_percent_passes(self):
+        self.assertEqual(self._cap(self._snapshot("claude-sonnet-5-5", 2.95684 * 1.009))["status"], "ok")
+
+    def test_tiered_haiku_totals_are_not_judged(self):
+        cap = self._cap(self._snapshot("claude-haiku-5-5", 0.0142, i=116921, o=4946, cr=0, cw1=0))
+        self.assertEqual(cap["status"], "ok")
+        self.assertIn("prompt length", cap["detail"])                 # says why it was not judged
+
+    def test_models_priced_by_default_are_listed(self):
+        resp = {"type": "assistant", "sessionId": "s", "timestamp": "2026-10-12T09:00:00Z", "version": "2.1.1",
+                "message": {"id": "m", "model": "claude-future-9", "content": [], "usage": {
+                    "input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}
+        cap = self._cap(responses=[resp])
+        self.assertEqual(cap["status"], "partial")
+        self.assertIn("claude-future-9", cap["detail"])
+        self.assertIn("default", cap["detail"])
+
+    def test_no_totals_in_the_logs_is_stated_plainly(self):
+        cap = self._cap()
+        self.assertEqual(cap["status"], "ok")
+        self.assertIn("no Claude Code cost totals", cap["detail"])
 
 
 class HealthAndCatalogTests(_LogFixture):

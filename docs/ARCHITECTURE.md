@@ -330,7 +330,7 @@ The table below describes behaviour, which is unchanged (pinned by `GoldenStatsT
 | **Time** | ISO timestamp → local timezone via `.astimezone()`. `day`, `hour`, `weekday` are local. Undated entries are kept for all-time but dropped by any date filter |
 | **Token de-duplication** | usage is counted once per key `(message.id or uuid, requestId)` (`seen_msg_ids`). Claude Code logs one API response across several lines, so naive summing over-counts. See [TOKEN_COUNTS.md](TOKEN_COUNTS.md) |
 | **Tool-call de-duplication** | by `tool_use.id` (`seen_tool_ids`) |
-| **Cost** | `(in·P_in + out·P_out + cache_write·P_in·1.25 + cache_read·P_in·0.10) / 1e6`. `P` comes from the first `PRICING` key found in the lowercased model name, else `DEFAULT_PRICE` |
+| **Cost** | `price_parts()`: model-aware prices, 1.25x (5-minute) and 2x (1-hour) cache writes, per-model cache-hit rate, Haiku 5.5 prompt tiers, fast mode, US-only inference, web search. The row is the first `PRICING` key found in the lowercased model id, with the most specific keys first, else `DEFAULT_PRICE`. See [COST_MODEL.md](COST_MODEL.md). (Previously: `(in·P_in + out·P_out + cache_write·P_in·1.25 + cache_read·P_in·0.10) / 1e6`, which over-stated cost by 17 to 42% on a real Sonnet 5.5 session.) |
 | **Lines of code** | additions only: `Write`/`Create` → lines in `content`; `Edit`/`StrEditReplace` → lines in `new_string`; `MultiEdit` → sum over `edits[].new_string`; `NotebookEdit` → `new_source`. Edits made through shell commands are invisible |
 | **Exploration vs building** | `READ_TOOLS` vs `WRITE_TOOLS` counts per day and per session |
 | **Prompts** | a `user` entry with real text that is not a slash command, `<local-command…>`/`<command-…>` wrapper, or `[Request interrupted…]`. "Human tokens" ≈ `len(text)//4` |
@@ -672,7 +672,7 @@ Used when no official capture exists, and, as implemented, **also fires alongsid
 weighted = input + 5·output + 1.25·cache_write + 0.1·cache_read      # input-token equivalents
 ```
 
-Same relative weights as `PRICING`, because a raw token sum wildly overcounts cache-heavy coding
+A rough stand-in for the plan quota (not the dollar price, see COST_MODEL.md section 6), because a raw token sum wildly overcounts cache-heavy coding
 sessions against a real quota. **[S][T]**
 
 `PlanWindowTracker` is a single **global** window across all sessions: it starts at the first usage
@@ -1152,7 +1152,7 @@ restart):
 
 | Constant | Default | Effect |
 |---|---|---|
-| `PRICING`, `DEFAULT_PRICE` | per-1M-token price by model-name substring | every cost figure |
+| `PRICING`, `DEFAULT_PRICE`, `PRICE_HISTORY` | per-1M-token price rows by model-id substring (version-aware), default row, optional dated prices | every cost figure |
 | `GOALS` | `daily_loc 500`, token budgets `0` (hidden) | Momentum bar progress |
 | `ADOPTION`, `ADOPTION_LEVELS`, `LEVEL_GATES` | see §8.4 | My Adoption scoring |
 | `NOTIFY["enabled"]` | `True` | gates the entire notification thread |

@@ -57,9 +57,12 @@ line; the response before its tool calls on an assistant line.
 | `prompt` | user text | `class` = `typed` (with `text`), `command` (with `command`), `local_command`, or `interrupt` |
 | `response` | assistant line | `message_id`, `request_id`, `model`, `stop_reason`, `thinking_ms`, `effort`, `usage`, `usage_missing` |
 | `tool_call` | each `tool_use` block | `id`, `name`, `command`, `file_path`, `loc`, `subagent_type` |
-| `session_totals` | `cost-state` | `sid`, `cost_usd`, `lines_added`, `models` (per model: `input`, `output`, `cache_read`, `cache_write`, `cost_usd`) |
+| `session_totals` | `cost-state` | `sid`, `cost_usd`, `lines_added`, `models` (per model: `input`, `output`, `cache_read`, `cache_write`, `cache_write_1h`, `web_search`, `cost_usd`) |
 
-`response.usage` is `None` when the line has no usage, else `{input, output, cache_write, cache_read}` as numbers.
+`response.usage` is `None` when the line has no usage, else `{input, output, cache_write, cache_read, cache_write_1h, web_search}`
+as numbers (`cache_write_1h` is the part of `cache_write` that went into the 1-hour cache, billed at 2x, 0 when the log has no
+split; `web_search` is the number of web searches). `response.speed` and `response.geo` carry `usage.speed` and
+`usage.inference_geo` for pricing (fast mode, US-only inference). Cost rules: [COST_MODEL.md](COST_MODEL.md).
 `usage_missing` lists raw counters that were absent or not numeric (they count as 0 and are reported by the
 "Tokens and cost" health check). `tool_call.loc` is the number of lines written (Write/Create `content`, Edit
 `new_string`, MultiEdit `edits[].new_string`, NotebookEdit `new_source`): the adapter owns each tool's input
@@ -120,7 +123,7 @@ of what Claude Code recorded; counting clearly fewer means we are missing tokens
 `PRICING` holds current rates and applies to every day unless `PRICE_HISTORY` says otherwise:
 
 ```python
-PRICE_HISTORY["sonnet"] = [("2026-06-01", {"in": 3.0, "out": 15.0})]   # days before 2026-06-01 use these
+PRICE_HISTORY["sonnet-5-5"] = [("2026-06-01", {"in": 3.0, "out": 15.0})]   # days before 2026-06-01 use these
 ```
 
 No history ships, because there are no verified historical prices to put in it. Note what this means today: cost is
@@ -135,6 +138,4 @@ re-derived from token counts on every scan, so changing `PRICING` re-prices all 
 - **Dropping raw lines from memory after adapting.** Raw lines are still held for the schema census and
   `--collect-fixture`; everything else reads Records. Peak memory is 169 MB for 63 MB of logs (the previous parser: 161 MB),
   so dropping raw lines is the obvious memory saving for Phase 4.
-- **Cost accuracy.** On the same real session this dashboard's cost estimate was about 18% higher than Claude Code's own
-  figure at the same point ($3.51 against $2.97). Possible causes are our list prices versus what Claude Code applies, and
-  the 1-hour cache-write rate (the logs split cache writes into 5-minute and 1-hour). Not investigated yet.
+- **Cost accuracy.** Resolved: the earlier 18% gap was the price model, not the logs. See [COST_MODEL.md](COST_MODEL.md).

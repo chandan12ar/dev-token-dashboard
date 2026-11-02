@@ -184,7 +184,7 @@ only when you press the button — everything else is free forever.
 | Task Scheduler install fails | Run the terminal as Administrator, or use the Startup-folder method (option B). |
 | A new tab says "Not enough data yet" | Flow needs 5 timed turns and Quality needs 3 sessions where Claude edited files, within the selected date range. Widen the range (30d or 90d). My Adoption needs 3 active days in the last 4 weeks. |
 | A metric is missing or shows "not in your logs" | Open the **Data Health** tab. It lists which signals your Claude Code version writes (for example permission decisions or thinking time). Missing signals are shown as missing, never as zero. |
-| Cost card looks wrong | It's an estimate at public API pricing; edit the `PRICING` table at the top of the script. On a subscription your real marginal cost is $0. |
+| Cost card looks wrong | It's an estimate at public API pricing. Check Data Health > Model prices: it says if a price looks stale or a model has no price. Edit the `PRICING` table at the top of the script ([docs/COST_MODEL.md](docs/COST_MODEL.md)). On a subscription your real marginal cost is $0. |
 
 ## What next
 

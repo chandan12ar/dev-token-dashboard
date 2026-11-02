@@ -40,16 +40,40 @@ except ImportError:          # a few minimal Python builds ship without it; the 
     sqlite3 = None
 
 # ---------------------------------------------------------------------------
-# Pricing (USD per 1M tokens). Edit freely — these are estimates for the
-# "what would this cost on the API" card. Cache write ≈ 1.25x input,
-# cache read ≈ 0.1x input.
+# Pricing (USD per 1M tokens): what this usage would cost on the API. The numbers come from Anthropic's published
+# price table (platform.claude.com/docs/en/about-claude/pricing, read 2026-11-02) and are checked in the dashboard
+# against the dollar figure Claude Code writes into its own logs (see docs/COST_MODEL.md). Edit freely.
+#
+#   in / out   base input and output price
+#   read       cache-hit price as a multiple of `in` (default 0.10; 0.05 for Sonnet 5.5 and Opus 5.5, 0.025 for Fable 5.1)
+#   tier       Haiku 5.5 is priced per request by prompt length (input + cache reads + cache writes)
+#   fast_x     multiplier when a response ran in fast mode (usage.speed == "fast")
+#   geo_x      multiplier for US-only inference (usage.inference_geo == "us"), Claude 4.6 and later
+#
+# Cache writes cost 1.25x `in` for the 5-minute cache and 2x `in` for the 1-hour cache, for every model here.
+# The FIRST entry whose key is found in the lowercased model id wins, so list the most specific keys first.
 # ---------------------------------------------------------------------------
 PRICING = [
-    ("opus",   {"in": 15.0, "out": 75.0}),
-    ("sonnet", {"in": 2.0,  "out": 10.0}),
-    ("haiku",  {"in": 1.0,  "out": 5.0}),
-    ("fable",  {"in": 15.0, "out": 75.0}),
+    ("fable-5-1",  {"in": 10.0, "out": 50.0, "read": 0.025, "geo_x": 1.1}),
+    ("mythos",     {"in": 10.0, "out": 50.0, "read": 0.025, "geo_x": 1.1}),
+    ("fable",      {"in": 10.0, "out": 50.0, "geo_x": 1.1}),
+    ("opus-5-5",   {"in": 4.0,  "out": 20.0, "read": 0.05, "fast_x": 2.0, "geo_x": 1.1}),
+    ("opus-5",     {"in": 5.0,  "out": 25.0, "fast_x": 2.0, "geo_x": 1.1}),
+    ("opus-4-8",   {"in": 5.0,  "out": 25.0, "fast_x": 2.0, "geo_x": 1.1}),
+    ("opus-4-7",   {"in": 5.0,  "out": 25.0, "geo_x": 1.1}),
+    ("opus-4-6",   {"in": 5.0,  "out": 25.0, "geo_x": 1.1}),
+    ("opus-4-5",   {"in": 5.0,  "out": 25.0}),
+    ("opus",       {"in": 15.0, "out": 75.0}),                  # Opus 4.1, 4 and 3
+    ("sonnet-5-5", {"in": 2.0,  "out": 10.0, "read": 0.05, "geo_x": 1.1}),
+    ("sonnet-5",   {"in": 2.0,  "out": 10.0, "geo_x": 1.1}),
+    ("sonnet-4-6", {"in": 3.0,  "out": 15.0, "geo_x": 1.1}),
+    ("sonnet",     {"in": 3.0,  "out": 15.0}),                  # Sonnet 4.5, 4, 3.7 and 3.5
+    ("haiku-5-5",  {"in": 0.10, "out": 0.50, "geo_x": 1.1, "tier": {"over": 100_000, "in": 0.50, "out": 2.50}}),
+    ("3-5-haiku",  {"in": 0.80, "out": 4.0}),                   # Haiku 3.5 (claude-3-5-haiku-...)
+    ("haiku-3-5",  {"in": 0.80, "out": 4.0}),
+    ("haiku",      {"in": 1.0,  "out": 5.0}),                   # Haiku 4.5 (older Haiku models are approximated)
 ]
+# Used for a model id no entry matches. Responses priced this way are counted and shown in Data Health.
 DEFAULT_PRICE = {"in": 3.0, "out": 15.0}
 
 # ---------------------------------------------------------------------------
@@ -319,21 +343,49 @@ USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "c
 
 # Optional dated prices. PRICING holds the CURRENT rates and is used for every day by default. If a price changed,
 # say so here and older days are priced at the old rate instead of being silently re-priced at today's:
-#   PRICE_HISTORY["sonnet"] = [("2026-06-01", {"in": 3.0, "out": 15.0})]    # days before 2026-06-01
+#   PRICE_HISTORY["sonnet-5-5"] = [("2026-06-01", {"in": 3.0, "out": 15.0})]    # days before 2026-06-01
 # No history ships with the tool because there are no verified historical prices to put in it.
 PRICE_HISTORY = {}
 
 
-def price_for(model: str, day=None):
+def match_price(model: str, day=None):
+    """(rates, matched): the price row for a model id, and whether any PRICING entry matched it."""
     m = (model or "").lower()
     for key, p in PRICING:
         if key in m:
             if day:
                 for until, rates in sorted(PRICE_HISTORY.get(key, ()), key=lambda x: x[0]):
                     if day < until:
-                        return rates
-            return p
-    return DEFAULT_PRICE
+                        return rates, True
+            return p, True
+    return DEFAULT_PRICE, False
+
+
+def price_for(model: str, day=None):
+    return match_price(model, day)[0]
+
+
+def price_parts(rates, i, o, cw5, cw1, cr, speed=None, geo=None, searches=0):
+    """(cost, cache savings) in USD for one request.
+
+    i/o: input and output tokens. cw5/cw1: cache writes into the 5-minute and the 1-hour cache. cr: cache reads.
+    Cache writes cost 1.25x (5-minute) and 2x (1-hour) the input price, cache reads `read` x input. Haiku 5.5 charges
+    its higher prices to the whole request when its prompt (input + cache reads + cache writes) is over the tier size.
+    Fast mode and US-only inference multiply everything; a web search costs $0.01.
+    Savings = what caching saved against sending the same tokens uncached, minus the premium paid for cache writes."""
+    pin, pout = rates["in"], rates["out"]
+    tier = rates.get("tier")
+    if tier and (i + cr + cw5 + cw1) > tier["over"]:
+        pin, pout = tier["in"], tier["out"]
+    read = rates.get("read", 0.10)
+    mult = 1.0
+    if speed == "fast" and rates.get("fast_x"):
+        mult *= rates["fast_x"]
+    if geo == "us" and rates.get("geo_x"):
+        mult *= rates["geo_x"]
+    cost = (i * pin + o * pout + cr * pin * read + cw5 * pin * 1.25 + cw1 * pin * 2.0) * mult / 1_000_000 + searches * 0.01
+    saved = (cr * pin * (1 - read) - cw5 * pin * 0.25 - cw1 * pin * 1.0) / 1_000_000
+    return cost, saved
 
 
 def count_lines(text) -> int:
@@ -414,6 +466,7 @@ class Stats:
         self.census_types = Counter()      # (type, version) -> entries
         self.archive = None                # Archive.status() when an archive is configured (see Scanner.build_stats)
         self.retention = None              # {"days", "source"} from load_retention(), set by Scanner.build_stats
+        self.default_priced = Counter()    # model id -> responses priced with DEFAULT_PRICE (no PRICING entry matched)
         self.reconcile = {}                # sid -> Claude Code's own latest session totals (cost-state)
         self.session_model_out = Counter() # (sid, model) -> output tokens we counted, to check against reconcile
         self.adapters = Counter()          # which adapter read each log line (see ADAPTERS)
@@ -573,6 +626,8 @@ def _adapt_claude_code_2(entry) -> Record:
             models[str(name)] = {"input": _num(u.get("inputTokens"))[0], "output": _num(u.get("outputTokens"))[0],
                                  "cache_read": _num(u.get("cacheReadInputTokens"))[0],
                                  "cache_write": _num(u.get("cacheCreationInputTokens"))[0],
+                                 "cache_write_1h": _num(u.get("cacheCreationEphemeral1hInputTokens"))[0],
+                                 "web_search": _num(u.get("webSearchRequests"))[0],
                                  "cost_usd": _num(u.get("costUSD"))[0]}
         if rec.sid:
             ev.append({"kind": "session_totals", "sid": rec.sid, "models": models,
@@ -649,6 +704,8 @@ def _adapt_claude_code_2(entry) -> Record:
             "stop_reason": msg.get("stop_reason") or None,
             "thinking_ms": td if isinstance(td, (int, float)) else None,
             "effort": str(entry["effort"]) if entry.get("effort") else None,
+            "speed": usage.get("speed") if isinstance(usage.get("speed"), str) else None,
+            "geo": usage.get("inference_geo") if isinstance(usage.get("inference_geo"), str) else None,
             "usage": None, "usage_missing": []}
     if usage:
         counts = {}
@@ -657,6 +714,12 @@ def _adapt_claude_code_2(entry) -> Record:
             counts[name], bad = _num(usage.get(key, 0))
             if key not in usage or bad:
                 resp["usage_missing"].append(key)
+        # how many of the cache writes went into the 1-hour cache (billed at 2x, not 1.25x); with no split: none
+        cc = usage.get("cache_creation")
+        w1 = _num(cc.get("ephemeral_1h_input_tokens"))[0] if isinstance(cc, dict) else 0
+        counts["cache_write_1h"] = max(0, min(w1, counts["cache_write"]))
+        stu = usage.get("server_tool_use")
+        counts["web_search"] = _num(stu.get("web_search_requests"))[0] if isinstance(stu, dict) else 0
         resp["usage"] = counts
     ev.append(resp)
     if isinstance(content, list):
@@ -940,8 +1003,11 @@ def _project_response(e, st, sess, sid, side, day, ts, project, branch):
         return
     st.seen_msg_ids.add(dedup_key)
     i, o, cw, cr = usage["input"], usage["output"], usage["cache_write"], usage["cache_read"]
-    p = price_for(model, day)
-    cost = (i * p["in"] + o * p["out"] + cw * p["in"] * 1.25 + cr * p["in"] * 0.10) / 1_000_000
+    rates, priced = match_price(model, day)
+    if not priced:
+        st.default_priced[model] += 1
+    cw1 = min(usage.get("cache_write_1h", 0), cw)          # optional: an adapter without the split means all 5-minute
+    cost, saved = price_parts(rates, i, o, cw - cw1, cw1, cr, e.get("speed"), e.get("geo"), usage.get("web_search", 0))
     st.hc["assistant_msgs"] += 1
     if sid:
         st.session_model_out[(sid, model)] += o
@@ -957,8 +1023,7 @@ def _project_response(e, st, sess, sid, side, day, ts, project, branch):
         d["input"] += i; d["output"] += o
         d["cache_read"] += cr; d["cache_write"] += cw
         d["cost"] += cost
-        # what caching saved: reads billed at 10% instead of 100%, minus the 25% write premium
-        d["cache_savings"] += (cr * 0.90 - cw * 0.25) * p["in"] / 1_000_000
+        d["cache_savings"] += saved
     m = st.models[model]
     m["msgs"] += 1; m["input"] += i; m["output"] += o
     m["cache_read"] += cr; m["cache_write"] += cw; m["cost"] += cost
@@ -2128,11 +2193,12 @@ def steps_crossed(prev_total, new_total, step):
 
 
 def weighted_tokens(input_tokens, output_tokens, cache_write, cache_read):
-    """Quota-weighted usage in input-token-equivalent units, using the same
-    relative weights as PRICING (every tier prices output at 5x input,
-    cache write at 1.25x, cache read at 0.1x) — a raw token sum wildly
-    overcounts a cache-heavy coding session against Anthropic's real
-    rolling-window quota, since cache reads are far cheaper than fresh input."""
+    """Quota-weighted usage in input-token-equivalent units (output 5x input,
+    cache write 1.25x, cache read 0.1x). This is a rough stand-in for the plan's
+    rolling-window quota, NOT the dollar price (see price_parts, which is
+    model-aware): Anthropic does not publish how the quota weighs cache traffic,
+    and a raw token sum wildly overcounts a cache-heavy session because cache
+    reads are far cheaper than fresh input."""
     return (input_tokens + output_tokens * 5
             + cache_write * 1.25 + cache_read * 0.1)
 
@@ -3029,7 +3095,9 @@ def build_quality(st: Stats, d0=None, d1=None) -> dict:
 
 
 def _is_top_tier(model: str) -> bool:
-    return price_for(model)["in"] >= 10
+    """The most capable (and costliest) families. By name: a price threshold stops meaning that as prices move."""
+    m = (model or "").lower()
+    return any(k in m for k in ("opus", "fable", "mythos"))
 
 
 def build_value(st: Stats, d0=None, d1=None) -> dict:
@@ -3145,6 +3213,59 @@ def crosscheck(st: Stats) -> dict:
             "median": _median([r["ratio"] for r in rows]) if rows else None}
 
 
+PRICECHECK_TOLERANCE = 0.01       # our price table may differ from Claude Code's own cost by up to 1%
+
+
+def pricecheck(st: Stats) -> dict:
+    """Reprice the token counts Claude Code itself recorded (cost-state) with our table and compare with the dollar
+    figure it recorded. Unlike the token cross-check this needs no alignment: both sides use Claude Code's own counts,
+    so any difference is the PRICE TABLE (a price changed, a new model, fast mode or US-only inference used).
+    Haiku 5.5 is skipped: its price depends on each request's prompt length, which a total cannot show."""
+    worst = {}                                     # model -> (relative error, ours, theirs)
+    skipped = set()
+    for snap in st.reconcile.values():
+        for model, u in snap["models"].items():
+            rates, matched = match_price(model)
+            if rates.get("tier"):
+                skipped.add(model)
+                continue
+            theirs = u["cost_usd"]
+            if theirs < 0.01:
+                continue
+            cw1 = min(u["cache_write_1h"], u["cache_write"])
+            ours = price_parts(rates, u["input"], u["output"], u["cache_write"] - cw1, cw1, u["cache_read"],
+                               searches=u["web_search"])[0]
+            err = (ours - theirs) / theirs
+            if model not in worst or abs(err) > abs(worst[model][0]):
+                worst[model] = (err, ours, theirs, matched)
+    bad = {m: v for m, v in worst.items() if abs(v[0]) > PRICECHECK_TOLERANCE}
+    return {"checked": sorted(worst), "bad": bad, "skipped": sorted(skipped)}
+
+
+def _price_capability(st: Stats):
+    c = pricecheck(st)
+    problems = []
+    if st.default_priced:
+        problems.append("No price is listed for %s, so a default of $%g in / $%g out per million tokens is used."
+                        % (", ".join("%s (%d)" % kv for kv in st.default_priced.most_common(4)),
+                           DEFAULT_PRICE["in"], DEFAULT_PRICE["out"]))
+    for m, (err, ours, theirs, _matched) in sorted(c["bad"].items()):
+        problems.append("For %s our prices give $%.2f where Claude Code recorded $%.2f (%+.0f%%): a price may have changed, "
+                        "or fast mode or US-only inference was used." % (m, ours, theirs, 100 * err))
+    if problems:
+        return ("prices", "Model prices", "value", "partial", " ".join(problems))
+    if c["checked"]:
+        return ("prices", "Model prices", "value", "ok",
+                "Our prices reproduce the dollar cost Claude Code recorded for %s, within %d%%."
+                % (", ".join(c["checked"]), round(100 * PRICECHECK_TOLERANCE)))
+    if c["skipped"]:
+        return ("prices", "Model prices", "value", "ok",
+                "Priced from the published price table. Claude Code's cost totals are only for %s, whose price depends on "
+                "each request's prompt length, so they cannot be checked from a total." % ", ".join(c["skipped"]))
+    return ("prices", "Model prices", "value", "ok",
+            "Priced from the published price table. These logs carry no Claude Code cost totals to check the prices against.")
+
+
 def _crosscheck_capability(st: Stats):
     c = crosscheck(st)
     if not c["snapshots"]:
@@ -3250,6 +3371,7 @@ def build_health(st: Stats) -> dict:
                         "your local archive keeps logs after Claude Code deletes them." if kept else
                         "older history is gone unless you raised cleanupPeriodDays or turned on the local archive.")))
     caps.append(_crosscheck_capability(st))
+    caps.append(_price_capability(st))
     titled = sum(1 for sid in st.sessions if sid in st.session_titles)
     caps.append(("titles", "Session titles", "weekly",
                  _field_status(titled, len(st.sessions)),

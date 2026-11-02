@@ -63,6 +63,7 @@ confirm its current shape. `permission-mode` appeared only as a `permissionMode`
 - **Several types have no `version`, no `uuid` and no `timestamp`** (`atis-latch`, `last-prompt`, `tools-used`).
   They are repeated state snapshots (12, 11 and 7 copies in one short session). An archive cannot dedupe them by
   `uuid`; it needs a content hash plus file position.
+- **Cache writes are split by lifetime**: `usage.cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens` (every write in the measured session was 1-hour, billed at 2x input, not 1.25x). `usage.speed`, `usage.inference_geo` and `usage.server_tool_use.web_search_requests` also decide the price. See [COST_MODEL.md](COST_MODEL.md).
 - **`cost-state` agrees with our counts where it can** (measured on this one session, aligned to each snapshot): output
   tokens 0.999 of Claude Code's figure in both snapshots, cache writes 0.98, cache reads 0.94, input tokens 0.07, lines
   added 578 = 578. Its totals include calls that never appear in the transcript (a small Haiku model: ~117k input

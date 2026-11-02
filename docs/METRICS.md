@@ -115,19 +115,23 @@ longer, warm ones.
 ## 3. Estimated API cost
 
 Per unique response, using the `PRICING` table at the top of the script
-(USD per 1M tokens, editable):
+(USD per 1M tokens, editable). The rules come from Anthropic's published prices and were checked against the dollar figure
+Claude Code records in its own logs: [COST_MODEL.md](COST_MODEL.md).
 
 ```
-cost = ( input  × price_in
-       + output × price_out
-       + cache_write × price_in × 1.25     # cache writes cost 25% extra
-       + cache_read  × price_in × 0.10 )   # cache reads cost 10% of input
-       / 1,000,000
+cost = ( input       × price_in
+       + output      × price_out
+       + cache_read  × price_in × read        # 0.10 for most models; 0.05 Sonnet 5.5 / Opus 5.5; 0.025 Fable 5.1
+       + write_5min  × price_in × 1.25        # 5-minute cache writes
+       + write_1hour × price_in × 2.0 )       # 1-hour cache writes
+       × fast_mode (2x, Opus only) × us_only_inference (1.1x, Claude 4.6+)
+       / 1,000,000   +   web_searches × $0.01
 ```
 
-The price row is selected by substring match on the model name
-(`opus`, `sonnet`, `haiku`, `fable`); unknown models fall back to
-Sonnet-class pricing.
+Haiku 5.5 charges higher prices to a whole request whose prompt is over 100,000 tokens. The price row is chosen by
+version-aware substring match on the model id (`opus-5-5` before `opus-5` before `opus`); a model no row matches is priced
+at the default ($3 / $15) and listed in Data Health. Data Health also reprices Claude Code's own token totals and compares
+them with its recorded cost, so a stale price shows up as a warning.
 
 > **Important:** this is *"what this usage would cost at public API
 > pay-as-you-go prices"*. On a Pro/Max subscription your real marginal cost

@@ -59,10 +59,10 @@
  "days": {
   "2026-10-12": {
    "cache_read": 50000,
-   "cache_savings": 0.146025,
+   "cache_savings": 0.09835,
    "cache_write": 3000,
    "corrections": 1,
-   "cost": 0.041998,
+   "cost": 0.026456,
    "human_tokens": 39,
    "input": 126,
    "interruptions": 1,
@@ -79,10 +79,10 @@
   },
   "2026-10-13": {
    "cache_read": 10000,
-   "cache_savings": 0.0177,
+   "cache_savings": 0.0137175,
    "cache_write": 600,
    "corrections": 0,
-   "cost": 0.005738,
+   "cost": 0.0044537,
    "human_tokens": 8,
    "input": 24,
    "interruptions": 0,
@@ -97,6 +97,9 @@
    "tool_errors": 0,
    "writes": 1
   }
+ },
+ "default_priced": {
+  "some-unknown-model": 1
  },
  "edits": [
   [
@@ -285,7 +288,7 @@
   "claude-haiku-5-5": {
    "cache_read": 5000,
    "cache_write": 300,
-   "cost": 0.001427,
+   "cost": 0.0001427,
    "input": 12,
    "msgs": 1,
    "output": 108
@@ -293,7 +296,7 @@
   "claude-opus-5-5": {
    "cache_read": 5000,
    "cache_write": 300,
-   "cost": 0.01983,
+   "cost": 0.004288,
    "input": 12,
    "msgs": 1,
    "output": 87
@@ -391,7 +394,7 @@
  },
  "projects": {
   "work/app": {
-   "cost": 0.041998,
+   "cost": 0.026456,
    "days": {
     "2026-10-12": {
      "loc": 15,
@@ -414,7 +417,7 @@
    ]
   },
   "work/b": {
-   "cost": 0.005738,
+   "cost": 0.0044537,
    "days": {
     "2026-10-13": {
      "loc": 31,
@@ -544,7 +547,7 @@
    "api_calls": 12,
    "bash": 7,
    "cache_resets": 0,
-   "cost": 0.041998,
+   "cost": 0.026456,
    "end": "2026-10-12T23:30:00.000Z",
    "first_call_cost": 0.002214,
    "first_edit_s": 60.0,
@@ -562,7 +565,7 @@
    "last_write_seq": 20,
    "loc": 15,
    "model_cost": {
-    "claude-opus-5-5": 0.01983,
+    "claude-opus-5-5": 0.004288,
     "claude-sonnet-5": 0.022168
    },
    "msgs": 43,
@@ -588,9 +591,9 @@
    "api_calls": 2,
    "bash": 0,
    "cache_resets": 0,
-   "cost": 0.005738,
+   "cost": 0.0044537,
    "end": "2026-10-13T14:03:00.000Z",
-   "first_call_cost": 0.001427,
+   "first_call_cost": 0.0001427,
    "first_edit_s": 120.0,
    "last_cmd_seq": -1,
    "last_turn": {
@@ -606,7 +609,7 @@
    "last_write_seq": 1,
    "loc": 31,
    "model_cost": {
-    "claude-haiku-5-5": 0.001427,
+    "claude-haiku-5-5": 0.0001427,
     "some-unknown-model": 0.004311
    },
    "msgs": 5,
