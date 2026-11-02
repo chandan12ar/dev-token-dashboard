@@ -243,7 +243,7 @@ Fields the parser reads:
 ```
 Scanner._cache   : path -> (st_mtime, st_size)          # cheap "did it change?" gate
 Scanner._tail    : path -> {offset, head, tail, size}   # read_tail checkpoint
-Scanner._entries : path -> list[dict]                   # every parsed line of that file
+Scanner._records : path -> list[Record|None]            # every line, canonical (raw lines are NOT kept)
 Scanner._census  : path -> structure counters           # for the schema sentinel (§4.5)
 ```
 
@@ -265,9 +265,37 @@ Scanner._census  : path -> structure counters           # for the schema sentine
 7. Cache entries for files that are neither on disk nor restorable are dropped. **[S]**
 
 So a running dashboard reads each transcript byte once (`Scanner.bytes_read`), and unchanged files cost one `stat`.
-**What this does not fix:** `build_stats()` still creates a fresh `Stats` and runs `parse_entry` over *every* cached
-entry on every call (see [§12](#12-performance-and-scalability)), and a restarted dashboard reads everything once.
-Entries that raise inside `parse_entry` are counted in `parse_errors` and surfaced in the UI as a yellow warning. **[S]**
+Raw parsed lines are dropped as soon as they are adapted (peak memory 644 MB -> 158 MB on 273 MB of logs);
+`Scanner.raw_entries()` re-reads them from disk or the archive for `--collect-fixture`. A restarted dashboard reads
+everything once. Entries that raise inside the projector are counted in `parse_errors` and surfaced in the UI as a yellow
+warning. **[S]**
+
+### 4.2b Incremental projection (`build_stats`)
+
+`build_stats()` keeps one running `Stats` per date window (up to 8: full history, 7/30/90 days, custom...) and projects
+only the records added since the last call. This is exact, not approximate, because of one rule:
+
+- **One projection order.** Files are projected in order of `(first dated line, path)` (`Scanner._order`), never in
+  discovery order. Anything order-dependent (de-duplication across files, `last_day`, tie order of the longest prompts)
+  is therefore a function of the files' content, so a fresh scan and a long-running one agree. A new session is the
+  newest, so it lands at the end.
+  Compared with the release before (discovery order) on a 60-file corpus, all totals are identical; what can differ is
+  the order of items inside the per-event lists (`turns`, `tool_calls`, `edits`...), `last_day` (now the genuinely newest
+  date), and which of several equally long prompts are shown. A single log file is identical.
+- **When it can advance.** Everything already projected must be unchanged: same files in the same order, same record
+  generation (a rewrite or a restore gives a file a new generation), no earlier file grown, and only the **last**
+  projected file may have grown. Otherwise that window is rebuilt from scratch. So the fast path covers a session
+  growing or a new session starting, the usual case. When an *older* session grows (two terminals active, or a resumed
+  session) the refresh is a full rebuild, no slower than before.
+- **Snapshots.** What a request receives is a view of the running `Stats` (shared data, its own scan-level facts such as
+  decode errors, archive status, census). Before the next advance the running `Stats` is deep-copied if a view was
+  handed out, so a request never sees data change under it, and nothing may modify a returned `Stats` (a test runs every
+  payload builder and checks the fingerprint is unchanged).
+- **Idle refresh.** With nothing changed, `build_stats()` returns the same object (0.6 ms).
+
+The equivalence guarantee is tested by randomised sequences of appends, torn writes, new files, rewrites and deletes,
+comparing three date windows against a fresh scan after every step (`IncrementalProjectionTests`); four deliberate
+breakages of those rules were each caught.
 
 ### 4.2a The opt-in archive (`Archive`)
 
@@ -317,7 +345,7 @@ The table below describes behaviour, which is unchanged (pinned by `GoldenStatsT
 
 ### 4.4 The `Stats` model
 
-`Stats` is rebuilt from scratch on every call. Its top-level shape **[S]**:
+`Stats` is kept up to date incrementally per date window (§4.2b). Its top-level shape **[S]**:
 
 | Field | Shape | Feeds |
 |---|---|---|
@@ -335,8 +363,8 @@ period-over-period deltas and the Advisor's 28-day window work.
 
 ```mermaid
 flowchart LR
-  A[("*.jsonl logs")] -->|"stat: mtime,size changed?"| B["Scanner<br/>entries per file in memory"]
-  B -->|"every cached entry, every call"| C["parse_entry<br/>dedupe, classify, bucket by local day"]
+  A[("*.jsonl logs")] -->|"stat: mtime,size changed?"| B["Scanner<br/>canonical records per file"]
+  B -->|"only records added since the last call"| C["project_record<br/>dedupe, classify, bucket by local day"]
   C --> D["Stats<br/>days, sessions, turns,<br/>tool_calls, edits, feature_days…"]
   D --> E1["stats_to_json<br/>KPIs, charts, tables"]
   D --> E2["build_weeks"]
@@ -426,8 +454,8 @@ sequenceDiagram
 |---|---|---|---|
 | 1 | Browser | `load()` builds the query: `days=N` for 7/30/90, `days=0` for all time, or `from=…&to=…` for a custom range | — |
 | 2 | Browser → server | `fetch('/api/stats?…')`. Not cached (`Cache-Control: no-store`) and always the full payload (no ETag, no deltas) | payload 14 KB on a tiny history; ≈50–70 KB on 80k entries **[P]** |
-| 3 | Server | `Scanner.build_stats()` takes `Scanner._lock`, runs `scan()` (one `stat` per log file; re-reads only changed files), then runs `parse_entry` over **every cached entry** into a fresh `Stats` | **dominant**: linear in total log entries |
-| 4 | Server | Range selection (below) may trigger a **second** full `build_stats()` | doubles step 3 for 7/30/90 and custom ranges |
+| 3 | Server | `Scanner.build_stats()` takes `Scanner._lock`, runs `scan()` (one `stat` per log file; reads only new bytes), then projects **only the records added since the last call** onto the running `Stats` (§4.2b) | proportional to new records; a full rebuild only when something earlier changed. Idle: 0.6 ms |
+| 4 | Server | Range selection (below) uses a second running `Stats` for the range | kept up to date the same way |
 | 5 | Server | Engines run on the in-memory `Stats`: `stats_to_json`, `build_weeks`, `build_adoption` (≈14 windows), `build_flow/quality/value`, the previous-window pass, `build_advisor`, `build_health` | ≈0.6 s at 80k entries **[P]** |
 | 6 | Server | Adds `notifications` (last 20 of `recent_events`) and `plan_window` (`plan_window_snapshot()`), `streak`, `goals`, `today`, `week_tokens` | negligible |
 | 7 | Server → browser | `json.dumps` and send | — |
@@ -1161,10 +1189,9 @@ CLI flags are in §7.3.
 
 ### 12.1 Cost model
 
-Per `/api/stats`: **O(total log entries)** CPU and memory. The cache saves disk reads and JSON
-decoding for unchanged files, but every call re-runs `parse_entry` over all cached entries, once
-for full history and **again** for the range (except all-time). The scanner lock is held for the whole
-parse.
+*Before Phase 4* a request was O(total log entries): every call re-projected all cached entries, once for full
+history and again for the range, holding the scanner lock. *Now* a request projects only new records (§4.2b), and
+memory holds canonical records, not raw lines. The measurements below in 12.2 are the old design; 12.3 has the new ones.
 
 ### 12.2 Measurements
 
@@ -1181,6 +1208,27 @@ order-of-magnitude, not benchmarks: real tool-result bodies make real entries la
 | | end-to-end `days=0` (single parse) | 1.9 s, 71 KB |
 | | resident memory | ≈ 220 MB (≈ 8× the log size) |
 | Tiny (3 entries) | end-to-end `GET /api/stats` | 3 ms, 14 KB |
+
+*(12.2 describes the design before Phase 4; see 12.3 for the current numbers.)*
+
+### 12.3 After Phase 4 (current)
+
+One real Claude Code session (4.5 MB, 839 lines) copied 60 times with distinct message ids and dates spread over 60 days:
+**60 files, 273 MB, 50,340 entries** (a heavy user's history). Same machine and Python as 12.2. **[P]**
+
+| Metric | Before Phase 4 | Now |
+|---|---|---|
+| Cold start: scan + first full and 30-day projection | 10.4 s | 6.4 s |
+| Cold scan alone (read, decode, adapt, census) | 9.9 s | 7.6 s (the schema census counts shapes, not fields) |
+| Peak memory | 644 MB | **158 MB** |
+| `build_stats` full history, warm | 0.74 s | **0.0006 s** idle |
+| Refresh pair (full + 30-day) while the newest session grows | about 1.2 s | **0.15 s** |
+| Same, but an older session grows | about 1.2 s | 1.3 s (exact full rebuild, unchanged) |
+| `GET /api/stats?days=30`, idle | not measured | 0.2 s (payload building; `build_adoption` is 0.18 s of it) |
+| Long-running server vs freshly started server after the same appends | n/a | identical payload (except the stateful plan-window estimate) |
+
+Caveats: the corpus repeats one session's shape, so the schema census sees few distinct shapes (3,960 over 60 files) and
+the first-scan time may differ on more varied logs. Dropping the raw lines is where the memory saving comes from.
 
 **Reading the numbers.** At a 15 s tick, an 80k-entry history means roughly a quarter of one core
 spent re-parsing, with the notify thread waiting on the lock for part of each parse. A typical
@@ -1284,7 +1332,7 @@ Severity is the author's judgement. Evidence tags follow the legend at the top.
 | **F1** | Medium | Notifications | **Repeated official milestones are silently suppressed in a long-lived tab.** Official event ids are `official:{kind}:{milestone}` with no window component, and the page de-duplicates on `id` for its whole lifetime (`window.__notifySeen`). In a tab left open for days, the "25 % / 50 % / …" banners appear only for the *first* 5-hour window; later windows record the event server-side (and fire the toast) but show no banner until reload | **[S][P]** reproduced in headless Chromium: second window's `official:five_hour:25` recorded by the server, no banner until reload | Include the window in the id (e.g. append `int(resets_at)`), and update the tests that pin the current ids |
 | **F2** | Low–Med | Notifications | **Estimate and official alerts can both fire.** `poll_once` always runs the plan-window estimator and fires its alert, even when a fresh official capture exists. The `PlanWindowTracker` docstring says it is "used only as a fallback". With the hook installed a user can receive two differently-numbered toasts ("Current session 100 % used (30.0M / 26.0M tokens, est.)" and "Current 5h session 85 % used (official)") | **[S][P]** row 8 in §6.8 | Skip `_fire_plan` when `load_rate_limits()` returns a capture |
 | **F3** | Low | Docs | `DASHBOARD_GUIDE.md` (§Plan usage limits) says a capture older than 30 min makes the card fall back to the estimate. Since `3d56f44` the card keeps the last real capture, flagged with its age and zeroed after its window resets; only a never-written or corrupt file falls back | **[S][T][P]** | Update the guide text; this document describes the code |
-| **F4** | Medium | Performance | Every `/api/stats` re-parses **all** cached entries, twice for ranged views, holding the scanner lock. 80k entries / 27 MB → 3.3–3.8 s per request and ≈ 220 MB RSS | **[P]** §12 | Memoise `Stats` per scanner generation; derive ranges from the full records |
+| **F4** | Medium | Performance | *(Fixed in Phase 4 for the common case.)* Every `/api/stats` re-parsed **all** cached entries, twice for ranged views. Now only new records are projected (§4.2b, §12.3). Remaining: when an *older* session grows the affected window is rebuilt in full (about 1.3 s on 273 MB), and each request still spends about 0.2 s building the payload (mostly `build_adoption`) | **[P]** §12.3 | Checkpoints for the last few files would make the older-session case incremental too |
 | **F5** | Medium | Security | No `Host` / `Origin` validation, and GET endpoints with side effects (`claude -p`). Any visited web page can trigger token-spending runs and choose the `q` text; a DNS-rebinding page could read `/api/stats`. See also F13 | **[S][P]** headers accepted; exploit not attempted | Reject unexpected `Host`; require a per-process token or non-GET for the AI routes; serialise or rate-limit them |
 | **F6** | Low | Privacy claim | "Zero external requests" has one exception: if `chart.umd.min.js` is missing, `/chart.umd.min.js` replies **302 to jsDelivr** | **[S]** | Fail loudly, or embed the library |
 | **F7** | Low | Notifications | On every page load, all retained events (up to 20, no age filter) are shown again as banners, however old | **[P]** | Filter by `ts`, or remember seen ids in `sessionStorage` |

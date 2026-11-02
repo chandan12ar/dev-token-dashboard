@@ -1,6 +1,6 @@
 # Log Resilience Roadmap
 
-**Status:** Phases 0 to 3 done except the items marked below; Phase 4 not started · **Branch:** `claude/elegant-heisenberg-c7jxms`
+**Status:** Phases 0 to 4 done except the items marked below. Open items need owner decisions or real logs from other machines and tools · **Branch:** `claude/elegant-heisenberg-c7jxms`
 **Purpose:** make AI Fluency Insights trustworthy when Claude Code's log format changes, when we re-scan,
 and when Claude Code deletes old logs. This is a living document: update the status column as work lands.
 
@@ -261,12 +261,25 @@ Defaults used because the owner decisions in section 8 were not answered: **opt-
 | **Open finding:** our cost estimate was ~18% above Claude Code's own figure on one real session ($3.51 vs $2.97 at the same point). Causes not yet investigated (list prices vs applied rates; 5-minute vs 1-hour cache-write rate) | ☐ |
 
 ### Phase 4: Performance and reach
+Measured first, on a realistic corpus (60 sessions, 273 MB, 50,340 entries with distinct ids spread over 60 days).
+The earlier benchmark was misleading: copies sharing message ids made de-duplication skip most of the work.
+
 | Item | Status |
 |---|---|
-| Incremental rollups so requests stop re-parsing history | ☐ |
-| Optional second source (hook journal or OTel) for cross-checks | ☐ |
-| `machine_id`, multi-machine merge design | ☐ |
-| Second adapter (Copilot) using the canonical model | ☐ |
+| Profile before optimising: the per-request projection (0.74 s full + 0.45 s ranged) and the cold scan (9.9 s, 64% of it the schema census) were the costs; payload building was small except `build_adoption` (0.18 s) | ☑ |
+| Schema census counts structure *shapes* with a shared path trie instead of walking and regex-matching every field of every line. Exactly equal to the old walk on 3,000 random documents. Cold scan 9.9 s to 7.6 s. A runaway key space is now bounded | ☑ |
+| **Incremental projection** with one deterministic projection order; only new records are projected, with an exact full-rebuild fallback. Snapshots are never changed after they are handed out. Idle refresh 0.6 ms (was about 1.2 s); refresh while the newest session grows 0.15 s (about 8x faster) | ☑ |
+| Equivalence proved by randomised appends / torn writes / new files / rewrites / deletes over three date windows against a fresh scan, plus four deliberate breakages each caught | ☑ |
+| Side effect: results used to depend on the order files were discovered in (a long-running scanner and a fresh one could disagree on de-duplication across files); the fixed projection order removes that | ☑ |
+| Raw parsed lines no longer held in memory (re-read for `--collect-fixture`). Peak memory 644 MB to 158 MB | ☑ |
+| Background warm-up at start so the first page load does not wait for a long history | ☑ |
+| `machine_id` in the archive (random, made once) | ☑ groundwork only, nothing reads it |
+| Multi-machine merge | ◐ design note in section 10; **not built**: no second machine to test on, and the semantics depend on owner decisions 1 to 4 |
+| Optional second source (hook journal or OpenTelemetry) for cross-checks | ✖ dropped, for now. The in-log `cost-state` totals (Phase 3) already give an independent check with no setup. OpenTelemetry needs the user to run a collector and is coarser than transcripts; a hook journal only captures while installed. Revisit only if `cost-state` proves unreliable across versions |
+| Second adapter (Copilot) | ☐ blocked: there is no Copilot log to build against, and `docs/COPILOT_DASHBOARD_BUILD_PLAN.md` itself makes schema discovery on real logs the mandatory first step. The adapter registry and canonical Record are ready for it |
+| Older-session growth is still a full rebuild (about 1.3 s on 273 MB): needs checkpoints of the running Stats at the last few files | ☐ not needed for the common single-session case; revisit if two active sessions is a common pattern |
+| Idle `/api/stats` still costs about 0.2 s of payload building (mostly `build_adoption`, which depends on today's date) | ☐ low value |
+| Cold start of about 6 s on a 273 MB history | ☐ the remaining cost is JSON decoding and adapting every line once |
 
 ### Ongoing: governance
 | Item | Status |
@@ -292,8 +305,36 @@ Defaults used because the owner decisions in section 8 were not answered: **opt-
 | Date | Change |
 |---|---|
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
+| 2026-11-02 | Phase 4: profiled on a 273 MB corpus; incremental projection with a deterministic order (idle refresh 0.6 ms, live refresh about 8x faster), faster census, raw lines out of memory (644 MB to 158 MB), warm-up, archive machine id. 13 new tests (237 total). OpenTelemetry/hook journal dropped, Copilot blocked on logs, multi-machine left as a design note. |
 | 2026-11-02 | Phase 3: canonical Record schema v1, adapter registry, projector, watcher on Records, golden characterization tests, cost-state cross-check, unverified-version signal. 26 new tests (225 total). Zero regressions against the previous parser in differential runs. |
 | 2026-11-02 | Phase 2: incremental tail reader and opt-in SQLite archive with restore of deleted logs, `--archive-*` commands, Data Health card. 31 new tests (199 total); mutation-checked; verified on a real log. |
 | 2026-11-02 | Drift sentinel shipped: per-file census, baseline manifest, Data Health panel + banner, `--schema-report`, `--collect-fixture`, History window card. 16 new tests (168 total). Tested on a real log (clean) and a simulated field rename (detected, banner shown). |
 | 2026-11-02 | Phase 1 quick fixes F1 to F4 and entry-type classification shipped with 8 new tests (152 total passing). Live log confirmed append-only over the session. |
 | 2026-11-02 | Phase 0: census tool, `SCHEMA_NOTES.md`, docs verified, findings F1 to F5 recorded. Phase 1 items added. |
+
+---
+
+## 10. Design note: combining several machines (not built)
+
+**Goal.** One dashboard showing a person's Claude Code use across their own computers, and, much later, a team view.
+
+**What exists.** The archive keys files by `(logs folder, relative path, generation)` and restores only into the same
+folder, so two machines' archives never mix. Each archive now has a random `machine_id`.
+
+**What would be needed**
+1. A way to move data: `--archive-export FILE` (lines for one machine) and `--archive-import FILE`, or reading a second
+   archive read-only. Moving transcripts moves prompts, code and secrets, so this is a deliberate act, never automatic.
+2. Schema v2 of the archive: add `machine` to `sources` and to its uniqueness, and a tested migration (the archive has a
+   `user_version`, but no migration has been written yet).
+3. Restoring foreign machines' files into their own namespace, not the local logs folder.
+4. Identity rules: session ids are UUIDs and message ids are globally unique, so de-duplication already works across
+   machines; the same project path on two machines is probably the same project, but that is a choice.
+5. UI: a machine filter, and a statement of which machines contribute.
+
+**Decisions only the owner can make** (they change the design, not just the code)
+- Personal tool or team use? A team view should aggregate **facts** (counts, days, models), never ship raw transcripts.
+- Raw or facts-only export? Raw can be reprocessed later; facts-only is far safer to move.
+- Who is allowed to see a combined view, and does the notice shown by `--archive-enable` cover it?
+
+**Why not built now.** There is no second machine here to test on, and building a data-moving feature on guesses about
+privacy semantics is the wrong order. Answering the decisions above is the prerequisite.

@@ -20,8 +20,9 @@ over these files. Nothing leaves the machine.
 ## The pipeline
 
 1. **Scanner** (`Scanner` class) — walks the projects directory for `*.jsonl`
-   files. It caches each file's `(mtime, size)`, so on refresh it re-parses
-   only files that actually changed. Fast even with months of history.
+   files. It caches each file's `(mtime, size)` and reads only the bytes added
+   since the last look, and the aggregates are updated from just the new
+   records, so a refresh is cheap even with months of history.
 2. **Parser** (`parse_entry`) — turns each log line into stats:
    - *Assistant entries*: token usage (input, output, cache read, cache
      write), model, estimated cost. **Deduplicated by message ID** — see

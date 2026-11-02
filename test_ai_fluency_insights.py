@@ -2276,6 +2276,35 @@ class ArchiveTests(_ArchiveBase):
         self.assertTrue(s["capped"])
         self.assertEqual(s["lines"], 0)
 
+    def test_raw_lines_are_not_kept_in_memory_but_can_be_re_read(self):
+        data = self._session()
+        self._put("proj/s1.jsonl", data + b'{"type":"user","sess')              # a half-written last line
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        self.assertFalse(hasattr(sc, "_entries"))
+        got = list(sc.raw_entries())
+        self.assertEqual(got, [afi.json.loads(ln) for ln in data.splitlines()])
+
+    def test_raw_lines_of_a_restored_file_come_from_the_archive(self):
+        data = self._session()
+        p = self._put("proj/s1.jsonl", data)
+        arc = self._arc()
+        self._scan(arc).build_stats()
+        os.remove(p)
+        sc = self._scan(arc)
+        sc.build_stats()
+        self.assertEqual(list(sc.raw_entries()), [afi.json.loads(ln) for ln in data.splitlines()])
+
+    def test_the_archive_has_a_stable_machine_id(self):
+        arc = self._arc()
+        mid = arc.machine_id()
+        self.assertRegex(mid, r"^[0-9a-f]{32}$")
+        self.assertEqual(arc.status()["machine_id"], mid)
+        other = afi.Archive(self.apath)
+        self.addCleanup(other.close)
+        self.assertEqual(other.machine_id(), mid)                        # same file, same machine id
+        self.assertIsNone(afi.Archive(os.path.join(self.adir, "none.sqlite")).machine_id())   # no archive, no id
+
     def test_a_broken_archive_never_breaks_the_dashboard(self):
         data = self._session()
         self._put("proj/s1.jsonl", data)
@@ -2862,6 +2891,248 @@ class CrossCheckTests(unittest.TestCase):
     def test_the_entry_type_is_now_read(self):
         h = afi.build_health(self._stats([3000], self._theirs(**{"claude-sonnet-5": 3000})))
         self.assertEqual({t["type"]: t["status"] for t in h["entry_types"]}["cost-state"], "handled")
+
+
+def _reference_flatten(entry):
+    """The original, simple census walk. flatten_entry must give exactly this, only faster (Phase 4)."""
+    out = set()
+
+    def walk(v, path, depth):
+        if path:
+            out.add((path, afi._jtype(v)))
+        if depth >= afi.SCHEMA_MAX_DEPTH or path.rsplit(".", 1)[-1] in afi.OPAQUE_KEYS:
+            return
+        if isinstance(v, dict):
+            is_map = path.rsplit(".", 1)[-1] in afi.MAP_KEYS
+            for k, child in v.items():
+                k = "<key>" if is_map else ("<id>" if afi._ID_KEY.match(str(k)) else str(k))
+                walk(child, path + "." + k if path else k, depth + 1)
+        elif isinstance(v, list):
+            for child in v:
+                walk(child, path + "[]", depth + 1)
+
+    walk(entry, "", 0)
+    return out
+
+
+class FastCensusTests(unittest.TestCase):
+    def _random_json(self, rng, depth=0):
+        keys = ["a", "b", "message", "content", "usage", "input_schema", "wireToolInputs", "modelUsage", "x.y",
+                "toolu_01ABCDEF", "123e4567-e89b-12d3-a456-426614174000", "deadbeefdeadbeefdeadbeefdeadbeef", "k1", "k2"]
+        r = rng.random()
+        if depth > 5 or r < 0.35:
+            return rng.choice([None, True, False, 0, 3, 1.5, "s", "toolu_x", ""])
+        if r < 0.7:
+            return {rng.choice(keys): self._random_json(rng, depth + 1) for _ in range(rng.randint(0, 4))}
+        return [self._random_json(rng, depth + 1) for _ in range(rng.randint(0, 3))]
+
+    def test_fast_flatten_equals_the_reference_walk(self):
+        import random
+        rng = random.Random(5)
+        for _ in range(3000):
+            e = {"type": rng.choice(["user", "assistant"]), "version": "2.1.1", "payload": self._random_json(rng)}
+            self.assertEqual(afi.flatten_entry(e), _reference_flatten(e))
+
+    def test_deeply_nested_and_huge_maps_are_bounded(self):
+        deep = cur = {}
+        for _ in range(40):
+            cur["n"] = {}
+            cur = cur["n"]
+        self.assertEqual(afi.flatten_entry(deep), _reference_flatten(deep))
+        wide = {"m": {"key%d" % i: i for i in range(5000)}}
+        paths = {p for p, _t in afi.flatten_entry(wide)}
+        self.assertLess(len(paths), 1200)                       # a runaway key space cannot grow without bound
+        self.assertIn("m", paths)
+
+    def test_census_of_shapes_expands_to_the_same_counts_as_per_entry_counting(self):
+        import random
+        rng = random.Random(9)
+        entries = [{"type": rng.choice(["user", "assistant"]), "version": rng.choice(["2.1.1", "2.2.0"]),
+                    "payload": self._random_json(rng)} for _ in range(400)]
+        want_paths, want_types = Counter(), Counter()
+        for e in entries:
+            want_types[(e["type"], e["version"])] += 1
+            for pt in _reference_flatten(e):
+                want_paths[(e["type"], e["version"]) + pt] += 1
+        got_paths, got_types = afi.census_entries(entries)
+        self.assertEqual(got_paths, want_paths)
+        self.assertEqual(got_types, want_types)
+        shapes, types = afi.census_shapes(entries)
+        self.assertEqual(afi.expand_census(shapes), want_paths)
+        self.assertLess(len(shapes), len(entries))             # identical structures are counted once
+
+
+class IncrementalProjectionTests(unittest.TestCase):
+    """Phase 4: build_stats advances a running Stats with only the new records. The result must be exactly what a
+    fresh scan of the same folder produces, whatever happened to the files in between."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    # -- a small random log world -------------------------------------------------------------------------------
+    def _line(self, rng, sid, n, shared_ids):
+        day = rng.choice([12, 13])
+        t = "2026-10-%02dT%02d:%02d:%02d.000Z" % (day, rng.randint(8, 22), rng.randint(0, 59), rng.randint(0, 59))
+        kind = rng.choice(["user", "assistant", "assistant", "tool", "result", "mode", "cost", "meta", "side", "title"])
+        base = {"sessionId": sid, "timestamp": t, "version": "2.1.316", "cwd": "/w", "gitBranch": "main"}
+        mid = rng.choice(shared_ids) if rng.random() < 0.15 else "m%s%d" % (sid, n)      # some ids repeat across files
+        usage = {"input_tokens": 5, "output_tokens": rng.randint(10, 900), "cache_creation_input_tokens": 100,
+                 "cache_read_input_tokens": 2000}
+        if kind == "user":
+            return dict(base, type="user", message={"content": rng.choice(["add a feature", "no, that is wrong", "ok"])})
+        if kind == "assistant":
+            return dict(base, type="assistant", requestId="r" + mid, message={
+                "id": mid, "model": rng.choice(["claude-sonnet-5", "claude-opus-5-5"]), "stop_reason": rng.choice(["end_turn", None]),
+                "content": [{"type": "text", "text": "x"}], "usage": usage})
+        if kind == "tool":
+            return dict(base, type="assistant", requestId="r" + mid, message={
+                "id": mid, "model": "claude-sonnet-5", "stop_reason": "tool_use", "usage": usage, "content": [
+                    {"type": "tool_use", "id": "t%s%d" % (sid, n), "name": rng.choice(["Edit", "Bash", "Read"]),
+                     "input": {"file_path": "/w/a.py", "new_string": "a\nb", "command": "pytest -q"}}]})
+        if kind == "result":
+            return dict(base, type="user", message={"content": [{"type": "tool_result", "tool_use_id": "t%s%d" % (sid, n - 1),
+                                                                 "content": "Exit code 1", "is_error": rng.random() < .5}]})
+        if kind == "mode":
+            return {"type": "permission-mode", "permissionMode": rng.choice(["plan", "default"]), "sessionId": sid}
+        if kind == "cost":
+            return {"type": "cost-state", "sessionId": sid, "totalCostUSD": 1.0,
+                    "modelUsage": {"claude-sonnet-5": {"outputTokens": rng.randint(1000, 5000)}}}
+        if kind == "meta":
+            return dict(base, type="user", isMeta=True, message={"content": "meta"})
+        if kind == "side":
+            return dict(base, type="assistant", isSidechain=True, requestId="r" + mid, message={
+                "id": mid, "model": "claude-haiku-5-5", "usage": usage, "content": []})
+        return {"type": "ai-title", "sessionId": sid, "aiTitle": "title %d" % n}
+
+    def _world(self, seed, steps=45):
+        import random
+        rng = random.Random(seed)
+        files, counter, shared = {}, [0], ["mShared1", "mShared2"]
+        sc = afi.Scanner(self.root)
+        used = {"advance": 0, "rebuild": 0}
+        ranges = [(None, None), ("2026-10-13", None), (None, "2026-10-12")]
+        for step in range(steps):
+            op = rng.choice(["append"] * 5 + ["new"] * 2 + ["rewrite", "delete", "torn"])
+            names = sorted(files)
+            if op == "new" or not names:
+                name = "-proj-%d/s%d.jsonl" % (rng.randint(0, 2), counter[0]); counter[0] += 1
+                files[name] = {"sid": "S%d" % counter[0], "data": b"", "n": 0}
+                op = "append"
+            else:
+                name = rng.choice(names)
+            f = files[name]
+            path = os.path.join(self.root, *name.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if op == "delete":
+                os.remove(path) if os.path.exists(path) else None
+                files.pop(name)
+            elif op == "rewrite":
+                f["n"] = 0
+                lines = [afi.json.dumps(self._line(rng, f["sid"], f["n"] + i, shared)).encode() + b"\n" for i in range(rng.randint(1, 5))]
+                f["n"] += len(lines)
+                with open(path, "wb") as fh:
+                    fh.write(b"".join(lines))
+            elif op == "torn":
+                line = afi.json.dumps(self._line(rng, f["sid"], f["n"], shared)).encode()
+                with open(path, "ab") as fh:
+                    fh.write(line[: len(line) // 2])
+            else:
+                lines = [afi.json.dumps(self._line(rng, f["sid"], f["n"] + i, shared)).encode() + b"\n" for i in range(rng.randint(1, 6))]
+                f["n"] += len(lines)
+                with open(path, "ab") as fh:
+                    fh.write(b"".join(lines))
+            for mn, mx in ranges:
+                got = stats_fingerprint(sc.build_stats(mn, mx))
+                want = stats_fingerprint(afi.Scanner(self.root).build_stats(mn, mx))
+                for k in want:
+                    self.assertEqual(got[k], want[k], "seed %d step %d op %s range %s: Stats.%s" % (seed, step, op, (mn, mx), k))
+        return sc
+
+    def test_random_file_operations_match_a_fresh_scan(self):
+        advances = rebuilds = 0
+        for seed in range(6):
+            sc = self._world(seed)
+            advances += sc.proj_advances
+            rebuilds += sc.proj_rebuilds
+            shutil.rmtree(self.root, True)
+            os.makedirs(self.root)
+        self.assertGreater(advances, 60)           # the fast path really was exercised...
+        self.assertGreater(rebuilds, 10)           # ...and so was the fallback
+
+    # -- behaviour --------------------------------------------------------------------------------------------------
+    def _write(self, name, lines, mode="ab"):
+        path = os.path.join(self.root, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, mode) as f:
+            f.write(b"".join(afi.json.dumps(e).encode() + b"\n" for e in lines))
+
+    def _u(self, sid, t, text="hello there"):
+        return {"type": "user", "sessionId": sid, "timestamp": t, "message": {"content": text}}
+
+    def test_idle_refreshes_do_no_work_and_return_the_same_object(self):
+        self._write("p/a.jsonl", [self._u("s", "2026-10-12T09:00:00Z")])
+        sc = afi.Scanner(self.root)
+        first = sc.build_stats()
+        adv, reb = sc.proj_advances, sc.proj_rebuilds
+        self.assertIs(sc.build_stats(), first)
+        self.assertIs(sc.build_stats(), first)
+        self.assertEqual((sc.proj_advances, sc.proj_rebuilds), (adv, reb))
+
+    def test_a_published_stats_is_never_changed_by_later_scans(self):
+        self._write("p/a.jsonl", [self._u("s", "2026-10-12T09:00:00Z")])
+        sc = afi.Scanner(self.root)
+        first = sc.build_stats()
+        before = stats_fingerprint(first)
+        self._write("p/a.jsonl", [self._u("s", "2026-10-12T09:05:00Z", "another prompt")])
+        second = sc.build_stats()
+        self.assertIsNot(second, first)
+        self.assertEqual(stats_fingerprint(first), before)                       # the old snapshot is untouched
+        self.assertEqual(sum(d["prompts"] for d in second.days.values()), 2)
+
+    def test_appending_to_the_newest_file_takes_the_fast_path(self):
+        self._write("p/a.jsonl", [self._u("s1", "2026-10-12T09:00:00Z")])
+        self._write("p/b.jsonl", [self._u("s2", "2026-10-12T10:00:00Z")])
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        reb = sc.proj_rebuilds
+        self._write("p/b.jsonl", [self._u("s2", "2026-10-12T10:05:00Z", "more")])
+        self._write("p/c.jsonl", [self._u("s3", "2026-10-12T11:00:00Z")])        # a newer session starts
+        sc.build_stats()
+        self.assertEqual(sc.proj_rebuilds, reb)                                  # no rebuild needed
+        self._write("p/a.jsonl", [self._u("s1", "2026-10-12T09:30:00Z", "older file grows")])
+        sc.build_stats()
+        self.assertEqual(sc.proj_rebuilds, reb + 1)                              # out of order: exact fallback
+
+    def test_every_published_view_is_read_only_for_the_payload_builders(self):
+        # the running Stats is shared with what a request is reading, so no builder may modify it
+        self._write("p/a.jsonl", [self._u("s", "2026-10-12T09:00:00Z"),
+                                  {"type": "assistant", "sessionId": "s", "timestamp": "2026-10-12T09:00:05Z",
+                                   "message": {"id": "m", "model": "claude-sonnet-5", "stop_reason": "end_turn",
+                                               "content": [{"type": "tool_use", "id": "t", "name": "Edit",
+                                                            "input": {"file_path": "/a.py", "new_string": "x\ny"}}],
+                                               "usage": {"input_tokens": 1, "output_tokens": 2,
+                                                         "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}])
+        st = afi.Scanner(self.root).build_stats()
+        before = stats_fingerprint(st)
+        adoption = afi.build_adoption(st)
+        for fn in (lambda: afi.stats_to_json(st, None), lambda: afi.build_flow(st), lambda: afi.build_quality(st),
+                   lambda: afi.build_value(st), lambda: afi.build_weeks(st), lambda: afi.build_advisor(st, adoption),
+                   lambda: afi.build_health(st), lambda: afi.catalog_payload(afi.build_health(st)["schema"])):
+            fn()
+        self.assertEqual(stats_fingerprint(st), before)
+
+    def test_scan_level_facts_follow_the_files_without_a_rebuild(self):
+        self._write("p/a.jsonl", [self._u("s", "2026-10-12T09:00:00Z")])
+        sc = afi.Scanner(self.root)
+        self.assertEqual(sc.build_stats().hc["decode_errors_mid"], 0)
+        path = os.path.join(self.root, "p", "a.jsonl")
+        with open(path, "ab") as f:
+            f.write(b"{broken\n")
+        st = sc.build_stats()
+        self.assertEqual((st.hc["decode_errors_mid"], st.parse_errors), (1, 1))
+        st2 = sc.build_stats()
+        self.assertEqual((st2.hc["decode_errors_mid"], st2.parse_errors), (1, 1))      # not double counted
 
 
 class HealthAndCatalogTests(_LogFixture):

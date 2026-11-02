@@ -29,8 +29,8 @@ with a timestamp, session ID, git branch, and either:
 Fields can differ between Claude Code versions. The **Data Health** tab shows
 which of them your logs actually contain, and the versions seen.
 
-The dashboard re-parses only files whose `(mtime, size)` changed, rebuilds all
-aggregates in memory, and serves them at `/api/stats`. **Nothing is ever sent
+The dashboard reads only the new bytes of files whose `(mtime, size)` changed, updates
+its aggregates in memory from the new records, and serves them at `/api/stats`. **Nothing is ever sent
 anywhere** — tracking is purely "read the logs that already exist, every 15
 seconds".
 

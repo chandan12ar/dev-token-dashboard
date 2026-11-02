@@ -14,6 +14,7 @@ Requires: Python 3.8+ (standard library only).
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 import zlib
 from collections import defaultdict, Counter
@@ -578,7 +580,8 @@ def _adapt_claude_code_2(entry) -> Record:
                        "lines_added": _num(entry.get("totalLinesAdded"))[0]})
         return rec
 
-    rec.ts_raw = entry.get("timestamp") or ""
+    raw_ts = entry.get("timestamp")
+    rec.ts_raw = raw_ts if isinstance(raw_ts, str) else ""
     rec.ts = _parse_ts(rec.ts_raw)
     if et == "system":
         if entry.get("subtype") == "stop_hook_summary":
@@ -1158,13 +1161,19 @@ class Scanner:
         self.restored = set()    # paths served from the archive on the last scan (the original file is gone)
         self._from_archive = set()
         self._cache = {}     # path -> (mtime, size)
-        self._entries = {}   # path -> list[dict]: raw lines
-        self._records = {}   # path -> list[Record|None]: the same lines in canonical form (1:1 with _entries)
+        self._records = {}   # path -> list[Record|None]: every line in canonical form. Raw lines are not kept (see raw_entries)
+        self._gen = {}       # path -> id of the current version of its records (new id on replace, never reused)
+        self._gen_counter = 0
+        self._first_ts = {}  # path -> timestamp of its first dated line: the projection order (see _order)
+        self._version = 0    # bumped whenever any file's records change
+        self._proj = {}      # (min_day, max_day) -> _Projection, least recently used first
+        self.proj_advances = 0   # builds that only projected new records
+        self.proj_rebuilds = 0   # builds that had to start from scratch
         self._tail = {}      # path -> read_tail checkpoint
         self._bad = {}       # path -> (mid_file_decode_errors, torn_last_line_errors)
         self.bytes_read = 0      # bytes read from transcripts by this scanner (for tests and the status line)
         self.set_aside = set()   # set-aside copies seen on the last scan (not parsed)
-        self._census = {}        # path -> (paths Counter, types Counter): structure seen in that file
+        self._census = {}        # path -> (shape Counter, types Counter): structure seen in that file
         self._merged = (Counter(), Counter())
         self._dirty = False
         self._lock = threading.Lock()
@@ -1201,16 +1210,16 @@ class Scanner:
                 self.bytes_read += state["offset"] - (0 if (rewritten or not prev) else prev["offset"])
                 new, bad = decode_lines(lines)
                 recs = adapt_entries(new)
-                if rewritten or path not in self._entries or path in self._from_archive:
+                if rewritten or path not in self._records or path in self._from_archive:
                     self._from_archive.discard(path)
-                    self._entries[path] = new
                     self._records[path] = recs
-                    self._census[path] = census_entries(new)
+                    self._replaced(path)
+                    self._census[path] = census_shapes(new)
                     mid = bad
                 else:
-                    self._entries[path].extend(new)
                     self._records[path].extend(recs)
-                    np_, nt = census_entries(new)
+                    self._grew(path, recs)
+                    np_, nt = census_shapes(new)
                     self._census[path][0].update(np_)
                     self._census[path][1].update(nt)
                     mid = self._bad[path][0] + bad
@@ -1233,9 +1242,9 @@ class Scanner:
                 if self._cache.get(path) == key:
                     continue
                 new, bad = decode_lines(self.archive.load_lines(src["id"]))
-                self._entries[path] = new
                 self._records[path] = adapt_entries(new)
-                self._census[path] = census_entries(new)
+                self._replaced(path)
+                self._census[path] = census_shapes(new)
                 self._tail.pop(path, None)
                 self._bad[path] = (bad, 0)
                 self._cache[path] = key
@@ -1243,55 +1252,183 @@ class Scanner:
                 self._dirty = True
         self.restored = restored
         # drop deleted files
-        for path in list(self._entries):
+        for path in list(self._records):
             if path not in found:
                 self._from_archive.discard(path)
-                self._entries.pop(path, None)
                 self._records.pop(path, None)
+                self._gen.pop(path, None)
+                self._first_ts.pop(path, None)
+                self._version += 1
                 self._cache.pop(path, None)
                 self._tail.pop(path, None)
                 self._bad.pop(path, None)
                 self._census.pop(path, None)
                 self._dirty = True
 
+    def raw_entries(self):
+        """Yield every parsed raw line of every log this scanner knows, re-reading them from disk (or the archive).
+        Raw lines are not kept in memory (that was most of its size); only --collect-fixture needs them."""
+        with self._lock:
+            known = sorted(self._records)
+            restored = set(self._from_archive)
+        for path in known:
+            if path in restored and self.archive is not None:
+                rel = _rel_key(self.root, path)
+                src = next((x for x in self.archive.restorable(self.root, set()) if x["rel"] == rel), None)
+                lines = self.archive.load_lines(src["id"]) if src else []
+            else:
+                try:
+                    with open(path, "rb") as f:
+                        lines = f.read().split(b"\n")
+                except OSError:
+                    continue
+            for entry in decode_lines([ln for ln in lines if ln.strip()])[0]:
+                yield entry
+
     def census(self):
         """All-time structure census over every cached file (recomputed only when a file changed)."""
         if self._dirty:
-            paths, types = Counter(), Counter()
+            shapes, types = Counter(), Counter()
             for p, t in self._census.values():
-                paths.update(p)
+                shapes.update(p)
                 types.update(t)
-            self._merged, self._dirty = (paths, types), False
+            self._merged, self._dirty = (expand_census(shapes), types), False
         return self._merged
 
+    # -- projection ------------------------------------------------------------------------------------------------
+    def _replaced(self, path):
+        """The records of `path` were replaced (new file, rewrite, restore): anything projected from it is stale."""
+        self._gen_counter += 1
+        self._gen[path] = self._gen_counter
+        self._first_ts[path] = ""
+        self._version += 1
+        self._grew(path, self._records[path], bump=False)
+
+    def _grew(self, path, new_records, bump=True):
+        if bump:
+            self._version += 1
+        if not self._first_ts.get(path):
+            for r in new_records:
+                if r is not None and r.ts_raw:
+                    self._first_ts[path] = r.ts_raw
+                    break
+
+    def _order(self):
+        """The one order in which files are projected: by when their first dated line was written, then by path.
+        It depends only on the files' content, never on the order they were discovered, so a fresh scan and a
+        long-running one give the same Stats, and a new session (the newest) lands at the end."""
+        return sorted(self._records, key=lambda p: (self._first_ts.get(p, ""), p))
+
+    def _can_advance(self, proj, order):
+        """True when everything already projected is still exactly as it was and only the end changed."""
+        done = proj.done
+        if len(done) > len(order):
+            return False
+        for i, (path, gen, n) in enumerate(done):
+            if order[i] != path or self._gen.get(path) != gen:
+                return False
+            have = len(self._records[path])
+            if i < len(done) - 1 and n != have:
+                return False                # an earlier file grew: its lines belong before the later ones
+            if n > have:
+                return False
+        return True
+
+    def _project(self, proj, order, min_day, max_day):
+        """Project the records of `order` that this projection has not seen yet. Returns True if there were any."""
+        done = proj.done
+        todo = []
+        for i, path in enumerate(order):
+            if i < len(done):
+                if done[i][2] == len(self._records[path]):
+                    continue
+                entry = done[i]
+            else:
+                entry = [path, self._gen[path], 0]
+                done.append(entry)
+            if entry[2] < len(self._records[path]):
+                todo.append(entry)
+        if not todo:
+            return False
+        if proj.shared:                      # a request may still be reading this Stats: continue on a private copy
+            proj.stats, proj.shared = copy.deepcopy(proj.stats), False
+        st = proj.stats
+        for entry in todo:
+            path = entry[0]
+            records = self._records[path]
+            project = project_label(self.root, path)
+            for rec in records[entry[2]:]:
+                if rec is None:                 # the line could not be adapted (not a JSON object)
+                    st.parse_errors += 1
+                    continue
+                try:
+                    project_record(rec, project, st, min_day, max_day)
+                except Exception:
+                    st.parse_errors += 1
+            entry[2] = len(records)
+        return True
+
     def build_stats(self, min_day=None, max_day=None) -> Stats:
+        """Stats over the logs (optionally one date window). Only records added since the last call are projected,
+        unless something earlier changed (a rewrite, a deleted file, an older file growing), in which case it
+        starts again. The result is a snapshot: later scans never change an object already returned."""
         with self._lock:
             self.scan()
-            st = Stats()
-            for path, records in self._records.items():
-                project = project_label(self.root, path)
-                for rec in records:
-                    if rec is None:                 # the line could not be adapted (not a JSON object)
-                        st.parse_errors += 1
-                        continue
-                    try:
-                        project_record(rec, project, st, min_day, max_day)
-                    except Exception:
-                        st.parse_errors += 1
+            order = self._order()
+            key = (min_day, max_day)
+            proj = self._proj.pop(key, None)
+            if proj is not None and not self._can_advance(proj, order):
+                proj = None
+            fresh = proj is None
+            if fresh:
+                proj = _Projection()
+            self._proj[key] = proj                      # most recently used last
+            while len(self._proj) > MAX_PROJECTIONS:
+                self._proj.pop(next(iter(self._proj)))
+            if self._project(proj, order, min_day, max_day):
+                if fresh:
+                    self.proj_rebuilds += 1
+                else:
+                    self.proj_advances += 1
+
             mid = sum(m for m, _t in self._bad.values())
             torn = sum(t for _m, t in self._bad.values())
+            archive = self.archive.status() if self.archive is not None else None
+            retention = load_retention()
+            sig = (self._version, mid, torn, len(self.set_aside), len(self.restored),
+                   tuple(sorted(archive.items())) if archive else None, tuple(sorted(retention.items())))
+            if proj.published is not None and proj.pub_sig == sig:
+                return proj.published                   # nothing changed since the last request
+            st = copy.copy(proj.stats)                  # a view: shares the projected data, owns the scan-level facts
+            st.hc = Counter(proj.stats.hc)
             st.hc["decode_errors_mid"] = mid
             st.hc["decode_errors_torn"] = torn
             st.hc["set_aside_files"] = len(self.set_aside)
-            st.parse_errors += mid      # an unreadable line in the middle of a file is lost data
             st.hc["restored_files"] = len(self.restored)
-            st.archive = self.archive.status() if self.archive is not None else None
+            st.parse_errors = proj.stats.parse_errors + mid     # an unreadable line in the middle of a file is lost data
+            st.archive = archive
             st.census_paths, st.census_types = self.census()
-            st.retention = load_retention()
+            st.retention = retention
+            proj.published, proj.pub_sig, proj.shared = st, sig, True
             if st.parse_errors:
                 print(f"[warn] {st.parse_errors} log entries could not be parsed "
                       "(log format may have changed - stats may be incomplete)")
             return st
+
+
+MAX_PROJECTIONS = 8      # distinct date windows kept up to date at once (full history, 7/30/90 days, custom...)
+
+
+class _Projection:
+    """A Stats being kept up to date for one date window, and what has been projected into it so far."""
+    __slots__ = ("stats", "done", "published", "pub_sig", "shared")
+
+    def __init__(self):
+        self.stats = Stats()
+        self.done = []            # [path, records generation, records projected], in projection order
+        self.published = None     # the last view handed out
+        self.pub_sig = None
+        self.shared = False       # True once a view of `stats` was handed out
 
 
 # ---------------------------------------------------------------------------
@@ -1409,12 +1546,29 @@ class Archive:
                 self._fail(e)
                 return False
 
+    def machine_id(self):
+        """A random id, made once, that names this machine's archive. Groundwork for combining archives from several
+        machines (docs/LOG_RESILIENCE_ROADMAP.md, "Multi-machine"); nothing reads it yet."""
+        with self._lock:
+            try:
+                if self._db() is None:
+                    return None
+                mid = self._meta("machine_id")
+                if mid is None:
+                    mid = uuid.uuid4().hex
+                    self._set_meta("machine_id", mid)
+                return mid
+            except _db_errors() as e:
+                self._fail(e)
+                return None
+
     def enable(self):
         if not self.available:
             return False
         with self._lock:
             try:
                 self._db(create=True)
+                self.machine_id()
                 if self._meta("consent_at") is None:
                     self._set_meta("consent_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
                 self._set_meta("enabled", "1")
@@ -1567,7 +1721,8 @@ class Archive:
     def status(self):
         out = {"available": self.available, "exists": self.exists(), "enabled": False, "path": self.path,
                "sources": 0, "generations": 0, "lines": 0, "raw_bytes": 0, "db_bytes": 0, "gone": 0,
-               "capped": False, "max_bytes": self.max_bytes, "consent_at": None, "last_error": self.last_error}
+               "capped": False, "max_bytes": self.max_bytes, "consent_at": None, "last_error": self.last_error,
+               "machine_id": None}
         if not out["exists"]:
             return out
         with self._lock:
@@ -1575,6 +1730,7 @@ class Archive:
                 conn = self._db()
                 out["enabled"] = self._meta("enabled") == "1"
                 out["consent_at"] = self._meta("consent_at")
+                out["machine_id"] = self.machine_id()
                 out["capped"] = self._meta("capped") == "1"
                 n_gen, lines, raw = conn.execute("SELECT COUNT(*), COALESCE(SUM(lines),0), COALESCE(SUM(byte_off),0) "
                                                  "FROM sources").fetchone()
@@ -1649,40 +1805,100 @@ def _jtype(v) -> str:
     return "list" if isinstance(v, list) else "object"
 
 
+_TYPE_NAME = {dict: "object", list: "list", str: "str", int: "int", float: "float", bool: "bool", type(None): "null"}
+_MAX_KIDS = 400        # per path: a key space that never stops growing is collapsed instead of eating memory
+
+
+class _PathNode:
+    """One distinct json path. Paths are built once and shared, so walking an entry is dictionary lookups, not
+    string building and regex matching for every key of every line."""
+    __slots__ = ("path", "raw", "norm", "arr", "opaque", "is_map", "key")
+
+    def __init__(self, path, key):
+        self.path, self.key = path, key
+        self.raw = {}        # key exactly as logged -> child (bounded; a cache)
+        self.norm = {}       # normalised key -> child (bounded by the schema)
+        self.arr = None
+        self.opaque = key in OPAQUE_KEYS
+        self.is_map = key in MAP_KEYS
+
+    def child(self, k):
+        c = self.raw.get(k)
+        if c is not None:
+            return c
+        nk = "<key>" if self.is_map else ("<id>" if _ID_KEY.match(str(k)) else str(k))
+        c = self.norm.get(nk)
+        if c is None:
+            if len(self.norm) >= _MAX_KIDS:
+                nk = "<many>"
+                c = self.norm.get(nk)
+            if c is None:
+                c = self.norm[nk] = _PathNode(self.path + "." + nk if self.path else nk, nk)
+        if len(self.raw) < _MAX_KIDS:
+            self.raw[k] = c
+        return c
+
+    def array(self):
+        if self.arr is None:
+            self.arr = _PathNode(self.path + "[]", self.key + "[]")
+        return self.arr
+
+
+_PATH_ROOT = _PathNode("", "")
+
+
 def flatten_entry(entry) -> set:
     """The set of (json_path, type) pairs in one log entry. Structure only, never values.
     Arrays collapse to "[]", generated-id keys to "<id>", free-form subtrees stay closed."""
     out = set()
+    add = out.add
+    type_name = _TYPE_NAME
 
-    def walk(v, path, depth):
-        if path:
-            out.add((path, _jtype(v)))
-        if depth >= SCHEMA_MAX_DEPTH or path.rsplit(".", 1)[-1] in OPAQUE_KEYS:
+    def walk(v, node, depth):
+        t = type_name.get(type(v)) or _jtype(v)
+        if node.path:
+            add((node.path, t))
+        if depth >= SCHEMA_MAX_DEPTH or node.opaque:
             return
-        if isinstance(v, dict):
-            is_map = path.rsplit(".", 1)[-1] in MAP_KEYS
-            for k, child in v.items():
-                k = "<key>" if is_map else ("<id>" if _ID_KEY.match(str(k)) else str(k))
-                walk(child, path + "." + k if path else k, depth + 1)
-        elif isinstance(v, list):
-            for child in v:
-                walk(child, path + "[]", depth + 1)
+        if t == "object":
+            child = node.child
+            for k, sub in v.items():
+                walk(sub, child(k), depth + 1)
+        elif t == "list":
+            arr = node.array()
+            for sub in v:
+                walk(sub, arr, depth + 1)
 
-    walk(entry, "", 0)
+    walk(entry, _PATH_ROOT, 0)
     return out
+
+
+def census_shapes(entries):
+    """(Counter[(type, version, frozenset of (path, jtype))] -> entries, Counter[(type, version)] -> entries).
+    Most lines share a handful of structures, so counting whole shapes does the per-field work once per shape."""
+    shapes, types = Counter(), Counter()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        key = (str(e.get("type")), str(e.get("version") or "?"))
+        types[key] += 1
+        shapes[key + (frozenset(flatten_entry(e)),)] += 1
+    return shapes, types
+
+
+def expand_census(shapes):
+    """Shape counts -> Counter[(type, version, path, jtype)] -> entries."""
+    paths = Counter()
+    for (et, ver, fs), n in shapes.items():
+        for pt in fs:
+            paths[(et, ver) + pt] += n
+    return paths
 
 
 def census_entries(entries):
     """(Counter[(type, version, path, jtype)] -> entries, Counter[(type, version)] -> entries)."""
-    paths, types = Counter(), Counter()
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        et, ver = str(e.get("type")), str(e.get("version") or "?")
-        types[(et, ver)] += 1
-        for pt in flatten_entry(e):
-            paths[(et, ver) + pt] += 1
-    return paths, types
+    shapes, types = census_shapes(entries)
+    return expand_census(shapes), types
 
 
 def load_schema_manifest(path=None):
@@ -6805,12 +7021,11 @@ def main():
     if args.collect_fixture:
         with scanner._lock:
             scanner.scan()
-            ids, n = {}, 0
-            with open(args.collect_fixture, "w", encoding="utf-8") as f:
-                for path in sorted(scanner._entries):
-                    for e in scanner._entries[path]:
-                        f.write(json.dumps(redact_entry(e, ids)) + "\n")
-                        n += 1
+        ids, n = {}, 0
+        with open(args.collect_fixture, "w", encoding="utf-8") as f:
+            for e in scanner.raw_entries():
+                f.write(json.dumps(redact_entry(e, ids)) + "\n")
+                n += 1
         print("Wrote %d redacted entries to %s" % (n, args.collect_fixture))
         print("Strings are replaced, but field names and numbers are kept. Skim the file before sharing it.")
         return
@@ -6820,6 +7035,8 @@ def main():
     Handler.scanner = scanner
     Handler.root = args.dir
     Handler.watcher = watcher
+    # Read the logs now, in the background, so the first page load does not pay for a long history.
+    threading.Thread(target=scanner.build_stats, daemon=True, name="warm-up").start()
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://localhost:{args.port}"
     print(f"  AI Fluency Insights running at {url}")
