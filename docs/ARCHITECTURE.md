@@ -284,18 +284,32 @@ only the records added since the last call. This is exact, not approximate, beca
   date), and which of several equally long prompts are shown. A single log file is identical.
 - **When it can advance.** Everything already projected must be unchanged: same files in the same order, same record
   generation (a rewrite or a restore gives a file a new generation), no earlier file grown, and only the **last**
-  projected file may have grown. Otherwise that window is rebuilt from scratch. So the fast path covers a session
-  growing or a new session starting, the usual case. When an *older* session grows (two terminals active, or a resumed
-  session) the refresh is a full rebuild, no slower than before.
+  projected file may have grown. That fast path covers a session growing or a new session starting, the usual case.
+- **Checkpoints (older session grows).** When an *older* session grows (two terminals active, or a resumed session),
+  the window is not rebuilt from the first file. Each window keeps up to `CHECKPOINT_FILES` (4) snapshots of its running
+  `Stats`, one taken just before each of the newest files started (`_Projection.ckpts`). On a mismatch at file `i`,
+  `Scanner._restore` takes the newest snapshot at or before `i`, checks by an exact signature (path, record generation
+  and record count of every file before it) that those files are still as they were, clones it, and projects only from
+  there to the end. Snapshots after the restore point are dropped, because they include the file that changed. If no
+  snapshot qualifies (the changed file is older than the newest four, or an earlier file was rewritten, replaced or
+  deleted) the window is rebuilt from scratch, exactly as before. Cost: a restore is the clone (7 ms) plus the files from
+  there to the end; a snapshot is one clone, taken only when one of the newest files starts.
 - **Snapshots.** What a request receives is a view of the running `Stats` (shared data, its own scan-level facts such as
-  decode errors, archive status, census). Before the next advance the running `Stats` is deep-copied if a view was
+  decode errors, archive status, census). Before the next advance the running `Stats` is cloned if a view was
   handed out, so a request never sees data change under it, and nothing may modify a returned `Stats` (a test runs every
-  payload builder and checks the fingerprint is unchanged).
+  payload builder and checks the fingerprint is unchanged). `Stats.clone()` is `copy.deepcopy` made about 11 times faster
+  (78 ms to 7 ms on the 60-file corpus): the lists and sets that hold only immutable tuples and strings (`Stats._SHALLOW`)
+  are copied shallowly, everything else is deep-copied with one shared memo so objects referenced from two places stay
+  shared (a turn in `turns` and in its session's `last_turn`). A new attribute is deep-copied by default.
 - **Idle refresh.** With nothing changed, `build_stats()` returns the same object (0.6 ms).
 
 The equivalence guarantee is tested by randomised sequences of appends, torn writes, new files, rewrites and deletes,
 comparing three date windows against a fresh scan after every step (`IncrementalProjectionTests`); four deliberate
-breakages of those rules were each caught.
+breakages of those rules were each caught. Checkpoints have their own tests (`CheckpointTests`: growth inside and outside
+the window, deletion and rewrite before a snapshot, bounded snapshots, a published view untouched, two sessions
+alternating) and `StatsCloneTests` pins `clone()` to `deepcopy`. Breaking the restore rules was caught each time:
+using the snapshot object itself instead of a copy, snapshotting nothing, snapshotting without a bound, and (the
+signature check and the dropping of later snapshots back each other up, so each alone is not visible) removing both.
 
 ### 4.2a The opt-in archive (`Archive`)
 
@@ -1226,8 +1240,9 @@ One real Claude Code session (4.5 MB, 839 lines) copied 60 times with distinct m
 | Cold scan alone (read, decode, adapt, census) | 9.9 s | 7.6 s (the schema census counts shapes, not fields) |
 | Peak memory | 644 MB | **158 MB** |
 | `build_stats` full history, warm | 0.74 s | **0.0006 s** idle |
-| Refresh pair (full + 30-day) while the newest session grows | about 1.2 s | **0.15 s** |
-| Same, but an older session grows | about 1.2 s | 1.3 s (exact full rebuild, unchanged) |
+| Refresh pair (full + 30-day) while the newest session grows | about 1.2 s | **0.15 s** (Phase 4), 0.02 s for one window after `Stats.clone()` |
+| Same, but an older session grows | about 1.2 s | 1.3 s in Phase 4 (full rebuild); **0.06 to 0.11 s** per window with checkpoints, for any of the newest 4 files (a file older than that is still a 0.9 s exact rebuild) |
+| `GET /api/stats?days=30` after a growth | n/a | newest file 0.34 s to **0.22 s**; 2nd newest 1.56 s to **0.30 s**; 4th newest 1.60 s to **0.37 s** (0.18 s of each is payload building) |
 | `GET /api/stats?days=30`, idle | not measured | 0.2 s (payload building; `build_adoption` is 0.18 s of it) |
 | Long-running server vs freshly started server after the same appends | n/a | identical payload (except the stateful plan-window estimate) |
 
@@ -1336,7 +1351,7 @@ Severity is the author's judgement. Evidence tags follow the legend at the top.
 | **F1** | Medium | Notifications | **Repeated official milestones are silently suppressed in a long-lived tab.** Official event ids are `official:{kind}:{milestone}` with no window component, and the page de-duplicates on `id` for its whole lifetime (`window.__notifySeen`). In a tab left open for days, the "25 % / 50 % / …" banners appear only for the *first* 5-hour window; later windows record the event server-side (and fire the toast) but show no banner until reload | **[S][P]** reproduced in headless Chromium: second window's `official:five_hour:25` recorded by the server, no banner until reload | Include the window in the id (e.g. append `int(resets_at)`), and update the tests that pin the current ids |
 | **F2** | Low–Med | Notifications | **Estimate and official alerts can both fire.** `poll_once` always runs the plan-window estimator and fires its alert, even when a fresh official capture exists. The `PlanWindowTracker` docstring says it is "used only as a fallback". With the hook installed a user can receive two differently-numbered toasts ("Current session 100 % used (30.0M / 26.0M tokens, est.)" and "Current 5h session 85 % used (official)") | **[S][P]** row 8 in §6.8 | Skip `_fire_plan` when `load_rate_limits()` returns a capture |
 | **F3** | Low | Docs | `DASHBOARD_GUIDE.md` (§Plan usage limits) says a capture older than 30 min makes the card fall back to the estimate. Since `3d56f44` the card keeps the last real capture, flagged with its age and zeroed after its window resets; only a never-written or corrupt file falls back | **[S][T][P]** | Update the guide text; this document describes the code |
-| **F4** | Medium | Performance | *(Fixed in Phase 4 for the common case.)* Every `/api/stats` re-parsed **all** cached entries, twice for ranged views. Now only new records are projected (§4.2b, §12.3). Remaining: when an *older* session grows the affected window is rebuilt in full (about 1.3 s on 273 MB), and each request still spends about 0.2 s building the payload (mostly `build_adoption`) | **[P]** §12.3 | Checkpoints for the last few files would make the older-session case incremental too |
+| **F4** | Medium | Performance | *(Fixed in Phase 4 for the common case.)* Every `/api/stats` re-parsed **all** cached entries, twice for ranged views. Now only new records are projected (§4.2b, §12.3). *(Older-session growth fixed with checkpoints, §4.2b: 1.56 s to 0.30 s per request for any of the newest 4 files.)* Remaining: a file older than the newest four growing is still an exact full rebuild (about 0.9 s on 273 MB), and each request spends about 0.18 s building the payload (mostly `build_adoption`), which is now most of a request | **[P]** §12.3 | Cache `build_adoption` by day and Stats identity if the payload cost starts to matter |
 | **F5** | Medium | Security | No `Host` / `Origin` validation, and GET endpoints with side effects (`claude -p`). Any visited web page can trigger token-spending runs and choose the `q` text; a DNS-rebinding page could read `/api/stats`. See also F13 | **[S][P]** headers accepted; exploit not attempted | Reject unexpected `Host`; require a per-process token or non-GET for the AI routes; serialise or rate-limit them |
 | **F6** | Low | Privacy claim | "Zero external requests" has one exception: if `chart.umd.min.js` is missing, `/chart.umd.min.js` replies **302 to jsDelivr** | **[S]** | Fail loudly, or embed the library |
 | **F7** | Low | Notifications | On every page load, all retained events (up to 20, no age filter) are shown again as banners, however old | **[P]** | Filter by `ts`, or remember seen ids in `sessionStorage` |

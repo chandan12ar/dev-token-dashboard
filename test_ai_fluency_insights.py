@@ -3117,15 +3117,17 @@ class IncrementalProjectionTests(unittest.TestCase):
         return sc
 
     def test_random_file_operations_match_a_fresh_scan(self):
-        advances = rebuilds = 0
+        advances = rebuilds = restores = 0
         for seed in range(6):
             sc = self._world(seed)
             advances += sc.proj_advances
             rebuilds += sc.proj_rebuilds
+            restores += sc.proj_restores
             shutil.rmtree(self.root, True)
             os.makedirs(self.root)
         self.assertGreater(advances, 60)           # the fast path really was exercised...
         self.assertGreater(rebuilds, 10)           # ...and so was the fallback
+        self.assertGreater(restores, 10)           # ...and so were the checkpoints
 
     # -- behaviour --------------------------------------------------------------------------------------------------
     def _write(self, name, lines, mode="ab"):
@@ -3168,8 +3170,10 @@ class IncrementalProjectionTests(unittest.TestCase):
         sc.build_stats()
         self.assertEqual(sc.proj_rebuilds, reb)                                  # no rebuild needed
         self._write("p/a.jsonl", [self._u("s1", "2026-10-12T09:30:00Z", "older file grows")])
-        sc.build_stats()
-        self.assertEqual(sc.proj_rebuilds, reb + 1)                              # out of order: exact fallback
+        got = sc.build_stats()
+        self.assertEqual(sc.proj_rebuilds, reb)                                  # restored from a checkpoint, not rebuilt
+        self.assertEqual(sc.proj_restores, 1)
+        self.assertEqual(stats_fingerprint(got), stats_fingerprint(afi.Scanner(self.root).build_stats()))
 
     def test_every_published_view_is_read_only_for_the_payload_builders(self):
         # the running Stats is shared with what a request is reading, so no builder may modify it
@@ -3421,6 +3425,188 @@ class AdvisorTests(_LogFixture):
         adv = afi.build_advisor(st, {"end": afi.build_adoption(st).get("end") or afi.date.today().isoformat()})
         self.assertFalse([r for r in adv["recs"] if r["id"] == "verify"])
         self.assertTrue(any("check the work" in w for w in adv["wins"]))
+
+
+class CheckpointTests(unittest.TestCase):
+    """An older file growing (two sessions at once, or an old session resumed) restores a snapshot of the running Stats
+    taken before that file and re-projects only from there. The result must equal a fresh scan every time."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def _write(self, name, lines):
+        path = os.path.join(self.root, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "ab") as f:
+            f.write(b"".join(afi.json.dumps(e).encode() + b"\n" for e in lines))
+
+    def _u(self, sid, hour, minute=0, text="a prompt"):
+        return {"type": "user", "sessionId": sid, "timestamp": "2026-10-12T%02d:%02d:00Z" % (hour, minute),
+                "message": {"content": text}}
+
+    def _fresh(self, sc, *rng):
+        return stats_fingerprint(afi.Scanner(self.root).build_stats(*rng))
+
+    def _files(self, n):
+        for i in range(n):
+            self._write("p/f%02d.jsonl" % i, [self._u("s%d" % i, 1 + i)])
+
+    def test_growing_an_older_file_inside_the_window_restores_instead_of_rebuilding(self):
+        self._files(afi.CHECKPOINT_FILES + 3)
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        reb = sc.proj_rebuilds
+        for k in (2, 3, 2):                                       # several different recent files, repeatedly
+            self._write("p/f%02d.jsonl" % (afi.CHECKPOINT_FILES + 3 - k),
+                        [self._u("sx", 20, k, "more %d" % k)])
+            got = sc.build_stats()
+            self.assertEqual(stats_fingerprint(got), self._fresh(sc))
+        self.assertEqual(sc.proj_rebuilds, reb)
+        self.assertEqual(sc.proj_restores, 3)
+
+    def test_growing_a_file_older_than_the_window_falls_back_to_an_exact_rebuild(self):
+        self._files(afi.CHECKPOINT_FILES + 4)
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        reb = sc.proj_rebuilds
+        self._write("p/f00.jsonl", [self._u("s0", 23, 59, "very old session resumed")])
+        got = sc.build_stats()
+        self.assertEqual(sc.proj_rebuilds, reb + 1)
+        self.assertEqual(sc.proj_restores, 0)
+        self.assertEqual(stats_fingerprint(got), self._fresh(sc))
+
+    def test_a_rewrite_or_deletion_of_a_file_before_the_snapshot_is_never_restored_over(self):
+        self._files(afi.CHECKPOINT_FILES + 4)
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        reb = sc.proj_rebuilds
+        os.remove(os.path.join(self.root, "p", "f01.jsonl"))      # an old file vanishes: every snapshot is now wrong
+        got = sc.build_stats()
+        self.assertEqual(sc.proj_rebuilds, reb + 1)
+        self.assertEqual(stats_fingerprint(got), self._fresh(sc))
+        # and a recent one rewritten shorter (truncated + new content)
+        path = os.path.join(self.root, "p", "f%02d.jsonl" % (afi.CHECKPOINT_FILES + 3))
+        with open(path, "wb") as f:
+            f.write(afi.json.dumps(self._u("sz", 5, 5, "rewritten")).encode() + b"\n")
+        got = sc.build_stats()
+        self.assertEqual(stats_fingerprint(got), self._fresh(sc))
+
+    def test_snapshots_are_bounded_and_the_view_handed_out_before_is_untouched(self):
+        self._files(afi.CHECKPOINT_FILES + 6)
+        sc = afi.Scanner(self.root)
+        first = sc.build_stats()
+        before = stats_fingerprint(first)
+        proj = sc._proj[(None, None)]
+        self.assertLessEqual(len(proj.ckpts), afi.CHECKPOINT_FILES)
+        self.assertGreaterEqual(len(proj.ckpts), 1)
+        self._write("p/f%02d.jsonl" % (afi.CHECKPOINT_FILES + 4), [self._u("sy", 22, 0, "grows")])
+        second = sc.build_stats()
+        self.assertIsNot(second, first)
+        self.assertEqual(stats_fingerprint(first), before)         # the old snapshot is still exactly as it was
+        self.assertLessEqual(len(sc._proj[(None, None)].ckpts), afi.CHECKPOINT_FILES)
+
+    def test_two_sessions_alternating_never_rebuild_and_always_match_a_fresh_scan(self):
+        self._files(afi.CHECKPOINT_FILES + 2)
+        a = "p/f%02d.jsonl" % (afi.CHECKPOINT_FILES)               # an older active session
+        b = "p/f%02d.jsonl" % (afi.CHECKPOINT_FILES + 1)           # the newest
+        sc = afi.Scanner(self.root)
+        sc.build_stats()
+        reb = sc.proj_rebuilds
+        for i in range(12):
+            self._write(a if i % 2 == 0 else b, [self._u("sa" if i % 2 == 0 else "sb", 10 + i, i, "turn %d" % i)])
+            for rng in ((None, None), ("2026-10-12", None)):
+                self.assertEqual(stats_fingerprint(sc.build_stats(*rng)), self._fresh(sc, *rng), (i, rng))
+        self.assertEqual(sc.proj_rebuilds, reb + 1)                # only the first build of the second window
+
+class StatsCloneTests(unittest.TestCase):
+    """Stats.clone() replaces copy.deepcopy on the hot path (every refresh after a view was handed out, and every
+    checkpoint). It must be an exact, independent copy."""
+
+    def _projected(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        for rel, entries in kitchen_sink_logs().items():
+            p = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                for e in entries:
+                    f.write(afi.json.dumps(e) + "\n")
+        sc = afi.Scanner(root)
+        sc.build_stats()
+        return sc._proj[(None, None)].stats
+
+    def test_clone_equals_a_deepcopy_attribute_by_attribute(self):
+        import copy
+        st = self._projected()
+        a, b = st.clone(), copy.deepcopy(st)
+        self.assertEqual(set(vars(a)), set(vars(b)))
+        for k in vars(b):
+            self.assertEqual(vars(a)[k], vars(b)[k], k)
+            self.assertEqual(type(vars(a)[k]), type(vars(b)[k]), k)
+
+    def test_clone_is_independent_of_the_original_in_both_directions(self):
+        import copy
+        st = self._projected()
+        frozen = copy.deepcopy(st)
+        c = st.clone()
+        # grow the ORIGINAL the way a later scan would
+        rec = afi.adapt_entry({"type": "assistant", "sessionId": "later", "timestamp": "2026-10-13T10:00:00.000Z",
+                               "version": "2.1.316", "requestId": "rq-late", "message": {
+                                   "id": "m-late", "model": "claude-sonnet-5", "stop_reason": "end_turn",
+                                   "usage": {"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3,
+                                             "cache_read_input_tokens": 4},
+                                   "content": [{"type": "tool_use", "id": "t-late", "name": "Edit",
+                                                "input": {"file_path": "/w/a.py", "new_string": "a\nb"}}]}})
+        afi.project_record(rec, "late-proj", st, None, None)
+        for k in vars(frozen):
+            self.assertEqual(vars(c)[k], vars(frozen)[k], "the clone changed when the original grew: " + k)
+        self.assertNotEqual(vars(st)["seen_msg_ids"], vars(c)["seen_msg_ids"])
+        # ...and the other way round
+        before = copy.deepcopy(st)
+        c.tool_calls.append(("2026-10-13", "X", "x", None, True))
+        c.seen_msg_ids.add("only-in-clone")
+        c.longest_prompts.append((9, "p", "d"))
+        for k in vars(before):
+            self.assertEqual(vars(st)[k], vars(before)[k], "the original changed when the clone grew: " + k)
+
+    def test_clone_keeps_objects_shared_between_attributes_shared(self):
+        # a turn lives in st.turns AND is referenced as its session's last_turn, and is edited through the latter
+        st = self._projected()
+        linked = [sid for sid, s in st.sessions.items()
+                  if s.get("last_turn") is not None and any(t is s["last_turn"] for t in st.turns)]
+        self.assertTrue(linked, "fixture has no turn shared between turns and a session")
+        c = st.clone()
+        for sid in linked:
+            lt = c.sessions[sid]["last_turn"]
+            self.assertTrue(any(t is lt for t in c.turns), sid)
+            self.assertFalse(any(t is st.sessions[sid]["last_turn"] for t in c.turns), sid)
+
+    def test_shallow_copied_attributes_exist_and_hold_only_immutable_elements(self):
+        st = self._projected()
+        self.assertTrue(afi.Stats._SHALLOW)
+        atoms = (str, int, float, bool, type(None))
+
+        def immutable(x):
+            return isinstance(x, atoms) or (isinstance(x, tuple) and all(immutable(i) for i in x))
+        fresh = vars(afi.Stats())
+        for name in afi.Stats._SHALLOW:
+            self.assertIn(name, fresh, name)
+            self.assertTrue(isinstance(fresh[name], (list, set)), name)
+            for e in vars(st)[name]:
+                self.assertTrue(immutable(e), "%s holds a mutable element %r" % (name, e))
+
+    def test_clone_is_faster_than_deepcopy(self):
+        import copy
+        st = self._projected()
+        for _ in range(40):                                  # make it big enough for the difference to show
+            for name in afi.Stats._SHALLOW:
+                v = vars(st)[name]
+                if isinstance(v, list):
+                    v.extend(v[:200])
+        t = time.perf_counter(); [st.clone() for _ in range(5)]; fast = time.perf_counter() - t
+        t = time.perf_counter(); [copy.deepcopy(st) for _ in range(5)]; slow = time.perf_counter() - t
+        self.assertLess(fast, slow)
 
 
 class ReleaseCheckTests(unittest.TestCase):

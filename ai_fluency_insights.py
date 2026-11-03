@@ -476,6 +476,24 @@ class Stats:
         self.versions = Counter()
         self.entrypoints = Counter()
 
+    # Attributes that hold only immutable elements (strings, or tuples of strings and numbers) and are only ever
+    # grown by appending or adding. A shallow copy of these is an exact, independent copy, and they are the bulk of
+    # a Stats (one entry per tool call, permission decision, message id...), so clone() copies them cheaply.
+    # Everything NOT listed is deep-copied, so a new attribute is correct by default; add a name here only after
+    # checking it never holds a mutable element (StatsCloneTests verifies the claim on a real projection).
+    _SHALLOW = frozenset({"longest_prompts", "seen_msg_ids", "seen_tool_ids", "tool_calls", "cmd_runs", "episodes",
+                          "edits", "safety", "perm_decisions", "thinking", "efforts"})
+
+    def clone(self):
+        """An independent copy, equal to copy.deepcopy(self) and several times faster. One memo is shared by all
+        deep-copied attributes, so objects referenced from two places (a turn in `turns` and in its session's
+        `last_turn`) stay shared inside the copy, exactly as deepcopy keeps them."""
+        new = copy.copy(self)
+        memo = {}
+        for k, v in self.__dict__.items():
+            new.__dict__[k] = v.copy() if k in self._SHALLOW else copy.deepcopy(v, memo)
+        return new
+
     # -- merge helpers ------------------------------------------------------
     def touch_session(self, sid, ts, project):
         if not sid:
@@ -1236,6 +1254,7 @@ class Scanner:
         self._proj = {}      # (min_day, max_day) -> _Projection, least recently used first
         self.proj_advances = 0   # builds that only projected new records
         self.proj_rebuilds = 0   # builds that had to start from scratch
+        self.proj_restores = 0   # builds that restarted from a checkpoint (an older file grew)
         self._tail = {}      # path -> read_tail checkpoint
         self._bad = {}       # path -> (mid_file_decode_errors, torn_last_line_errors)
         self.bytes_read = 0      # bytes read from transcripts by this scanner (for tests and the status line)
@@ -1386,20 +1405,39 @@ class Scanner:
         long-running one give the same Stats, and a new session (the newest) lands at the end."""
         return sorted(self._records, key=lambda p: (self._first_ts.get(p, ""), p))
 
-    def _can_advance(self, proj, order):
-        """True when everything already projected is still exactly as it was and only the end changed."""
+    def _first_mismatch(self, proj, order):
+        """Index of the first already-projected file that is no longer exactly as it was (replaced, rewritten, shrunk,
+        gone, or grown while a later file exists: its lines belong before the later ones). None when only the end
+        changed, so the running Stats can simply be continued."""
         done = proj.done
-        if len(done) > len(order):
-            return False
         for i, (path, gen, n) in enumerate(done):
-            if order[i] != path or self._gen.get(path) != gen:
-                return False
+            if i >= len(order) or order[i] != path or self._gen.get(path) != gen:
+                return i
             have = len(self._records[path])
-            if i < len(done) - 1 and n != have:
-                return False                # an earlier file grew: its lines belong before the later ones
-            if n > have:
-                return False
-        return True
+            if n > have or (i < len(done) - 1 and n != have):
+                return i
+        return None
+
+    def _can_advance(self, proj, order):
+        return self._first_mismatch(proj, order) is None
+
+    def _signature(self, order, b):
+        """Identifies the exact content of the first `b` files of `order` (path, generation, number of records)."""
+        return tuple((order[j], self._gen[order[j]], len(self._records[order[j]])) for j in range(b))
+
+    def _restore(self, proj, order, bad):
+        """When the file at index `bad` changed, restart from the newest snapshot taken before it whose files are all
+        still exactly as they were, instead of projecting the whole history again. Returns a new projection holding a
+        private copy of that snapshot, or None when no snapshot qualifies (then the caller rebuilds from scratch).
+        Snapshots taken after the restore point are dropped: they include the file that changed."""
+        for b, sig, snap in reversed(proj.ckpts):
+            if b <= bad and b <= len(order) and sig == self._signature(order, b):
+                np = _Projection()
+                np.stats = snap.clone()
+                np.done = [[p, g, n] for p, g, n in sig]
+                np.ckpts = [c for c in proj.ckpts if c[0] <= b]
+                return np
+        return None
 
     def _project(self, proj, order, min_day, max_day):
         """Project the records of `order` that this projection has not seen yet. Returns True if there were any."""
@@ -1414,13 +1452,18 @@ class Scanner:
                 entry = [path, self._gen[path], 0]
                 done.append(entry)
             if entry[2] < len(self._records[path]):
-                todo.append(entry)
+                todo.append((i, entry))
         if not todo:
             return False
         if proj.shared:                      # a request may still be reading this Stats: continue on a private copy
-            proj.stats, proj.shared = copy.deepcopy(proj.stats), False
+            proj.stats, proj.shared = proj.stats.clone(), False
         st = proj.stats
-        for entry in todo:
+        newest = len(order) - CHECKPOINT_FILES
+        for i, entry in todo:
+            if entry[2] == 0 and i >= newest and not any(c[0] == i for c in proj.ckpts):
+                # The state just before this file. If the file grows again after newer files exist (two sessions at
+                # once, an old session resumed), the scan restarts here instead of from the first file.
+                proj.ckpts.append((i, self._signature(order, i), st.clone()))
             path = entry[0]
             records = self._records[path]
             project = project_label(self.root, path)
@@ -1433,6 +1476,7 @@ class Scanner:
                 except Exception:
                     st.parse_errors += 1
             entry[2] = len(records)
+        proj.ckpts = [c for c in proj.ckpts if c[0] >= newest]        # only the newest few files need one
         return True
 
     def build_stats(self, min_day=None, max_day=None) -> Stats:
@@ -1444,8 +1488,12 @@ class Scanner:
             order = self._order()
             key = (min_day, max_day)
             proj = self._proj.pop(key, None)
-            if proj is not None and not self._can_advance(proj, order):
-                proj = None
+            restored = False
+            if proj is not None:
+                bad = self._first_mismatch(proj, order)
+                if bad is not None:
+                    proj = self._restore(proj, order, bad)
+                    restored = proj is not None
             fresh = proj is None
             if fresh:
                 proj = _Projection()
@@ -1455,6 +1503,8 @@ class Scanner:
             if self._project(proj, order, min_day, max_day):
                 if fresh:
                     self.proj_rebuilds += 1
+                elif restored:
+                    self.proj_restores += 1
                 else:
                     self.proj_advances += 1
 
@@ -1484,14 +1534,16 @@ class Scanner:
 
 
 MAX_PROJECTIONS = 8      # distinct date windows kept up to date at once (full history, 7/30/90 days, custom...)
+CHECKPOINT_FILES = 4     # per window: a snapshot of the running Stats is kept before each of this many newest files
 
 
 class _Projection:
     """A Stats being kept up to date for one date window, and what has been projected into it so far."""
-    __slots__ = ("stats", "done", "published", "pub_sig", "shared")
+    __slots__ = ("stats", "done", "published", "pub_sig", "shared", "ckpts")
 
     def __init__(self):
         self.stats = Stats()
+        self.ckpts = []           # (boundary, signature, Stats before file `boundary`), oldest first; see Scanner._restore
         self.done = []            # [path, records generation, records projected], in projection order
         self.published = None     # the last view handed out
         self.pub_sig = None
