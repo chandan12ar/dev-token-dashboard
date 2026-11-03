@@ -3519,6 +3519,209 @@ class CheckpointTests(unittest.TestCase):
                 self.assertEqual(stats_fingerprint(sc.build_stats(*rng)), self._fresh(sc, *rng), (i, rng))
         self.assertEqual(sc.proj_rebuilds, reb + 1)                # only the first build of the second window
 
+def rich_history_logs(seed=11, first="2026-07-20", n_days=90):
+    """{relative path: [raw entries]}: a deterministic ~90-day history over three projects that exercises every branch of
+    the payload builders (flow, quality, value, adoption, advisor): corrections, interrupts, failing then passing
+    tests, builds, lints, edits and re-edits, thinking, effort, permission decisions, plan mode, subagents, MCP,
+    skills, task lists, web research, slash commands, hooks, late-night work, several models."""
+    import random
+    rng = random.Random(seed)
+    day0 = afi.date.fromisoformat(first)
+    n = [0]
+    out = {}
+    projects = [("-work-app", "/work/app"), ("-work-api", "/work/api"), ("-work-docs", "/work/docs")]
+
+    def stamp(d, h, m, s_=0):
+        return "%sT%02d:%02d:%02d.000Z" % (d.isoformat(), h, m, s_)
+
+    def ent(sid, t, cwd, **kw):
+        e = {"sessionId": sid, "timestamp": t, "cwd": cwd, "version": "2.1.316", "gitBranch": "main"}
+        e.update(kw)
+        return e
+
+    def user(sid, t, cwd, content, **kw):
+        n[0] += 1
+        return ent(sid, t, cwd, type="user", uuid="u%d" % n[0], message={"role": "user", "content": content}, **kw)
+
+    def assistant(sid, t, cwd, blocks, stop="tool_use", model="claude-sonnet-5-5", **kw):
+        n[0] += 1
+        mid = "m%d" % n[0]
+        usage = {"input_tokens": rng.randint(3, 30), "output_tokens": rng.randint(30, 900),
+                 "cache_creation_input_tokens": rng.choice([0, 300, 2000]),
+                 "cache_read_input_tokens": rng.randint(500, 9000)}
+        return ent(sid, t, cwd, type="assistant", uuid="a%d" % n[0], requestId="r" + mid, **kw,
+                   message={"id": mid, "model": model, "stop_reason": stop, "content": blocks, "usage": usage})
+
+    def tool(name, inp):
+        n[0] += 1
+        return {"type": "tool_use", "id": "tu%d" % n[0], "name": name, "input": inp}
+
+    def result(sid, t, cwd, blk, text="ok", err=False):
+        b = {"type": "tool_result", "tool_use_id": blk["id"], "content": text}
+        if err:
+            b["is_error"] = True
+        return user(sid, t, cwd, [b])
+
+    prompts = ["add pagination to the orders list and keep the page size configurable",
+               "explain how the build pipeline works", "refactor the auth module to use the new session helper",
+               "no, that is wrong - use the existing helper instead", "fix the failing tests in billing",
+               "wrong approach, undo that", "write a short guide for onboarding", "ok"]
+    models = ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"]
+    sess_no = 0
+    for di in range(n_days):
+        d = day0 + afi.timedelta(days=di)
+        if rng.random() > (0.35 if d.weekday() >= 5 else 0.78):
+            continue
+        for _ in range(rng.choice([1, 1, 2, 3])):
+            sess_no += 1
+            sid = "S%03d" % sess_no
+            pname, cwd = rng.choice(projects)
+            h, mi = rng.randint(8, 21), rng.randint(0, 50)
+            if rng.random() < 0.08:
+                h = 23
+            t = [0]
+
+            def tick(sec=20):
+                t[0] += sec
+                tt = h * 3600 + mi * 60 + t[0]
+                return stamp(d, min(23, tt // 3600 % 24), tt // 60 % 60, tt % 60)
+            rows = []
+            if rng.random() < 0.3:
+                rows.append({"type": "permission-mode", "permissionMode": rng.choice(["plan", "default", "acceptEdits"]),
+                             "sessionId": sid})
+            if rng.random() < 0.15:
+                rows.append({"type": "ai-title", "sessionId": sid, "aiTitle": "work %s" % sid})
+            for _turn in range(rng.randint(1, 5)):
+                text = rng.choice(prompts)
+                rows.append(user(sid, tick(), cwd, text))
+                if rng.random() < 0.08:
+                    rows.append(user(sid, tick(3), cwd, "[Request interrupted by user]"))
+                if rng.random() < 0.1:
+                    rows.append(user(sid, tick(3), cwd, "<command-name>/%s</command-name>" % rng.choice(["compact", "clear", "init"])))
+                for _step in range(rng.randint(1, 4)):
+                    kind = rng.choice(["read", "edit", "edit", "test", "test", "build", "lint", "agent", "mcp", "skill",
+                                       "todo", "web", "write", "bash"])
+                    blks = {"read": lambda: [tool("Read", {"file_path": cwd + "/a.py"})],
+                            "edit": lambda: [tool("Edit", {"file_path": cwd + "/%s.py" % rng.choice("abc"),
+                                                           "old_string": "a", "new_string": "x\ny\nz"})],
+                            "write": lambda: [tool("Write", {"file_path": cwd + "/tests/test_%s.py" % rng.choice("ab"),
+                                                             "content": "def test_a():\n    assert 1\n"})],
+                            "test": lambda: [tool("Bash", {"command": "pytest -q"})],
+                            "build": lambda: [tool("Bash", {"command": "npm run build"})],
+                            "lint": lambda: [tool("Bash", {"command": "ruff check ."})],
+                            "bash": lambda: [tool("Bash", {"command": "ls"})],
+                            "agent": lambda: [tool("Agent", {"subagent_type": "reviewer", "prompt": "review"})],
+                            "mcp": lambda: [tool("mcp__github__get_issue", {})],
+                            "skill": lambda: [tool("Skill", {})],
+                            "todo": lambda: [tool("TodoWrite", {})],
+                            "web": lambda: [tool("WebSearch", {"query": "q"})]}[kind]()
+                    extra = {}
+                    if rng.random() < 0.4:
+                        extra["thinkingDurationMs"] = rng.randint(500, 9000)
+                    if rng.random() < 0.4:
+                        extra["effort"] = rng.choice(["low", "medium", "high"])
+                    if rng.random() < 0.15:
+                        extra["permissionDecision"] = {"decision": rng.choice(["accept", "reject"]), "source": "user"}
+                    rows.append(assistant(sid, tick(), cwd, blks, model=rng.choice(models), **extra))
+                    for b in blks:
+                        failing = kind in ("test", "build", "lint") and rng.random() < 0.4
+                        rows.append(result(sid, tick(rng.randint(1, 40)), cwd, b,
+                                           "Exit code 1\nFAILED" if failing else "ok", err=failing))
+                        if failing and rng.random() < 0.7:     # retry after a failure -> recovery episodes
+                            retry = assistant(sid, tick(), cwd, [tool("Bash", {"command": "pytest -q"})])
+                            rows.append(retry)
+                            rows.append(result(sid, tick(15), cwd, retry["message"]["content"][0],
+                                               "Exit code 1" if rng.random() < 0.3 else "2 passed",
+                                               err=rng.random() < 0.3))
+                rows.append(assistant(sid, tick(), cwd, [{"type": "text", "text": "done"}], stop="end_turn"))
+            if rng.random() < 0.1:
+                rows.append({"type": "system", "subtype": "stop_hook_summary", "sessionId": sid, "timestamp": tick(2)})
+            out.setdefault("%s/%s.jsonl" % (pname, sid), []).extend(rows)
+    return out
+
+
+def payload_fingerprint(sc):
+    """Everything the payload builders derive from a Scanner, over several windows, as plain JSON-able data."""
+    def plain(v):
+        return afi.json.loads(afi.json.dumps(v, sort_keys=True, default=str))
+    out = {}
+    full = sc.build_stats()
+    days = sorted(full.days)
+    wins = [(None, None), (days[len(days) // 3], None), (None, days[2 * len(days) // 3]),
+            (days[len(days) // 4], days[3 * len(days) // 4])]
+    for i, (a, b) in enumerate(wins):
+        st = sc.build_stats(a, b)
+        ad = afi.build_adoption(st)
+        out["w%d" % i] = {"adoption": plain(ad), "advisor": plain(afi.build_advisor(st, ad)),
+                          "weeks": plain(afi.build_weeks(st))}
+        for j, (c, d) in enumerate([(None, None), (days[len(days) // 5], days[-len(days) // 5]), (days[-9], None),
+                                    (None, days[8]), (days[10], days[10])]):
+            out["w%d" % i]["flow%d" % j] = plain(afi.build_flow(st, c, d))
+            out["w%d" % i]["quality%d" % j] = plain(afi.build_quality(st, c, d))
+            out["w%d" % i]["value%d" % j] = plain(afi.build_value(st, c, d))
+    return out
+
+
+class PayloadGoldenTests(unittest.TestCase):
+    """The payload builders must keep producing exactly the same numbers while they are made faster
+    (tests_data/payload_golden.json, regenerate deliberately with AFI_REGEN_GOLDEN=1)."""
+    GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tests_data", "payload_golden.json")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tz = os.environ.get("TZ")
+        if hasattr(time, "tzset"):
+            os.environ["TZ"] = "UTC"
+            time.tzset()
+
+    @classmethod
+    def tearDownClass(cls):
+        if hasattr(time, "tzset"):
+            if cls._tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = cls._tz
+            time.tzset()
+
+    def _scanner(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        for rel, entries in rich_history_logs().items():
+            p = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                for e in entries:
+                    f.write(afi.json.dumps(e) + "\n")
+        return afi.Scanner(root)
+
+    def test_the_fixture_exercises_the_builders(self):
+        got = payload_fingerprint(self._scanner())
+        w0 = got["w0"]
+        self.assertTrue(w0["adoption"]["ready"])
+        self.assertGreater(len(w0["adoption"]["history"]), 5)
+        self.assertGreater(w0["flow0"]["turns"], 100)
+        self.assertGreater(w0["flow0"]["episodes"], 10)
+        self.assertGreater(w0["quality0"]["edited_sessions"], 20)
+        self.assertGreater(len(w0["quality0"]["runs"]), 1)
+        self.assertTrue(w0["advisor"]["ready"])
+        self.assertGreater(len(w0["advisor"]["recs"]), 0)
+
+    def test_payloads_match_the_golden_snapshot(self):
+        got = payload_fingerprint(self._scanner())
+        if os.environ.get("AFI_REGEN_GOLDEN"):
+            with open(self.GOLDEN, "w", encoding="utf-8") as f:
+                afi.json.dump(got, f, sort_keys=True, indent=0)
+                f.write("\n")
+            self.skipTest("golden regenerated")
+        with open(self.GOLDEN, encoding="utf-8") as f:
+            want = afi.json.load(f)
+        self.assertEqual(sorted(got), sorted(want))
+        for w in want:
+            self.assertEqual(sorted(got[w]), sorted(want[w]), w)
+            for k in want[w]:
+                self.assertEqual(got[w][k], want[w][k], "window %s, %s" % (w, k))
+
+
 class StatsCloneTests(unittest.TestCase):
     """Stats.clone() replaces copy.deepcopy on the hot path (every refresh after a view was handed out, and every
     checkpoint). It must be an exact, independent copy."""
