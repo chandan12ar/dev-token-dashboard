@@ -3006,11 +3006,42 @@ def _iso_monday(day: str) -> str:
     return (d - timedelta(days=d.weekday())).isoformat()
 
 
-def build_flow(st: Stats, d0=None, d1=None) -> dict:
+def _flow_parts(st: Stats, d0, d1):
+    """What the Flow score is made of: the window's turns, the clean ones, the failure episodes, and the session rows.
+    Shared by build_flow and flow_score so the score has exactly one definition."""
     turns = [t for t in st.turns if _in(t["day"], d0, d1)]
     done = [t for t in turns if t["secs"] is not None]
-    secs = [t["secs"] for t in done]
     clean = [t for t in done if not t["err"] and not t["intr"] and not t["corrected"]]
+    # failure -> recovery episodes: the same tool failing, then succeeding later
+    eps = [(day, tool, fails, steps, True) for day, tool, fails, steps in st.episodes if _in(day, d0, d1)]
+    rows = _sess_rows(st, d0, d1)
+    for sid, s, _day in rows:
+        for tool, ep in s["open_err"].items():
+            if _in(ep["day"], d0, d1):
+                eps.append((ep["day"], tool, ep["fails"], None, False))
+    return turns, done, clean, eps, rows
+
+
+def _flow_score(turns, clean, eps):
+    if len(turns) < 5:
+        return None
+    n_eps = len(eps)
+    recovered = [e for e in eps if e[4]]
+    stuck = [e for e in eps if e[2] >= 3]
+    rec = (len(recovered) / n_eps) if n_eps else 1.0
+    stuck_share = (len(stuck) / n_eps) if n_eps else 0.0
+    return _rnd(100 * (0.5 * (len(clean) / len(turns)) + 0.3 * rec + 0.2 * (1 - stuck_share)))
+
+
+def flow_score(st: Stats, d0=None, d1=None):
+    """build_flow(st, d0, d1)["score"] without building the rest of the report."""
+    turns, _done, clean, eps, _rows = _flow_parts(st, d0, d1)
+    return _flow_score(turns, clean, eps)
+
+
+def build_flow(st: Stats, d0=None, d1=None) -> dict:
+    turns, done, clean, eps, rows = _flow_parts(st, d0, d1)
+    secs = [t["secs"] for t in done]
     clean_pct = _rate(len(clean), len(turns))
 
     by_day = defaultdict(list)
@@ -3042,29 +3073,18 @@ def build_flow(st: Stats, d0=None, d1=None) -> dict:
     turn_total = sum(secs)
     tool_share = min(100, _rate(total_tool, turn_total)) if turn_total and total_tool else None
 
-    # failure -> recovery episodes: the same tool failing, then succeeding later
-    eps = [(day, tool, fails, steps, True) for day, tool, fails, steps in st.episodes if _in(day, d0, d1)]
-    for sid, s, _day in _sess_rows(st, d0, d1):
-        for tool, ep in s["open_err"].items():
-            if _in(ep["day"], d0, d1):
-                eps.append((ep["day"], tool, ep["fails"], None, False))
     n_eps = len(eps)
     recovered = [e for e in eps if e[4]]
     stuck = [e for e in eps if e[2] >= 3]
     recovery_pct = _rate(len(recovered), n_eps) if n_eps else None
     fail_tools = Counter(e[1] for e in eps).most_common(5)
 
-    rows = _sess_rows(st, d0, d1)
     mins = [_sess_minutes(s) for _sid, s, _d in rows]
     first_edit = [s["first_edit_s"] for _sid, s, _d in rows if s["first_edit_s"] is not None]
     think = [ms / 1000 for day, ms in st.thinking if _in(day, d0, d1)]
     effort = Counter(e for day, e in st.efforts if _in(day, d0, d1))
 
-    score = None
-    if len(turns) >= 5:
-        rec = (len(recovered) / n_eps) if n_eps else 1.0
-        stuck_share = (len(stuck) / n_eps) if n_eps else 0.0
-        score = _rnd(100 * (0.5 * (len(clean) / len(turns)) + 0.3 * rec + 0.2 * (1 - stuck_share)))
+    score = _flow_score(turns, clean, eps)
     return {
         "score": score, "ready": len(turns) >= 5, "turns": len(turns), "turns_done": len(done),
         "abandoned": len(turns) - len(done),
@@ -3089,7 +3109,8 @@ def build_flow(st: Stats, d0=None, d1=None) -> dict:
     }
 
 
-def build_quality(st: Stats, d0=None, d1=None) -> dict:
+def _quality_parts(st: Stats, d0, d1):
+    """What the Quality score is made of. Shared by build_quality and quality_score so the score has one definition."""
     rows = _sess_rows(st, d0, d1)
     edited = [(sid, s, day) for sid, s, day in rows if s["last_write_seq"] >= 0]
     verified = [r for r in edited if r[1]["last_verify_seq"] > r[1]["last_write_seq"]]
@@ -3101,6 +3122,36 @@ def build_quality(st: Stats, d0=None, d1=None) -> dict:
     groups = defaultdict(list)
     for _day, sid, kind, ok in runs:
         groups[(sid, kind)].append(ok)
+    all_groups = list(groups.values())
+    first_run_pass = _rate(sum(1 for v in all_groups if v[0]), len(all_groups)) if all_groups else None
+
+    # rework proxy: the same file edited again and again
+    edits = [(d, sid, path, proj) for d, sid, path, proj in st.edits if _in(d, d0, d1)]
+    per_sess = Counter((sid, path) for _d, sid, path, _p in edits)
+    reedits = sum(c - 1 for c in per_sess.values())
+    reedit_pct = _rate(reedits, len(edits)) if edits else None
+    return rows, edited, verified, any_cmd, with_tests, groups, all_groups, first_run_pass, edits, reedit_pct
+
+
+def _quality_score(edited, verified, with_tests, reedit_pct, first_run_pass):
+    if len(edited) < 3:
+        return None
+    terms = [(0.40, len(verified) / len(edited)), (0.20, len(with_tests) / len(edited)),
+             (0.20, 1 - min(1.0, (reedit_pct or 0) / 100 / 0.5))]
+    if first_run_pass is not None:
+        terms.append((0.20, first_run_pass / 100))
+    return _rnd(100 * sum(w * v for w, v in terms) / sum(w for w, _ in terms))
+
+
+def quality_score(st: Stats, d0=None, d1=None):
+    """build_quality(st, d0, d1)["score"] without building the rest of the report."""
+    _rows, edited, verified, _any, with_tests, _g, _ag, first_run_pass, _e, reedit_pct = _quality_parts(st, d0, d1)
+    return _quality_score(edited, verified, with_tests, reedit_pct, first_run_pass)
+
+
+def build_quality(st: Stats, d0=None, d1=None) -> dict:
+    (rows, edited, verified, any_cmd, with_tests, groups, all_groups, first_run_pass, edits,
+     reedit_pct) = _quality_parts(st, d0, d1)
     by_kind = {}
     for kind in ("test", "build", "lint"):
         ks = [(k, v) for k, v in groups.items() if k[1] == kind]
@@ -3113,14 +3164,6 @@ def build_quality(st: Stats, d0=None, d1=None) -> dict:
             "kind": kind, "runs": n_runs, "fails": sum(1 for _k, v in ks for ok in v if not ok),
             "groups": len(ks), "first_pass_pct": _rate(sum(1 for _k, v in ks if v[0]), len(ks)),
             "fail_groups": len(failing), "recovered_groups": len(recovered_g)}
-    all_groups = list(groups.values())
-    first_run_pass = _rate(sum(1 for v in all_groups if v[0]), len(all_groups)) if all_groups else None
-
-    # rework proxy: the same file edited again and again
-    edits = [(d, sid, path, proj) for d, sid, path, proj in st.edits if _in(d, d0, d1)]
-    per_sess = Counter((sid, path) for _d, sid, path, _p in edits)
-    reedits = sum(c - 1 for c in per_sess.values())
-    reedit_pct = _rate(reedits, len(edits)) if edits else None
     files = defaultdict(lambda: {"n": 0, "days": set(), "sids": Counter(), "project": ""})
     for d, sid, path, proj in edits:
         f = files[path]
@@ -3151,13 +3194,7 @@ def build_quality(st: Stats, d0=None, d1=None) -> dict:
     weekly = [{"start": k, "edited": v[0], "verified": v[1], "pct": _rate(v[1], v[0])}
               for k, v in sorted(weeks.items())]
 
-    score = None
-    if len(edited) >= 3:
-        terms = [(0.40, len(verified) / len(edited)), (0.20, len(with_tests) / len(edited)),
-                 (0.20, 1 - min(1.0, (reedit_pct or 0) / 100 / 0.5))]
-        if first_run_pass is not None:
-            terms.append((0.20, first_run_pass / 100))
-        score = _rnd(100 * sum(w * v for w, v in terms) / sum(w for w, _ in terms))
+    score = _quality_score(edited, verified, with_tests, reedit_pct, first_run_pass)
     return {
         "score": score, "ready": len(edited) >= 3, "edited_sessions": len(edited),
         "verified_pct": _rate(len(verified), len(edited)), "verified": len(verified),
@@ -3814,7 +3851,10 @@ def _feature_status(st: Stats, w: dict) -> dict:
     return used
 
 
-def _pillar_scores(st: Stats, w: dict) -> dict:
+def _pillar_scores(st: Stats, w: dict, detail=True) -> dict:
+    """Pillar scores for one window. With detail=False only the numbers are computed (enough for ["overall"], which
+    is all a history point needs): the Flow and Quality scores come from flow_score/quality_score instead of the full
+    reports, and "flow_d"/"quality_d" are None."""
     cfg = ADOPTION
     span = (date.fromisoformat(w["end"]) - date.fromisoformat(w["start"])).days + 1
     # Habit: how often, and how evenly across the weeks in the window
@@ -3840,12 +3880,17 @@ def _pillar_scores(st: Stats, w: dict) -> dict:
     # flows and how well it is checked (the Flow and Quality tabs) when those have data
     fl = fluency_of(w)
     craft_base = _rnd((fl["delegation"] + fl["description"] + fl["discernment"] + fl["diligence"]) / 4)
-    flow_d, qual_d = build_flow(st, w["start"], w["end"]), build_quality(st, w["start"], w["end"])
+    if detail:
+        flow_d, qual_d = build_flow(st, w["start"], w["end"]), build_quality(st, w["start"], w["end"])
+        flow_s, qual_s = flow_d["score"], qual_d["score"]
+    else:
+        flow_d = qual_d = None
+        flow_s, qual_s = flow_score(st, w["start"], w["end"]), quality_score(st, w["start"], w["end"])
     parts = [(0.6, craft_base)]
-    if flow_d["score"] is not None:
-        parts.append((0.2, flow_d["score"]))
-    if qual_d["score"] is not None:
-        parts.append((0.2, qual_d["score"]))
+    if flow_s is not None:
+        parts.append((0.2, flow_s))
+    if qual_s is not None:
+        parts.append((0.2, qual_s))
     craft = _rnd(sum(a * b for a, b in parts) / sum(a for a, _ in parts))
     # Impact: code Claude wrote for you, and how many of your days it did so
     per_day = w["loc"] / w["active_days"] if w["active_days"] else 0
@@ -3858,7 +3903,7 @@ def _pillar_scores(st: Stats, w: dict) -> dict:
             "overall": overall, "feats": feats, "n_used": n_used, "covered": covered,
             "buckets": buckets, "sub_share": sub_share, "substantial": len(substantial),
             "per_day": per_day, "code_day_share": code_day_share, "fluency": fl,
-            "craft_base": craft_base, "flow": flow_d["score"], "quality": qual_d["score"],
+            "craft_base": craft_base, "flow": flow_s, "quality": qual_s,
             "flow_d": flow_d, "quality_d": qual_d}
 
 
@@ -4042,15 +4087,22 @@ def build_adoption(st: Stats) -> dict:
         return out
     cur = _pillar_scores(st, w)
     pw = window(end - timedelta(days=span))
-    prev = _pillar_scores(st, pw) if pw["active_days"] >= cfg["min_active_days"] else None
+    # only the scores of the previous window are shown, never its full Flow/Quality reports
+    prev = _pillar_scores(st, pw, detail=False) if pw["active_days"] >= cfg["min_active_days"] else None
 
     # --- history: the score as of each of the last 12 week-ends --------------
     history = []
     for i in range(11, -1, -1):
         e = end - timedelta(days=7 * i)
-        hw = window(e)
-        if hw["active_days"] >= cfg["min_active_days"]:
-            history.append({"end": e.isoformat(), "score": _pillar_scores(st, hw)["overall"]})
+        if i == 0:                                   # this window is `w`, whose score was just computed (and is ready)
+            history.append({"end": e.isoformat(), "score": cur["overall"]})
+        elif 7 * i == span:                          # this window is the previous one (`pw`)
+            if prev is not None:
+                history.append({"end": e.isoformat(), "score": prev["overall"]})
+        else:
+            hw = window(e)
+            if hw["active_days"] >= cfg["min_active_days"]:
+                history.append({"end": e.isoformat(), "score": _pillar_scores(st, hw, detail=False)["overall"]})
 
     # --- wellbeing -----------------------------------------------------------
     wk_msgs = sum(st.days[d]["messages"] for d in w["days"]

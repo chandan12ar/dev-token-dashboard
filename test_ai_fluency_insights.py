@@ -3722,6 +3722,120 @@ class PayloadGoldenTests(unittest.TestCase):
                 self.assertEqual(got[w][k], want[w][k], "window %s, %s" % (w, k))
 
 
+class LeanScoreTests(unittest.TestCase):
+    """flow_score / quality_score / _pillar_scores(detail=False) are shortcuts: they must give exactly the numbers the
+    full reports give, for any window."""
+
+    @classmethod
+    def setUpClass(cls):
+        PayloadGoldenTests.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        PayloadGoldenTests.tearDownClass.__func__(cls)
+
+    _scanner = PayloadGoldenTests._scanner
+
+    def _windows(self, st, k=40, seed=5):
+        import random
+        rng = random.Random(seed)
+        days = sorted(st.days)
+        out = [(None, None)]
+        for _ in range(k):
+            a, b = sorted(rng.sample(days, 2))
+            out.append((rng.choice([a, None]), rng.choice([b, None])))
+        out += [(days[0], days[0]), (days[-1], None), ("1999-01-01", "1999-02-01")]   # one day, last day, empty
+        for _ in range(12):                                   # short windows: too little data for a score
+            i = rng.randrange(len(days) - 3)
+            out.append((days[i], days[i + rng.randint(0, 3)]))
+        return out
+
+    def test_lean_flow_and_quality_scores_equal_the_full_reports(self):
+        st = self._scanner().build_stats()
+        seen_none = seen_val = 0
+        for a, b in self._windows(st):
+            f, q = afi.build_flow(st, a, b)["score"], afi.build_quality(st, a, b)["score"]
+            self.assertEqual(afi.flow_score(st, a, b), f, (a, b))
+            self.assertEqual(afi.quality_score(st, a, b), q, (a, b))
+            seen_none += f is None
+            seen_val += f is not None
+        self.assertGreater(seen_none, 1)       # windows too small for a score were covered...
+        self.assertGreater(seen_val, 10)       # ...and so were windows with one
+
+    def test_the_score_thresholds_are_exact(self):
+        # A Flow score needs 5 turns, a Quality score 3 edited sessions: check windows right on each edge.
+        st = self._scanner().build_stats()
+        days = sorted(st.days)
+        edge = {"turns": {}, "edited_sessions": {}}
+        for i in range(len(days)):
+            for j in range(i, min(len(days), i + 6)):
+                f, q = afi.build_flow(st, days[i], days[j]), afi.build_quality(st, days[i], days[j])
+                edge["turns"].setdefault(f["turns"], (days[i], days[j]))
+                edge["edited_sessions"].setdefault(q["edited_sessions"], (days[i], days[j]))
+        for n_turns, want_score in ((4, False), (5, True)):
+            self.assertIn(n_turns, edge["turns"], "no fixture window has exactly %d turns" % n_turns)
+            a, b = edge["turns"][n_turns]
+            self.assertEqual(afi.flow_score(st, a, b) is not None, want_score)
+            self.assertEqual(afi.build_flow(st, a, b)["score"], afi.flow_score(st, a, b))
+        for n_ed, want_score in ((2, False), (3, True)):
+            self.assertIn(n_ed, edge["edited_sessions"], "no fixture window has exactly %d edited sessions" % n_ed)
+            a, b = edge["edited_sessions"][n_ed]
+            self.assertEqual(afi.quality_score(st, a, b) is not None, want_score)
+            self.assertEqual(afi.build_quality(st, a, b)["score"], afi.quality_score(st, a, b))
+
+    def test_lean_pillar_scores_equal_the_detailed_ones(self):
+        st = self._scanner().build_stats()
+        rows = afi._adoption_sessions(st)
+        end = afi.date.fromisoformat(sorted(st.days)[-1])
+        for i in range(0, 12):
+            e = end - afi.timedelta(days=7 * i)
+            w = afi._window_agg(st, rows, e - afi.timedelta(days=27), e)
+            if w["active_days"] < afi.ADOPTION["min_active_days"]:
+                continue
+            full, lean = afi._pillar_scores(st, w), afi._pillar_scores(st, w, detail=False)
+            self.assertIsNone(lean["flow_d"])
+            for k in full:
+                if k not in ("flow_d", "quality_d"):
+                    self.assertEqual(lean[k], full[k], (i, k))
+
+    def test_history_points_equal_an_independent_computation(self):
+        st = self._scanner().build_stats()
+        ad = afi.build_adoption(st)
+        rows = afi._adoption_sessions(st)
+        end = afi.date.fromisoformat(ad["end"])
+        want = []
+        for i in range(11, -1, -1):
+            e = end - afi.timedelta(days=7 * i)
+            w = afi._window_agg(st, rows, e - afi.timedelta(days=27), e)
+            if w["active_days"] >= afi.ADOPTION["min_active_days"]:
+                want.append({"end": e.isoformat(), "score": afi._pillar_scores(st, w)["overall"]})
+        self.assertGreater(len(want), 8)
+        self.assertEqual(ad["history"], want)
+
+    def test_creating_a_claude_md_changes_the_memory_feature(self):
+        # build_adoption reads the filesystem (CLAUDE.md / AGENTS.md next to the project), so it must never be
+        # served from a cache keyed only on the Stats.
+        root = tempfile.mkdtemp()
+        proj = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        self.addCleanup(shutil.rmtree, proj, True)
+        rows = []
+        for i in range(5):
+            d = afi.date.fromisoformat("2026-10-01") + afi.timedelta(days=i)
+            rows.append({"type": "user", "sessionId": "s%d" % i, "timestamp": d.isoformat() + "T10:00:00.000Z",
+                         "cwd": proj, "message": {"role": "user", "content": "do the thing please"}})
+        os.makedirs(os.path.join(root, "p"))
+        with open(os.path.join(root, "p", "a.jsonl"), "w", encoding="utf-8") as f:
+            f.write("".join(afi.json.dumps(r) + "\n" for r in rows))
+        sc = afi.Scanner(root)
+        st = sc.build_stats()
+        before = [f for f in afi.build_adoption(st)["range"]["features"] if f["id"] == "memory"][0]["recent"]
+        with open(os.path.join(proj, "CLAUDE.md"), "w") as f:
+            f.write("# notes\n")
+        after = [f for f in afi.build_adoption(sc.build_stats())["range"]["features"] if f["id"] == "memory"][0]["recent"]
+        self.assertEqual((before, after), (0, 1))
+
+
 class StatsCloneTests(unittest.TestCase):
     """Stats.clone() replaces copy.deepcopy on the hot path (every refresh after a view was handed out, and every
     checkpoint). It must be an exact, independent copy."""

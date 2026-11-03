@@ -474,7 +474,7 @@ sequenceDiagram
 | 2 | Browser → server | `fetch('/api/stats?…')`. Not cached (`Cache-Control: no-store`) and always the full payload (no ETag, no deltas) | payload 14 KB on a tiny history; ≈50–70 KB on 80k entries **[P]** |
 | 3 | Server | `Scanner.build_stats()` takes `Scanner._lock`, runs `scan()` (one `stat` per log file; reads only new bytes), then projects **only the records added since the last call** onto the running `Stats` (§4.2b) | proportional to new records; a full rebuild only when something earlier changed. Idle: 0.6 ms |
 | 4 | Server | Range selection (below) uses a second running `Stats` for the range | kept up to date the same way |
-| 5 | Server | Engines run on the in-memory `Stats`: `stats_to_json`, `build_weeks`, `build_adoption` (≈14 windows), `build_flow/quality/value`, the previous-window pass, `build_advisor`, `build_health` | ≈0.6 s at 80k entries **[P]** |
+| 5 | Server | Engines run on the in-memory `Stats`: `stats_to_json`, `build_weeks`, `build_adoption` (2 full windows plus 10 score-only history windows), `build_flow/quality/value`, the previous-window pass, `build_advisor`, `build_health` | ≈0.6 s at 80k entries **[P]**; 0.08 s on the 273 MB corpus since the score-only windows (§8.4) |
 | 6 | Server | Adds `notifications` (last 20 of `recent_events`) and `plan_window` (`plan_window_snapshot()`), `streak`, `goals`, `today`, `week_tokens` | negligible |
 | 7 | Server → browser | `json.dumps` and send | — |
 | 8 | Browser | Update the "generated" timestamp; show/clear the **parse-error** warning; **append banners for unseen notification ids**; clamp the week index; `updateChrome()`; `render()` | — |
@@ -986,6 +986,14 @@ costed days), model mix by session, and the share of top-tier-model spend in ses
 Always full history. Window = the **28 calendar days ending on the most recent active day** (so a
 long break does not collapse the score), compared with the 28 days before. Needs ≥ 3 active days.
 
+**How much is computed per window.** Only the current window needs the full Flow and Quality reports (its craft card
+quotes their details). The previous window and the 10 other history points (the score at each of the last 12 week-ends)
+need just the numbers, so they use `flow_score` / `quality_score` and `_pillar_scores(..., detail=False)`. The score
+formulas live once, in `_flow_score` / `_quality_score`, which the full reports call too, so a shortcut cannot drift from
+the report. Two history points are the current and previous windows themselves and reuse their scores. Result on the
+273 MB corpus: 121 ms to 22 ms, identical output (`PayloadGoldenTests`, `LeanScoreTests`). `build_adoption` is **not**
+pure in the `Stats`: the "Project memory" feature checks whether `CLAUDE.md` / `AGENTS.md` exists in each project folder,
+so a result must never be cached on the `Stats` alone (a test creates a `CLAUDE.md` and expects the feature to appear).
 ```mermaid
 flowchart LR
   subgraph window["28-day window ending on the latest active day"]
@@ -1243,7 +1251,7 @@ One real Claude Code session (4.5 MB, 839 lines) copied 60 times with distinct m
 | Refresh pair (full + 30-day) while the newest session grows | about 1.2 s | **0.15 s** (Phase 4), 0.02 s for one window after `Stats.clone()` |
 | Same, but an older session grows | about 1.2 s | 1.3 s in Phase 4 (full rebuild); **0.06 to 0.11 s** per window with checkpoints, for any of the newest 4 files (a file older than that is still a 0.9 s exact rebuild) |
 | `GET /api/stats?days=30` after a growth | n/a | newest file 0.34 s to **0.22 s**; 2nd newest 1.56 s to **0.30 s**; 4th newest 1.60 s to **0.37 s** (0.18 s of each is payload building) |
-| `GET /api/stats?days=30`, idle | not measured | 0.2 s (payload building; `build_adoption` is 0.18 s of it) |
+| `GET /api/stats?days=30`, idle | not measured | 0.19 s in Phase 4 (payload building; `build_adoption` 121 ms of it), **0.08 s** now (`build_adoption` 22 ms) |
 | Long-running server vs freshly started server after the same appends | n/a | identical payload (except the stateful plan-window estimate) |
 
 Caveats: the corpus repeats one session's shape, so the schema census sees few distinct shapes (3,960 over 60 files) and
@@ -1351,7 +1359,7 @@ Severity is the author's judgement. Evidence tags follow the legend at the top.
 | **F1** | Medium | Notifications | **Repeated official milestones are silently suppressed in a long-lived tab.** Official event ids are `official:{kind}:{milestone}` with no window component, and the page de-duplicates on `id` for its whole lifetime (`window.__notifySeen`). In a tab left open for days, the "25 % / 50 % / …" banners appear only for the *first* 5-hour window; later windows record the event server-side (and fire the toast) but show no banner until reload | **[S][P]** reproduced in headless Chromium: second window's `official:five_hour:25` recorded by the server, no banner until reload | Include the window in the id (e.g. append `int(resets_at)`), and update the tests that pin the current ids |
 | **F2** | Low–Med | Notifications | **Estimate and official alerts can both fire.** `poll_once` always runs the plan-window estimator and fires its alert, even when a fresh official capture exists. The `PlanWindowTracker` docstring says it is "used only as a fallback". With the hook installed a user can receive two differently-numbered toasts ("Current session 100 % used (30.0M / 26.0M tokens, est.)" and "Current 5h session 85 % used (official)") | **[S][P]** row 8 in §6.8 | Skip `_fire_plan` when `load_rate_limits()` returns a capture |
 | **F3** | Low | Docs | `DASHBOARD_GUIDE.md` (§Plan usage limits) says a capture older than 30 min makes the card fall back to the estimate. Since `3d56f44` the card keeps the last real capture, flagged with its age and zeroed after its window resets; only a never-written or corrupt file falls back | **[S][T][P]** | Update the guide text; this document describes the code |
-| **F4** | Medium | Performance | *(Fixed in Phase 4 for the common case.)* Every `/api/stats` re-parsed **all** cached entries, twice for ranged views. Now only new records are projected (§4.2b, §12.3). *(Older-session growth fixed with checkpoints, §4.2b: 1.56 s to 0.30 s per request for any of the newest 4 files.)* Remaining: a file older than the newest four growing is still an exact full rebuild (about 0.9 s on 273 MB), and each request spends about 0.18 s building the payload (mostly `build_adoption`), which is now most of a request | **[P]** §12.3 | Cache `build_adoption` by day and Stats identity if the payload cost starts to matter |
+| **F4** | Medium | Performance | *(Fixed in Phase 4 for the common case.)* Every `/api/stats` re-parsed **all** cached entries, twice for ranged views. Now only new records are projected (§4.2b, §12.3). *(Older-session growth fixed with checkpoints, §4.2b: 1.56 s to 0.30 s per request for any of the newest 4 files.)* Remaining: a file older than the newest four growing is still an exact full rebuild (about 0.9 s on 273 MB), *(Payload cost fixed: each request spent 0.19 s building the payload, 121 ms of it `build_adoption`, because it recomputed full Flow and Quality reports for 14 windows to use a few numbers from each; now 0.08 s, §8.4.)* Remaining: a file older than the newest four growing is still an exact full rebuild (about 0.9 s on 273 MB) | **[P]** §12.3 | Nothing planned. The rest of the payload is about 60 ms (previous-window pass 13 ms, advisor 12 ms, ranged flow/quality/value 10 ms) |
 | **F5** | Medium | Security | No `Host` / `Origin` validation, and GET endpoints with side effects (`claude -p`). Any visited web page can trigger token-spending runs and choose the `q` text; a DNS-rebinding page could read `/api/stats`. See also F13 | **[S][P]** headers accepted; exploit not attempted | Reject unexpected `Host`; require a per-process token or non-GET for the AI routes; serialise or rate-limit them |
 | **F6** | Low | Privacy claim | "Zero external requests" has one exception: if `chart.umd.min.js` is missing, `/chart.umd.min.js` replies **302 to jsDelivr** | **[S]** | Fail loudly, or embed the library |
 | **F7** | Low | Notifications | On every page load, all retained events (up to 20, no age filter) are shown again as banners, however old | **[P]** | Filter by `ts`, or remember seen ids in `sessionStorage` |
