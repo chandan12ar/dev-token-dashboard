@@ -9,6 +9,12 @@
    "apiBlockIndex": [
     "int"
    ],
+   "attributionMcpServer": [
+    "str"
+   ],
+   "attributionMcpTool": [
+    "str"
+   ],
    "cwd": [
     "str"
    ],
@@ -133,7 +139,14 @@
     "null"
    ],
    "message.diagnostics": [
-    "null"
+    "null",
+    "object"
+   ],
+   "message.diagnostics.cache_miss_reason": [
+    "object"
+   ],
+   "message.diagnostics.cache_miss_reason.type": [
+    "str"
    ],
    "message.id": [
     "str"
@@ -258,6 +271,9 @@
    "sessionId": [
     "str"
    ],
+   "slug": [
+    "str"
+   ],
    "thinkingDisplay": [
     "str"
    ],
@@ -334,6 +350,9 @@
    "attachment.builtInTypes[]": [
     "str"
    ],
+   "attachment.changed": [
+    "bool"
+   ],
    "attachment.cliPrefix": [
     "str"
    ],
@@ -342,6 +361,28 @@
    ],
    "attachment.content": [
     "list",
+    "object",
+    "str"
+   ],
+   "attachment.content.file": [
+    "object"
+   ],
+   "attachment.content.file.content": [
+    "str"
+   ],
+   "attachment.content.file.filePath": [
+    "str"
+   ],
+   "attachment.content.file.numLines": [
+    "int"
+   ],
+   "attachment.content.file.startLine": [
+    "int"
+   ],
+   "attachment.content.file.totalLines": [
+    "int"
+   ],
+   "attachment.content.type": [
     "str"
    ],
    "attachment.content[]": [
@@ -384,6 +425,9 @@
     "list"
    ],
    "attachment.digests[]": [
+    "str"
+   ],
+   "attachment.displayPath": [
     "str"
    ],
    "attachment.echoWireToolInputs": [
@@ -486,6 +530,9 @@
     "list"
    ],
    "attachment.readdedNames[]": [
+    "str"
+   ],
+   "attachment.reason": [
     "str"
    ],
    "attachment.reminderFold": [
@@ -671,6 +718,9 @@
    "sessionId": [
     "str"
    ],
+   "slug": [
+    "str"
+   ],
    "timestamp": [
     "str"
    ],
@@ -798,6 +848,90 @@
    ]
   },
   "system": {
+   "compactMetadata": [
+    "object"
+   ],
+   "compactMetadata.cumulativeDroppedTokens": [
+    "int"
+   ],
+   "compactMetadata.durationMs": [
+    "int"
+   ],
+   "compactMetadata.postTokens": [
+    "int"
+   ],
+   "compactMetadata.preCompactDiscoveredTools": [
+    "list"
+   ],
+   "compactMetadata.preCompactDiscoveredTools[]": [
+    "str"
+   ],
+   "compactMetadata.preCompactTaskList": [
+    "object"
+   ],
+   "compactMetadata.preCompactTaskList.highestId": [
+    "int"
+   ],
+   "compactMetadata.preCompactTaskList.tasks": [
+    "list"
+   ],
+   "compactMetadata.preCompactTaskList.tasks[]": [
+    "object"
+   ],
+   "compactMetadata.preCompactTaskList.tasks[].activeForm": [
+    "str"
+   ],
+   "compactMetadata.preCompactTaskList.tasks[].description": [
+    "str"
+   ],
+   "compactMetadata.preCompactTaskList.tasks[].id": [
+    "str"
+   ],
+   "compactMetadata.preCompactTaskList.tasks[].status": [
+    "str"
+   ],
+   "compactMetadata.preCompactTaskList.tasks[].subject": [
+    "str"
+   ],
+   "compactMetadata.preTokens": [
+    "int"
+   ],
+   "compactMetadata.preservedMessages": [
+    "object"
+   ],
+   "compactMetadata.preservedMessages.allUuids": [
+    "list"
+   ],
+   "compactMetadata.preservedMessages.allUuids[]": [
+    "str"
+   ],
+   "compactMetadata.preservedMessages.anchorUuid": [
+    "str"
+   ],
+   "compactMetadata.preservedMessages.uuids": [
+    "list"
+   ],
+   "compactMetadata.preservedMessages.uuids[]": [
+    "str"
+   ],
+   "compactMetadata.preservedSegment": [
+    "object"
+   ],
+   "compactMetadata.preservedSegment.anchorUuid": [
+    "str"
+   ],
+   "compactMetadata.preservedSegment.headUuid": [
+    "str"
+   ],
+   "compactMetadata.preservedSegment.tailUuid": [
+    "str"
+   ],
+   "compactMetadata.trigger": [
+    "str"
+   ],
+   "content": [
+    "str"
+   ],
    "cwd": [
     "str"
    ],
@@ -831,19 +965,29 @@
    "hookInfos[].durationMs": [
     "int"
    ],
+   "isMeta": [
+    "bool"
+   ],
    "isSidechain": [
     "bool"
    ],
    "level": [
     "str"
    ],
+   "logicalParentUuid": [
+    "str"
+   ],
    "parentUuid": [
+    "null",
     "str"
    ],
    "preventedContinuation": [
     "bool"
    ],
    "sessionId": [
+    "str"
+   ],
+   "slug": [
     "str"
    ],
    "stopReason": [
@@ -898,11 +1042,20 @@
    "gitBranch": [
     "str"
    ],
+   "isCompactSummary": [
+    "bool"
+   ],
    "isMeta": [
     "bool"
    ],
    "isSidechain": [
     "bool"
+   ],
+   "isVisibleInTranscriptOnly": [
+    "bool"
+   ],
+   "mcpMeta": [
+    "object"
    ],
    "message": [
     "object"
@@ -1099,6 +1252,9 @@
    "sessionId": [
     "str"
    ],
+   "slug": [
+    "str"
+   ],
    "sourceToolAssistantUUID": [
     "str"
    ],
@@ -1120,6 +1276,9 @@
    ],
    "toolUseResult.content": [
     "str"
+   ],
+   "toolUseResult.contentNotInModelContext": [
+    "bool"
    ],
    "toolUseResult.countIsComplete": [
     "bool"
@@ -1226,6 +1385,9 @@
    "toolUseResult.mode": [
     "str"
    ],
+   "toolUseResult.newString": [
+    "str"
+   ],
    "toolUseResult.noOutputExpected": [
     "bool"
    ],
@@ -1238,11 +1400,23 @@
    "toolUseResult.numMatches": [
     "int"
    ],
+   "toolUseResult.oldString": [
+    "str"
+   ],
    "toolUseResult.originalFile": [
     "null"
    ],
+   "toolUseResult.persistedOutputPath": [
+    "str"
+   ],
+   "toolUseResult.persistedOutputSize": [
+    "int"
+   ],
    "toolUseResult.query": [
     "str"
+   ],
+   "toolUseResult.replaceAll": [
+    "bool"
    ],
    "toolUseResult.result": [
     "str"
@@ -1268,11 +1442,35 @@
    "toolUseResult.structuredPatch": [
     "list"
    ],
+   "toolUseResult.structuredPatch[]": [
+    "object"
+   ],
+   "toolUseResult.structuredPatch[].lines": [
+    "list"
+   ],
+   "toolUseResult.structuredPatch[].lines[]": [
+    "str"
+   ],
+   "toolUseResult.structuredPatch[].newLines": [
+    "int"
+   ],
+   "toolUseResult.structuredPatch[].newStart": [
+    "int"
+   ],
+   "toolUseResult.structuredPatch[].oldLines": [
+    "int"
+   ],
+   "toolUseResult.structuredPatch[].oldStart": [
+    "int"
+   ],
    "toolUseResult.success": [
     "bool"
    ],
    "toolUseResult.task": [
     "object"
+   ],
+   "toolUseResult.task.description": [
+    "str"
    ],
    "toolUseResult.task.id": [
     "str"
@@ -1343,6 +1541,7 @@
   }
  },
  "claude_code_versions": [
-  "2.1.316"
+  "2.1.316",
+  "2.1.317"
  ]
 }

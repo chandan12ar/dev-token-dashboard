@@ -304,6 +304,7 @@ The earlier benchmark was misleading: copies sharing message ids made de-duplica
 
 | Date | Change |
 |---|---|
+| 2026-11-03 | Verified Claude Code 2.1.317 (first use of the release checklist): all 15 consumed fields present with expected types over 133 responses; baseline grown by 65 paths (nothing removed, no content-like paths); matrix updated with what was and was not exercised. |
 | 2026-11-03 | Governance: release checklist, compatibility matrix, `tools/release_check.py` (8 new tests). Running it on real logs found two bugs, both fixed: (1) the summary Claude Code inserts after `/compact` was counted as a typed prompt (one 14,783-character summary was 80% of all prompt characters in a real log; F6 in `SCHEMA_NOTES.md`); (2) the sentinel reported tool arguments and MCP payloads as "new fields" (102 on a real log, 65 after the fix, the rest genuine). 269 tests. |
 | 2026-11-03 | KPI tiles on Overview and Weekly show "Unverified" when a log field they read went missing or changed type (`TILE_FIELDS`, `affected_tiles`); tiles stop showing text derived from the suspect number. 5 new tests (260 total); browser-checked. |
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |

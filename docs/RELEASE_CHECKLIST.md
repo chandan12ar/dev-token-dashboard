@@ -29,6 +29,9 @@ when you simply update Claude Code and want to know the dashboard still reads it
 4. If the format is unchanged and everything passes: grow the baseline
    (`python tools/schema_census.py --write-manifest schema/claude_code_known.json`), then add the version to the
    table in [COMPATIBILITY.md](COMPATIBILITY.md) with the evidence. The release check fails if these two disagree.
+   Also write down what the logs did **not** exercise (compaction, subagents, MCP calls, `cost-state`), so "verified"
+   is never read as more than it is. To see that, compare the new version with the old one field by field: a long
+   list of fields "absent in the new version" is usually just features nobody used in a short session.
 5. Run the test suite. If a deliberate behaviour change moved the golden snapshot, regenerate it on purpose
    (`AFI_REGEN_GOLDEN=1`) and read the diff first.
 6. Add a line to the changelog in [LOG_RESILIENCE_ROADMAP.md](LOG_RESILIENCE_ROADMAP.md).

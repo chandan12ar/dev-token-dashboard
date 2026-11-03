@@ -96,6 +96,20 @@ confirm its current shape. `permission-mode` appeared only as a `permissionMode`
 
 ---
 
+### Compared with 2.1.317 (2026-11-03, same session, mid-session update)
+
+133 assistant and 69 user lines. Every field in `CONSUMED_FIELDS` is present with an accepted type (always-present
+ones 100%). Nothing the dashboard reads vanished or changed type. What is new: `toolUseResult.{structuredPatch,
+oldString,newString,replaceAll,persistedOutputPath,persistedOutputSize,contentNotInModelContext,task.description}` on
+edit-type results, `attachment.changed`, `attachment.reason`. Widened: `system.parentUuid` may be null,
+`assistant message.diagnostics` may be an object (with `cache_miss_reason`), `attachment.content` may be an object.
+Not exercised by these 262 lines: compaction, subagents, MCP calls, `cost-state` (see
+[COMPATIBILITY.md](COMPATIBILITY.md)). `isCompactSummary`, `isVisibleInTranscriptOnly`, `compactMetadata.*`,
+`mcpMeta`, `slug`, `attributionMcpServer` and `attributionMcpTool` came from the 2.1.316 half of the log and entered the
+baseline at the same time.
+
+---
+
 ## 3. Findings from running the current scanner (verified with fixtures)
 
 Reproduced in a scratch directory with three files: a normal transcript, an `.orphaned-…jsonl` copy of it, and a

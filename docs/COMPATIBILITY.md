@@ -11,6 +11,20 @@ Update this page whenever the evidence changes (steps in [RELEASE_CHECKLIST.md](
 | Version | Reader (adapter) | Status | Checked on | Evidence |
 |---|---|---|---|---|
 | 2.1.316 | `claude-code-2` | verified | 2026-11-02 | Structure census of one real session, kept as the baseline `schema/claude_code_known.json`; the same session's own `cost-state` totals reproduced by the price rules and the output-token cross-check; 665 lines compared field by field against the previous parser ([CANONICAL_SCHEMA.md](CANONICAL_SCHEMA.md) §5) |
+| 2.1.317 | `claude-code-2` | verified | 2026-11-03 | 133 assistant and 69 user lines from one session (Claude Code updated from 2.1.316 to 2.1.317 part-way through it, so the two versions were compared in the same log). All 15 fields the dashboard reads are present with the expected types (the 11 that every entry should carry: the 8 on assistant lines are on 133 of 133, the 3 on user lines on 69 of 69); no field it reads changed type; `tools/release_check.py` shows no FAIL. See the scope note below |
+
+**What "verified" covers.** For both rows: the fields the dashboard reads are present with the expected types, and the
+numbers built on them agree with Claude Code's own totals. It does **not** mean every feature was exercised.
+- 2.1.316: the original baseline session, plus the 978-line first half of the session used for 2.1.317, which included a
+  compaction and MCP tool calls.
+- 2.1.317: **not exercised** in the 262 lines: compaction (`/compact`), subagents (`isSidechain`), MCP tool calls, and
+  `cost-state` lines. `cost-state` lines carry no version, so the price and cross-check results cover the whole mixed
+  session, not 2.1.317 alone. The baseline manifest is a union of both versions, so a field seen only in 2.1.316
+  (for example `compactMetadata`) is known but not confirmed to be unchanged in 2.1.317.
+- New in 2.1.317, not read by the dashboard: richer `toolUseResult` for edits (`structuredPatch`, `oldString`,
+  `newString`, `replaceAll`), `toolUseResult.persistedOutputPath` / `persistedOutputSize`, `attachment.changed` and
+  `attachment.reason`. Three fields became nullable or wider: `system.parentUuid` (can be null),
+  `assistant message.diagnostics` (null or object), `attachment.content` (also an object).
 
 Every other version is **unverified**. What that means in practice:
 
