@@ -284,8 +284,8 @@ The earlier benchmark was misleading: copies sharing message ids made de-duplica
 ### Ongoing: governance
 | Item | Status |
 |---|---|
-| Release checklist: on each Claude Code release, run `--schema-report`, update manifest and `SCHEMA_NOTES.md` | ☐ |
-| Compatibility matrix: Claude Code versions tested vs adapter version | ☐ |
+| Release checklist: on each Claude Code release, run the checks, update manifest and `SCHEMA_NOTES.md` | ☑ [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) plus `tools/release_check.py`, which runs the mechanical steps (format drift, new fields, prices, cross-check, versions vs matrix, tests) and exits 1 on a FAIL |
+| Compatibility matrix: Claude Code versions tested vs adapter version | ☑ [COMPATIBILITY.md](COMPATIBILITY.md): one verified version (2.1.316), everything else honestly "unverified"; the release check fails if the page and the baseline manifest disagree. Windows, macOS and other Python versions are listed as untested |
 | README / SETUP / PROJECT_REPORT updated to describe the archive and its privacy stance | ☑ |
 
 ---
@@ -304,6 +304,7 @@ The earlier benchmark was misleading: copies sharing message ids made de-duplica
 
 | Date | Change |
 |---|---|
+| 2026-11-03 | Governance: release checklist, compatibility matrix, `tools/release_check.py` (8 new tests). Running it on real logs found two bugs, both fixed: (1) the summary Claude Code inserts after `/compact` was counted as a typed prompt (one 14,783-character summary was 80% of all prompt characters in a real log; F6 in `SCHEMA_NOTES.md`); (2) the sentinel reported tool arguments and MCP payloads as "new fields" (102 on a real log, 65 after the fix, the rest genuine). 269 tests. |
 | 2026-11-03 | KPI tiles on Overview and Weekly show "Unverified" when a log field they read went missing or changed type (`TILE_FIELDS`, `affected_tiles`); tiles stop showing text derived from the suspect number. 5 new tests (260 total); browser-checked. |
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
 | 2026-11-02 | Cost investigation: the 18% gap was the price model. Published rules reproduce Claude Code's own dollar figure exactly on 6 data points; old formula was +17% to +42% (Sonnet) and 9x (Haiku). Model-aware prices, 1h/5m cache writes, per-model cache-hit rates, Haiku tiers, fast mode, US-only multiplier, web search; Data Health "Model prices" check. 18 new tests (255 total). |

@@ -234,7 +234,7 @@ Fields the parser reads:
 | `attachment` | `attachment.type` | Data Health counters |
 | `user` | `timestamp`, `sessionId`, `cwd`, `gitBranch`, `isSidechain`, `isMeta`, `permissionDecision.{decision,source}`, `message.content` (string, or blocks of `text` / `tool_result`) | prompts, corrections, interruptions, slash commands, tool results |
 | `assistant` | `message.{id,model,stop_reason,usage.{input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens}}`, `requestId`, `uuid`, `thinkingDurationMs`, `effort`, `message.content[]` `tool_use` blocks (`id`, `name`, `input.{command,file_path,notebook_path,content,new_string,edits[],new_source,subagent_type}`) | tokens, cost, tools, LoC, turn ends, edits, command kinds |
-| anything else, and `isMeta` entries | — | ignored |
+| anything else, and `isMeta` / `isCompactSummary` entries | — | ignored |
 
 `tool_result` blocks arrive inside **`user`** entries (`tool_use_id`, `is_error`, `content`). **[S]**
 
@@ -382,7 +382,7 @@ flowchart LR
 ### 4.5 Schema sentinel
 
 At scan time each entry is flattened to `(json_path, type)` pairs (`flatten_entry`: arrays collapse to `[]`, id-like keys
-to `<id>`, model-name keys under `modelUsage` to `<key>`, free-form subtrees such as `input_schema` stay closed) and
+to `<id>`, model-name keys under `modelUsage` to `<key>`, free-form subtrees stay closed: `input_schema`, and the user's own tool data, i.e. a tool call's `input` arguments and an MCP server's `mcpMeta` payload, which differ for every user and are not Claude Code's format) and
 counted per `(entry type, Claude Code version)`. `analyze_schema` compares that with `CONSUMED_FIELDS` (the fields this
 dashboard reads) and with `schema/claude_code_known.json` (fields seen in known logs):
 

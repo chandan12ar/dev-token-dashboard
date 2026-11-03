@@ -1808,6 +1808,17 @@ class SchemaSentinelTests(_LogFixture):
         self.assertIn("u.<id>", paths)
         self.assertTrue({("m[].k", "int"), ("m[].k", "str")} <= flat)
 
+    def test_tool_arguments_and_mcp_payloads_are_not_log_structure(self):
+        # What you pass to a tool, and what an MCP server sends back, differ for every user. They are content,
+        # not Claude Code's format, so they must not show up as "new fields".
+        e = {"type": "assistant", "message": {"content": [
+                 {"type": "tool_use", "name": "mcp__x__get", "input": {"threadId": "t", "pageSize": 5}}]}}
+        u = {"type": "user", "mcpMeta": {"structuredContent": {"messages": [{"historyId": "1"}]}}}
+        paths = {p for p, _t in afi.flatten_entry(e)} | {p for p, _t in afi.flatten_entry(u)}
+        self.assertIn("message.content[].input", paths)
+        self.assertIn("mcpMeta", paths)
+        self.assertFalse([p for p in paths if p.startswith("message.content[].input.") or p.startswith("mcpMeta.")], paths)
+
     # --- consumed-field drift ---------------------------------------------
     def test_healthy_logs_raise_no_warnings(self):
         res, _ = self._analyze([self._mk(i) for i in range(30)], afi.load_schema_manifest())
@@ -2730,6 +2741,30 @@ class CanonicalLayerTests(unittest.TestCase):
         self.assertTrue(self._rec({"type": "user", "isMeta": True, "message": {"content": "x"}}).meta)
         self.assertEqual(self._rec({"type": "queue-operation", "operation": "enqueue"}).events, [])
 
+    def test_compaction_summary_is_not_something_the_user_typed(self):
+        # After /compact or an auto-compact, Claude Code writes the machine-made summary as a user line.
+        summary = "This session is being continued from a previous conversation.\n" + "x" * 5000
+        r = self._rec({"type": "user", "isCompactSummary": True, "isVisibleInTranscriptOnly": True,
+                       "message": {"role": "user", "content": summary}})
+        self.assertTrue(r.meta)
+        self.assertFalse(r.human_input)
+        self.assertEqual(r.events, [])
+        # ...and it must not reach the metrics: one real prompt, one summary -> one prompt counted.
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "proj"))
+            lines = [
+                {"type": "user", "sessionId": "s", "timestamp": "2026-10-12T09:00:00.000Z", "version": "2.1.316",
+                 "uuid": "u1", "message": {"role": "user", "content": "fix the bug"}},
+                {"type": "user", "sessionId": "s", "timestamp": "2026-10-12T09:30:00.000Z", "version": "2.1.316",
+                 "uuid": "u2", "isCompactSummary": True, "isVisibleInTranscriptOnly": True,
+                 "message": {"role": "user", "content": summary}}]
+            with open(os.path.join(root, "proj", "a.jsonl"), "w", encoding="utf-8") as f:
+                for e in lines:
+                    f.write(afi.json.dumps(e) + "\n")
+            st = afi.Scanner(root).build_stats()
+        self.assertEqual(sum(d["prompts"] for d in st.days.values()), 1)
+        self.assertEqual(st.prompt_chars, len("fix the bug"))
+
     def test_unfamiliar_top_level_fields_are_kept_as_extras(self):
         r = self._rec(self._assistant(), brandNewField={"deep": 1}, wireToolInputs={}, isSidechain=False)
         self.assertEqual(r.extras, {"brandNewField": {"deep": 1}})
@@ -3387,6 +3422,91 @@ class AdvisorTests(_LogFixture):
         self.assertFalse([r for r in adv["recs"] if r["id"] == "verify"])
         self.assertTrue(any("check the work" in w for w in adv["wins"]))
 
+
+class ReleaseCheckTests(unittest.TestCase):
+    """tools/release_check.py: the mechanical half of docs/RELEASE_CHECKLIST.md."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "release_check", os.path.join(os.path.dirname(os.path.abspath(afi.__file__)), "tools", "release_check.py"))
+        cls.rc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.rc)
+        with open(cls.rc.MATRIX_PATH, encoding="utf-8") as f:
+            cls.matrix = f.read()
+
+    def _levels(self, results):
+        return {r[0] for r in results}
+
+    def test_shipped_matrix_matches_the_shipped_baseline(self):
+        res = self.rc.check_matrix(self.matrix, afi.load_schema_manifest())
+        self.assertEqual(self._levels(res), {self.rc.PASS}, res)
+
+    def test_matrix_and_manifest_disagreeing_fails_both_ways(self):
+        man = afi.load_schema_manifest()
+        extra = dict(man, claude_code_versions=man["claude_code_versions"] + ["9.9.9"])
+        res = self.rc.check_matrix(self.matrix, extra)
+        self.assertIn(self.rc.FAIL, self._levels(res))
+        self.assertIn("9.9.9", res[0][2])
+        # verified in the doc but missing from the baseline
+        fewer = dict(man, claude_code_versions=[])
+        res = self.rc.check_matrix(self.matrix, fewer)
+        self.assertIn(self.rc.FAIL, self._levels(res))
+        self.assertEqual(self.rc.check_matrix("no table here", man)[0][0], self.rc.FAIL)
+
+    def test_every_adapter_is_described_in_the_matrix(self):
+        names = {a for a, _p, _f in afi.ADAPTERS}
+        self.assertTrue(all(n in self.matrix for n in names))
+        res = self.rc.check_matrix(self.matrix.replace("claude-code-2", "x"), afi.load_schema_manifest())
+        self.assertIn(self.rc.FAIL, self._levels(res))
+
+    def _health(self, **kw):
+        h = {"schema": {"versions_seen": ["2.1.316"], "baseline": {"loaded": True, "versions": ["2.1.316"]},
+                        "findings": [], "summary": {"warning": 0, "info": 0}},
+             "unknown_entry_types": [], "capabilities": []}
+        h.update(kw)
+        return h
+
+    def test_unknown_version_warns_known_version_passes(self):
+        self.assertEqual(self.rc.check_versions(self._health(), self.matrix)[0][0], self.rc.PASS)
+        h = self._health()
+        h["schema"]["versions_seen"] = ["2.1.316", "2.9.0"]
+        res = self.rc.check_versions(h, self.matrix)
+        self.assertEqual(res[0][0], self.rc.WARN)
+        self.assertIn("2.9.0", res[0][2])
+
+    def test_schema_warning_fails_new_field_only_warns(self):
+        h = self._health()
+        h["schema"]["findings"] = [
+            {"severity": "info", "kind": "new_field", "title": "3 new fields on user entries", "paths": ["a", "b"],
+             "n_paths": 2, "path": "a"}]
+        res = self.rc.check_schema(h)
+        self.assertEqual(self._levels(res), {self.rc.PASS, self.rc.WARN})
+        h["schema"]["findings"].append({"severity": "warning", "kind": "missing_all", "title": "gone",
+                                        "path": "message.usage.input_tokens"})
+        self.assertIn(self.rc.FAIL, self._levels(self.rc.check_schema(h)))
+        h["schema"]["baseline"]["loaded"] = False
+        self.assertIn(self.rc.FAIL, {r[0] for r in self.rc.check_schema(h) if r[1] == "log format"})
+
+    def test_capability_status_maps_to_pass_warn_fail(self):
+        def cap(i, s):
+            return {"id": i, "status": s, "detail": "d"}
+        h = self._health(capabilities=[cap("tokens", "ok"), cap("readable", "ok"), cap("prices", "partial"),
+                                       cap("crosscheck", "missing")])
+        res = {r[1]: r[0] for r in self.rc.check_capabilities(h)}
+        self.assertEqual(res["tokens and cost"], self.rc.PASS)
+        self.assertEqual(res["model prices"], self.rc.FAIL)
+        self.assertEqual(res["cross-check with Claude Code"], self.rc.WARN)
+
+    def test_end_to_end_on_a_scratch_log_exits_clean(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "proj"))
+            with open(os.path.join(root, "proj", "a.jsonl"), "w", encoding="utf-8") as f:
+                f.write(afi.json.dumps({"type": "user", "sessionId": "s", "timestamp": "2026-10-12T09:00:00.000Z",
+                                        "version": "2.1.316", "uuid": "u", "message": {"role": "user", "content": "hi"}}) + "\n")
+            res = self.rc.gather(root, self.matrix, afi.load_schema_manifest(), skip_tests=True)
+        self.assertNotIn(self.rc.FAIL, self._levels(res), res)
 
 if __name__ == "__main__":
     unittest.main()

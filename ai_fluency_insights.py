@@ -650,7 +650,9 @@ def _adapt_claude_code_2(entry) -> Record:
         return rec
     if et not in ("user", "assistant"):
         return rec
-    rec.meta = bool(entry.get("isMeta"))
+    # Machine-written user lines are not something a person typed: isMeta, and the summary Claude Code inserts
+    # after /compact or an auto-compact (isCompactSummary, thousands of characters long).
+    rec.meta = bool(entry.get("isMeta")) or bool(entry.get("isCompactSummary"))
     if rec.meta:
         return rec
 
@@ -1820,7 +1822,10 @@ SCHEMA_MAX_DEPTH = 12
 # would look like a brand-new field, so id-like keys collapse to "<id>".
 _ID_KEY = re.compile(r"^(toolu_[A-Za-z0-9]+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}|[0-9a-f]{24,})$")
 # Free-form subtrees (tool JSON Schemas, echoed tool inputs): record the key itself, do not descend.
-OPAQUE_KEYS = frozenset({"input_schema", "wireToolInputs", "wireIngestContext"})
+# Free-form subtrees whose contents are not Claude Code's format: tool schemas, and data that belongs to the user's
+# tools. `input` is a tool call's arguments (any tool, including MCP tools) and `mcpMeta` is the raw payload an MCP
+# server returned (for example whole email lists); both differ for every user, so their keys are never "new fields".
+OPAQUE_KEYS = frozenset({"input_schema", "wireToolInputs", "wireIngestContext", "input", "mcpMeta"})
 # Maps keyed by a name that grows over time (modelUsage.claude-haiku-5-5): every child key collapses to "<key>",
 # otherwise each new model release would look like new fields.
 MAP_KEYS = frozenset({"modelUsage"})

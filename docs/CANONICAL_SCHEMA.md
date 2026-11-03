@@ -31,7 +31,7 @@ One Record per raw line, 1:1 and in the same order (so positions stay stable for
 | `sid` | session id |
 | `ts_raw` | timestamp exactly as logged (kept because session start/end compare it as text) |
 | `ts` | the same instant as an aware **UTC** datetime, or `None`. A timestamp with no zone is read as local time. Local day, hour and weekday are derived from it when projecting, so travel or a time-zone change never rewrites stored data |
-| `meta` | Claude Code marked the line as not a real message (`isMeta`) |
+| `meta` | the line is machine-written, not a real message: `isMeta`, or the summary Claude Code inserts after a compaction (`isCompactSummary`). Meta lines produce no events and count nowhere |
 | `side` | subagent ("sidechain") work |
 | `cwd`, `branch`, `version`, `entrypoint`, `uuid` | as logged |
 | `human_input` | the line carries something a person did (not only tool results) |

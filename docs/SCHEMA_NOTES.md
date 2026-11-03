@@ -76,7 +76,7 @@ confirm its current shape. `permission-mode` appeared only as a `permissionMode`
   object keys. A naive "new field detected" check would raise a new alert on every tool call. The sentinel **must
   normalise id-like keys** to a placeholder (the census already does).
 - **Embedded JSON Schemas.** `attachment.entries[].input_schema` carries whole tool definitions; hundreds of derived paths
-  with no meaning for us. The sentinel treats `input_schema`, `wireToolInputs` and `wireIngestContext` as **opaque**.
+  with no meaning for us. The sentinel treats `input_schema`, `wireToolInputs` and `wireIngestContext` as **opaque**. So are `input` (a tool call's arguments) and `mcpMeta` (an MCP server's raw payload, e.g. whole email lists): they are the user's tool data, differ for every user, and would otherwise report "new fields" forever. The baseline manifest still lists the old `input.*` paths from the first census; they are harmless and drop out on the next `--write-manifest`.
 - **Tool inputs appear twice** on assistant entries: in `message.content[].input` and echoed in `wireToolInputs`
   (flag `attachment.echoWireToolInputs`). Anything that walks the whole entry rather than named fields can double count.
   Log lines are large (~7.5 KB per line on average in this sample); do not extrapolate monthly volume from one sample.
@@ -107,6 +107,7 @@ Reproduced in a scratch directory with three files: a normal transcript, an `.or
 | **F2** *(fixed in Phase 1)* | Subagent transcripts in `<session>/subagents/` are attributed to a project literally named **`subagents`**, because the project is taken from the file's parent directory name | `list(st.projects)` returned `['home/u/proj', 'subagents']` | Medium: wrong per-project tables |
 | **F3** *(fixed in Phase 1)* | The "Tokens and cost" Data Health check is always `ok` when any assistant message exists (`_field_status(n, n)`) | Code read, `build_health` | High for trust: the check meant to catch drift cannot fire |
 | **F4** *(fixed in Phase 1)* | JSON decode failures are skipped without being counted, and torn-last-line vs mid-file corruption are indistinguishable | Code read, `Scanner.scan` | Medium |
+| **F6** *(fixed 2026-11-03, found by `tools/release_check.py`)* | After `/compact` or an auto-compact, Claude Code writes the model-made summary as a `user` line marked `isCompactSummary` (and `isVisibleInTranscriptOnly`) but **not** `isMeta`, so it was counted as a prompt the user typed | One real log: a 14,783-character summary was 80% of all prompt characters (18,471 before, 3,688 after) and added 1 to the prompt count | Medium: inflated prompts, "Your tokens", lines per prompt and the longest-prompt list; lowered Leverage. Every compaction adds one |
 | **F5** *(reported in Phase 1)* | Four entry types in real logs (`atis-latch`, `last-prompt`, `tools-used`, `queue-operation`) are never referenced anywhere in the repo | grep of `*.py`, `*.md`: 0 hits | Info: may hide usable signals, may be noise. Needs a decision, not a fix |
 
 Live-file behaviour: the prefix of the live transcript (first 500,000 bytes) was hashed at the start of this
