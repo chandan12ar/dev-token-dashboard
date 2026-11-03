@@ -1821,6 +1821,36 @@ class SchemaSentinelTests(_LogFixture):
         self.assertIn("cache read tokens", cat["cache_savings"]["degraded"])
         self.assertIsNone(cat["turn_time"]["degraded"])
 
+    def test_every_tile_dependency_names_a_consumed_field(self):
+        labels = {c[5] for c in afi.CONSUMED_FIELDS}
+        for tile, fields in afi.TILE_FIELDS.items():
+            self.assertTrue(fields, tile)
+            for f in fields:
+                self.assertIn(f, labels, "tile %r depends on unknown field %r" % (tile, f))
+
+    def test_healthy_logs_mark_no_tile(self):
+        res, _ = self._analyze([self._mk(i) for i in range(30)], afi.load_schema_manifest())
+        self.assertEqual(res["affected_tiles"], {})
+
+    def test_missing_field_marks_exactly_the_tiles_built_on_it(self):
+        res, _ = self._analyze([self._mk(i, drop=["message.usage.cache_read_input_tokens"]) for i in range(30)])
+        tiles = res["affected_tiles"]
+        self.assertEqual(set(tiles), {"cache_read", "cost", "cold_start"})
+        self.assertEqual(tiles["cache_read"], ["cache read tokens"])
+        for untouched in ("input", "output", "prompts", "sessions", "loc"):
+            self.assertNotIn(untouched, tiles)
+
+    def test_retyped_field_marks_its_tiles(self):
+        entries = [self._mk(i) for i in range(30)]
+        for e in entries:
+            e["message"]["usage"]["output_tokens"] = "12"
+        res, _ = self._analyze(entries)
+        self.assertIn("output", res["affected_tiles"])
+        self.assertIn("leverage", res["affected_tiles"])
+
+    def test_tile_flags_reach_the_page_payload(self):
+        self.assertIn("affected_tiles", afi.analyze_schema({}, {}, None))
+
     def test_field_that_vanished_in_a_newer_version_names_the_version(self):
         entries = [self._mk(i, ver="2.1.0") for i in range(25)] + \
                   [self._mk(100 + i, ver="2.2.0", drop=["message.stop_reason"]) for i in range(25)]

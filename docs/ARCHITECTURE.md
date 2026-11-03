@@ -394,7 +394,11 @@ dashboard reads) and with `schema/claude_code_known.json` (fields seen in known 
 | `new_field` / `type_change_other` | info | not in the baseline; possibly a new signal |
 
 Warnings raise a banner, list the affected catalog metrics (`catalog_payload(drift)`), and appear in Data Health
-and `--schema-report`. Design and rationale: [LOG_RESILIENCE_ROADMAP.md](LOG_RESILIENCE_ROADMAP.md); observed schema:
+and `--schema-report`. They also mark the **KPI tiles** built on the changed field: `TILE_FIELDS` maps each Overview
+and Weekly tile to the fields it reads, and `analyze_schema` returns `affected_tiles`. Such a tile gets an amber
+"Unverified" pill, a dimmed number and the line "Log format changed. See Data Health." instead of text derived from the
+suspect number (a missing cache-read field would otherwise show `0` next to "cache resetting mid-session"). A test
+checks every field named in `TILE_FIELDS` exists in `CONSUMED_FIELDS`. Design and rationale: [LOG_RESILIENCE_ROADMAP.md](LOG_RESILIENCE_ROADMAP.md); observed schema:
 [SCHEMA_NOTES.md](SCHEMA_NOTES.md).
 
 ## 5. The 15-second refresh cycle

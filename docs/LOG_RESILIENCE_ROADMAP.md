@@ -210,12 +210,12 @@ DERIVED (days, sessions, scores, advisor) - always rebuildable
 | Classify entry types as handled / ignored / **new** and show them in Data Health (**F5**: report, do not parse). Unknown top-level *keys* still to do | ◐ |
 | "History window" card in Data Health: retention days (from `settings.json`, default 30), earliest day we hold, and a note that managed settings may override. *Changed from a "warning" on purpose: under normal operation the oldest log is always near the limit, so an age warning would be permanently on* | ☑ |
 | Schema census per file at scan time + `schema/claude_code_known.json` baseline + classifier (missing / vanished-in-version / type change = warning; new field = info). Id-like and model-name keys collapse, free-form subtrees stay closed | ☑ |
-| Consumed-field contract (`CONSUMED_FIELDS`) mapped to catalog metrics; affected metrics are tagged in the catalog and listed in the finding. **Not done yet:** KPI tiles still show the number (e.g. `Cache read 0`) when a field is missing; they should show "unverified" | ◐ |
+| Consumed-field contract (`CONSUMED_FIELDS`) mapped to catalog metrics; affected metrics are tagged in the catalog and listed in the finding. KPI tiles on Overview and Weekly are marked "Unverified" when a field they read drifted (`TILE_FIELDS`, `affected_tiles`); catalog badges on the other tabs carry the same pill. Checked in a browser with a dropped cache-read field and a dropped output-token field | ☑ |
 | Data Health "Log format changes" panel, top-of-page banner on warnings, and `--schema-report` | ☑ |
 | `--collect-fixture FILE`: strings replaced, enumerations/model names/built-in tool names/timestamps kept, ids pseudonymised, numbers kept. Field names are kept, so skim before sharing | ☑ |
 | Mutation tests (drop / retype / vanish-in-version a field) | ☑ |
 | Per-version golden fixtures from other machines | ☐ needs real logs (Phase 0 open item) |
-| Cross-check against Claude Code's own `cost-state` totals (new in Phase 0, see `SCHEMA_NOTES.md`) for *meaning* drift | ☐ |
+| Cross-check against Claude Code's own `cost-state` totals (new in Phase 0, see `SCHEMA_NOTES.md`) for *meaning* drift | ☑ done in Phase 3 (output tokens) and in the cost work (prices) |
 
 ### Phase 2: Archive and checkpoints (answers Q2 and Q3)
 Defaults used because the owner decisions in section 8 were not answered: **opt-in, command-line only, raw lines stored, full history**. All are easy to change.
@@ -286,7 +286,7 @@ The earlier benchmark was misleading: copies sharing message ids made de-duplica
 |---|---|
 | Release checklist: on each Claude Code release, run `--schema-report`, update manifest and `SCHEMA_NOTES.md` | ☐ |
 | Compatibility matrix: Claude Code versions tested vs adapter version | ☐ |
-| README / SETUP / PROJECT_REPORT updated to describe the archive and its privacy stance | ☐ |
+| README / SETUP / PROJECT_REPORT updated to describe the archive and its privacy stance | ☑ |
 
 ---
 
@@ -304,6 +304,7 @@ The earlier benchmark was misleading: copies sharing message ids made de-duplica
 
 | Date | Change |
 |---|---|
+| 2026-11-03 | KPI tiles on Overview and Weekly show "Unverified" when a log field they read went missing or changed type (`TILE_FIELDS`, `affected_tiles`); tiles stop showing text derived from the suspect number. 5 new tests (260 total); browser-checked. |
 | 2026-11-02 | Document created from a read of the current scanner, parser and health code. No code changed. |
 | 2026-11-02 | Cost investigation: the 18% gap was the price model. Published rules reproduce Claude Code's own dollar figure exactly on 6 data points; old formula was +17% to +42% (Sonnet) and 9x (Haiku). Model-aware prices, 1h/5m cache writes, per-model cache-hit rates, Haiku tiers, fast mode, US-only multiplier, web search; Data Health "Model prices" check. 18 new tests (255 total). |
 | 2026-11-02 | Phase 4: profiled on a 273 MB corpus; incremental projection with a deterministic order (idle refresh 0.6 ms, live refresh about 8x faster), faster census, raw lines out of memory (644 MB to 158 MB), warm-up, archive machine id. 13 new tests (237 total). OpenTelemetry/hook journal dropped, Copilot blocked on logs, multi-machine left as a design note. |
