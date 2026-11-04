@@ -68,7 +68,7 @@
 
 - One Python file, standard library only. No installation steps beyond Python, no account, no API key.
 - Runs a web page at `http://localhost:8787`, reachable only from the same computer.
-- Reads Claude Code's log files and never changes them. The page makes no requests to the internet.
+- Reads Claude Code's log files and never changes them. In a normal install the page makes no requests to the internet (one fallback is described in section 4.11).
 - Compares a person only with their own past. It does not rank people.
 - 286 automated tests, plus checks of its totals against Claude Code's own recorded totals.
 
@@ -181,7 +181,7 @@ Each answer below is written to be said aloud. Short, plain statements; add deta
 
 ### 4.11 How is the page drawn?
 
-> "It is a single web page served by the same Python program. There is no build step and no outside library loaded from the internet; the chart library is bundled with the project. The server sends finished numbers and the page only formats and draws them. Colours and spacing come from a small set of design variables defined once, with a light theme and a dark theme that follows the computer's setting. Each tab is a section of the page that is shown or hidden when you click the menu. A privacy toggle hides session titles, prompt previews and file names on screen."
+> "It is a single web page served by the same Python program. There is no build step and no framework. The one library it uses, Chart.js for the charts, is bundled with the project, so nothing is loaded from the internet. (If that bundled file were ever missing, the server would send the browser to a public CDN to fetch the same library; in a normal install this does not happen.) The server sends finished numbers and the page only formats and draws them. Colours and spacing come from a small set of design variables defined once, with a light theme and a dark theme that follows the computer's setting. Each tab is a section of the page that is shown or hidden when you click the menu. A privacy toggle hides session titles, prompt previews and file names on screen."
 
 ### 4.12 Where does the wording on the page come from? Is an API key used?
 
@@ -471,7 +471,7 @@ Answers: can I trust what I am looking at?
 | Question | Answer |
 |---|---|
 | What data does it handle? | Claude Code's logs: prompts, answers, code, command output and file paths. They already exist on the computer |
-| Is anything sent out? | No, except the two optional AI buttons that run the developer's own Claude Code |
+| Is anything sent out? | No, except the two optional AI buttons that run the developer's own Claude Code. One edge case: if the bundled chart file is deleted from the project folder, the browser is redirected to a public CDN (jsDelivr) to fetch the same chart library, which would reveal that a dashboard page was opened |
 | Does it write anything to disk? | A very small notification-state file next to the script, and the browser's own settings. By default nothing else |
 | What do the safety signals store? | Only the category, for example "force push", never the command text |
 | Can a log be shared safely for debugging? | The `--collect-fixture` command replaces text with placeholders and keeps field names, types, models and tool names. Field names remain, so skim before sharing |
@@ -526,7 +526,7 @@ State these before someone else finds them.
 10. **Log-format checking** sees changed fields and types, not changed meaning. Only 2.1.316 and 2.1.317 are verified.
 11. **Tested on Linux with Python 3.13.** Windows, macOS and other Python versions are untested.
 12. **Performance** was measured on a generated 273 MB history, not on a real very large user.
-13. **The local server has not been security reviewed** and has no login.
+13. **The local server has not been security reviewed** and has no login. It also falls back to a public CDN for the chart library if the bundled file is missing.
 14. **Figures changed on 2026-11-02 and 2026-11-03** because of the cost correction and the compaction fix. Earlier screenshots will not match.
 
 ---
